@@ -69,47 +69,39 @@ twin:
 - 阿里云百炼 API Key（ASR + TTS）
 - 任意 OpenAI 兼容模型（意图判定、纠错、回答）
 
-## 安装
+## 安装（dsh 方式）
 
-```powershell
-cd ~/.dsh/profiles/web
-pnpm add link:plugins/soulmirror
-# 在 profile package.json 的 dsh.profile.bundles 里加入 "soulmirror"
-dsh web
+```bash
+# 跟踪 main
+dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
+
+# 或固定到某个提交
+dsh plugin --profile web add "github:sibetlyf/soulmirror#<commit>"
 ```
 
-## 人格与记忆（借鉴 dsh-agentsoul）
+装完重启一次 `dsh web`，启动日志里会看到 `[soulmirror] 环境自检：…`。
 
-四层人格文件放在 `~/.dsh/soulmirror/persona/`，缺失自动补种子、**绝不覆盖**已有内容，改完即时生效：
+> Windows PowerShell 里 `#` 会被当成注释，ref 必须用引号包住（上面已加）。
+> 安装时会跑 `postinstall` 编译 mbridge；DSH 若提示允许构建脚本，选允许。
 
-```
-SOUL.md      如何判断、如何表达（最稳定）
-IDENTITY.md  我是谁、能做什么
-USER.md      对方长期信息：称呼、偏好、术语
-STATE.md     当前在推进什么
-```
+## 环境自动配置
 
-- 注入方式：每次调用模型前把四层拼成一段 system prompt 前缀（与会话无关，纯本地文件）
-- 长期记忆：`~/.dsh/soulmirror/memory.json`，记录"对方说的"与"我说的"；`soul_memory distill` 用 LLM 抽成
-  `persona / episodic / instruction` 三类，再回注到判定提示里
-
-工具：
+装完先跑一次：
 
 ```
-soul_persona { action: get|set, which: soul|identity|user|state, text }
-soul_memory  { action: recent|add|distill, text?, limit? }
+soul_setup { action: "auto" }
 ```
 
-## 会议工作区与会话（端侧可查看）
-
-一场会议 = 一个工作区目录 + 一个 DSH 会话：
+| 平台 | 自动处理 | 需要手动 |
+|---|---|---|
+| Windows | 用系统自带 `csc` 从 `tools/meeting-bridge.cs` 编译 `mbridge.exe` | .NET Framework 4.x（Win10/11 自带）；VB-CABLE 虚拟声卡 |
+| macOS | 检测 `ffmpeg` / `say` | `brew install ffmpeg`；BlackHole 做环回 |
+| Linux | 检测 `ffmpeg` / `parec` / `espeak-ng` | `sudo apt install ffmpeg pulseaudio-utils espeak-ng` |
 
 ```
-~/.dsh/soulmirror/workspace/<会议时间-标签>/      ← dsh 的 cwd，任务产物落这里
-~/.dsh/sessions/--...-soulmirror-workspace-<id>--/session.v4.jsonl.zstd
-                                                  ← DSH 会话记录，端侧会话列表可见
+soul_setup { action: "check" }   # 只看当前缺什么
+soul_setup { action: "build" }   # 强制重编 mbridge（Windows）
+soul_setup { action: "auto" }    # 能做的都做
 ```
 
-- 首次 `soul_task` 用 `--json` 事件拿到 `sessionId` 并记住，后续任务自动 `--session-id` 续接
-- 所以"这场会里模型说过什么"可以在 DSH 的会话页直接翻，不用看插件日志
-- `soul_session` 返回：当前会议 id、工作区路径、会话 id、转写行数、最近几个会议工作区
+密钥与模型都在「SoulMirror → 配置」里填，不用改代码。

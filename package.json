@@ -16,8 +16,12 @@
     "automation"
   ],
   "exports": {
-    ".": { "default": "./index.js" },
-    "./client": { "default": "./lib/client.js" },
+    ".": {
+      "default": "./index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
     "./package.json": "./package.json",
     "./cordis.patch.yml": "./cordis.patch.yml"
   },
@@ -42,6 +46,7 @@
     "index.js",
     "lib/",
     "tools/",
+    "scripts/",
     "cordis.patch.yml",
     "README.md"
   ],
@@ -51,6 +56,15 @@
     "react": ">=18.2.0 <19"
   },
   "peerDependenciesMeta": {
-    "react": { "optional": true }
+    "react": {
+      "optional": true
+    }
+  },
+  "scripts": {
+    "postinstall": "node scripts/postinstall.mjs",
+    "setup": "node scripts/postinstall.mjs"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

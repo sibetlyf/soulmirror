@@ -31,6 +31,7 @@ import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, PERSONA_FILES } from './lib/persona.js'
 import { MemoryStore } from './lib/memory.js'
+import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
 
 export const name = 'soulmirror'
 
@@ -1026,6 +1027,13 @@ export function apply(ctx, config) {
     },
   )
   if (cfg.autoWatch) lifecycle.start()
+
+  // 启动时做一次环境自检（只打日志，不阻塞）
+  try {
+    const env = detectEnv()
+    if (!env.ready) logger?.warn?.('[soulmirror] 环境待补：' + env.missing.join('、') + ' → 运行 soul_setup')
+    else logger?.info?.('[soulmirror] 环境自检：就绪（' + env.platform + '）')
+  } catch { /* ignore */ }
   // ── 实时纪要 ────────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_minutes',
@@ -1295,6 +1303,29 @@ export function apply(ctx, config) {
         }
       }
       return { ok: true, result: lines.join('\n') }
+    }),
+  }))
+
+  // ── 环境自检与配置 ─────────────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'soul_setup',
+    description: '检查并自动配置运行环境（Windows 编译 mbridge；macOS/Linux 提示 ffmpeg 等依赖）。装完先跑一次这个。',
+    parameters: {
+      action: { type: 'string', enum: ['check', 'build', 'auto'], required: true, description: 'check 只看 / build 编译 mbridge / auto 能自动做的都做' },
+    },
+    output: OUT(),
+    execute: wrap('soul_setup', async (a) => {
+      if (a.action === 'build') {
+        const r = buildBridge({ logger })
+        return { ok: r.ok, result: (r.ok ? '编译完成：' + r.path : '失败：' + (r.error || r.reason || '')) + '\n\n' + formatEnv(detectEnv()) }
+      }
+      if (a.action === 'auto') {
+        const r = await autoSetup({ logger })
+        const done = r.actions.length ? r.actions.map((x) => '- ' + x.what + '：' + (x.ok ? (x.skipped ? '已存在' : '完成') : '失败 ' + (x.error || ''))).join('\n') : '- 没有需要自动处理的项目'
+        return { ok: r.ready, result: done + '\n\n' + formatEnv(r.after) }
+      }
+      const env = detectEnv()
+      return { ok: env.ready, result: formatEnv(env) }
     }),
   }))
 
