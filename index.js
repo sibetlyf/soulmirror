@@ -141,7 +141,7 @@ export const Config = z.object({
   wakeWords: z.array(z.string()).default([]),
   /** 发言策略：observe 只记不说 / suggest 草稿待确认 / auto 自动播报。 */
   policy: z.union(['observe', 'suggest', 'auto']).default('suggest'),
-  /** 数据目录（空 = ~/.dsh/meeting-agent）。 */
+  /** 数据目录（空 = ~/.dsh/soulmirror）。 */
   dataDir: z.string().default(''),
   /** 保留音频切片（默认删）。 */
   keepAudio: z.boolean().default(false),
@@ -305,7 +305,7 @@ export function apply(ctx, config) {
   // webServer 可能在 apply 之后才挂载，轮询拿服务再注册
   const apiHandler = async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://local')
-    const sub = url.pathname.replace(/^\/api\/meeting-agent\/?/, '')
+    const sub = url.pathname.replace(/^\/api\/soulmirror\/?/, '')
     const json = (code, data) => {
       res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       res.end(JSON.stringify(data))
@@ -1383,7 +1383,7 @@ export function apply(ctx, config) {
 
   ctx.effect?.(() => () => { session.running = false }, 'meeting-agent: stop capture')
 
-  logger?.info?.('dsh-meeting-agent: 10 个工具已注册')
+  logger?.info?.('soulmirror: 全部工具已注册')
 }
 
 export default { name, inject, Config, apply }

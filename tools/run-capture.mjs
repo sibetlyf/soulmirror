@@ -7,7 +7,7 @@ const cfg = {
   devices: { capture: '', captureMode: 'loopback', speak: '', micName: '' },
   tts: { provider: 'sapi', voice: '', rate: 0 },
   asr: { provider: 'local', lang: 'zh', chunkSeconds: 6, whisperBin: '', whisperModel: '', baseUrl: '', model: '', apiKeyEnv: '', silenceRms: 0.004 },
-  dataDir: 'G:/dsh-test/dsh-meeting-agent/.asr-test/live',
+  dataDir: 'G:/dsh-test/soulmirror/.asr-test/live',
   keepAudio: false,
 }
 

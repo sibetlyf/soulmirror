@@ -3,7 +3,7 @@ const cfg = {
   devices: { capture: '', captureMode: 'loopback', speak: '', micName: '' },
   tts: { provider: 'sapi', voice: 'Microsoft Huihui Desktop', rate: 0 },
   asr: { provider: 'local', lang: 'zh', chunkSeconds: 6, whisperBin: '', whisperModel: '', baseUrl: '', model: '', apiKeyEnv: '' },
-  dataDir: 'G:/dsh-test/dsh-meeting-agent/.asr-test/session',
+  dataDir: 'G:/dsh-test/soulmirror/.asr-test/session',
   keepAudio: false,
 }
 const s = new MeetingSession(cfg, console)

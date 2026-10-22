@@ -29,7 +29,7 @@ import { homedir } from 'node:os'
 
 const here = dirname(dirname(fileURLToPath(import.meta.url)))
 const SAVED = (() => {
-  try { return JSON.parse(readFileSync(join(homedir(), '.dsh', 'meeting-agent', 'config.json'), 'utf8')) } catch { return {} }
+  try { return JSON.parse(readFileSync(join(homedir(), '.dsh', 'soulmirror', 'config.json'), 'utf8')) } catch { return {} }
 })()
 const cfgs = {
   speakDevice: process.env.MEETING_SPEAK_DEVICE || SAVED.devices?.speak || 'CABLE Input',
