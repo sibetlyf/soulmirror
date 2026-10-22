@@ -29,6 +29,8 @@ import { startDashScopeAsr } from './lib/dashscope.js'
 import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
+import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, PERSONA_FILES } from './lib/persona.js'
+import { MemoryStore } from './lib/memory.js'
 
 export const name = 'soulmirror'
 
@@ -802,6 +804,19 @@ export function apply(ctx, config) {
     }),
   }))
   // ── 后台大脑：实时听 → 判断 → 自动回复 ─────────────────────────────
+  // ── 人格与长期记忆（四层文件 + JSON 记忆库）──────────────────────────
+  const personaDir = join(CONFIG_DIR, 'persona')
+  const memory = new MemoryStore(join(CONFIG_DIR, 'memory.json'), { maxEntries: 2000 })
+  let personaAt = 0
+  let personaCache = ''
+  function currentPersona() {
+    const now = Date.now()
+    if (now - personaAt < 1500 && personaCache) return personaCache
+    try { personaCache = personaBlock(loadPersona(personaDir)) } catch { personaCache = '' }
+    personaAt = now
+    return personaCache
+  }
+
   const brain = new MeetingBrain({ minGapMs: cfg.brain.minGapMs, names: resolveWakeWords() })
 
   // ── ASR 纠错：用大模型把同音错字（大峰/杨峰 → 亚峰）改回来 ────────────
@@ -812,7 +827,7 @@ export function apply(ctx, config) {
   // 注意：必须在 completer 初始化之后再装配纠错器，否则会踩 TDZ
   session.correctText = (cfg.asr.llmCorrect === false || !completer)
     ? null
-    : makeCorrector({ names: fixNames, context: cfg.asr.context, completer })
+    : makeCorrector({ names: fixNames, context: (cfg.asr.context || '') + (currentPersona() ? '\n' + currentPersona().slice(0, 800) : ''), completer })
   const agent = { running: false, lastDecision: null, spoken: 0, errors: 0 }
 
   session.acceptLine = () => Date.now() >= brain.muteUntil
@@ -822,9 +837,10 @@ export function apply(ctx, config) {
       if (spk) item.speaker = spk
     } catch { /* ignore */ }
     if (!agent.running) return
+    try { memory.add({ role: 'user', text: item.text, session: session.dir }) } catch { /* ignore */ }
     const trig = brain.push(item)
     if (!trig) return
-    const d = await brain.decide(trig, { complete: completer, profile: cfg.brain.profile })
+    const d = await brain.decide(trig, { complete: completer, profile: cfg.brain.profile, persona: currentPersona(), memory: memory.digest(8) })
     agent.lastDecision = { at: new Date().toISOString(), trigger: trig.reason, ...d }
     logger?.info?.(`[soulmirror] 决策: ${d.speak} / ${d.confidence} / ${d.reason}`)
     if (!d.speak || !d.text) return
@@ -848,6 +864,7 @@ export function apply(ctx, config) {
       brain.muteUntil = Date.now() + 1500
       agent.spoken += 1
       addAssistantLine(d.text, d.reason)
+      try { memory.add({ role: 'assistant', text: d.text, session: session.dir }) } catch { /* ignore */ }
     } catch (e) {
       agent.errors += 1
       logger?.warn?.(`[soulmirror] 自动回复失败: ${e.message}`)
@@ -1160,6 +1177,66 @@ export function apply(ctx, config) {
         }
       }
       return { ok: true, result: lines.join('\n') }
+    }),
+  }))
+
+  // ── 人格与记忆管理工具 ─────────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'soul_persona',
+    description: '查看或修改四层人格文件（soul/identity/user/state）。改完即时生效，不需要重启。',
+    parameters: {
+      action: { type: 'string', enum: ['get', 'set'], required: true, description: 'get 查看全部 / set 写入某一份' },
+      which: { type: 'string', description: 'set 时必填：soul | identity | user | state' },
+      text: { type: 'string', description: 'set 时的完整正文' },
+    },
+    output: OUT(),
+    execute: wrap('soul_persona', async (a) => {
+      if (a.action === 'get') {
+        const parts = []
+        for (const key of Object.keys(PERSONA_FILES)) {
+          const body = readPersonaFile(personaDir, key)
+          parts.push('### ' + PERSONA_FILES[key] + '\n' + (body.trim() || '（空）'))
+        }
+        return { ok: true, result: parts.join('\n\n') }
+      }
+      const key = String(a.which || '').toLowerCase()
+      if (!PERSONA_FILES[key]) return { ok: false, result: 'which 必须是 soul / identity / user / state' }
+      const file = writePersonaFile(personaDir, key, a.text || '')
+      personaAt = 0
+      return { ok: true, result: '已写入 ' + file + '（' + String(a.text || '').length + ' 字）' }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'soul_memory',
+    description: '长期记忆：看最近记录、手动补一条、或触发一次 LLM 蒸馏（抽取对方偏好/事件/要求）。',
+    parameters: {
+      action: { type: 'string', enum: ['recent', 'add', 'distill'], required: true },
+      text: { type: 'string', description: 'add 时的内容' },
+      limit: { type: 'number', description: 'recent 条数 / distill 批量，默认 20' },
+    },
+    output: OUT(),
+    execute: wrap('soul_memory', async (a) => {
+      if (a.action === 'add') {
+        if (!a.text) return { ok: false, result: 'text 不能为空' }
+        memory.add({ role: 'user', text: a.text, kind: 'manual' })
+        return { ok: true, result: '已记录：' + a.text }
+      }
+      if (a.action === 'distill') {
+        if (!completer) return { ok: false, result: '没有可用模型，无法蒸馏' }
+        const r = await memory.distill(completer, { limit: a.limit || 40 })
+        if (r.skipped) return { ok: true, result: '样本不足（' + r.count + ' 条），先多聊几句' }
+        if (r.error) return { ok: false, result: '蒸馏失败：' + r.error }
+        const lines = []
+        for (const k of ['persona', 'episodic', 'instruction']) {
+          if (r[k] && r[k].length) lines.push(k + '：\n  - ' + r[k].join('\n  - '))
+        }
+        return { ok: true, result: lines.length ? lines.join('\n') : '没有抽到新信息' }
+      }
+      const list = memory.recent(a.limit || 20)
+      const digest = memory.digest(20)
+      const body = list.map((x) => (x.at || '').slice(11, 19) + ' [' + (x.role === 'assistant' ? '我' : '对方') + '] ' + x.text).join('\n')
+      return { ok: true, result: '最近记忆：\n' + (body || '（空）') + (digest ? '\n\n已蒸馏：\n' + digest : '') }
     }),
   }))
 

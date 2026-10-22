@@ -77,3 +77,25 @@ pnpm add link:plugins/soulmirror
 # 在 profile package.json 的 dsh.profile.bundles 里加入 "soulmirror"
 dsh web
 ```
+
+## 人格与记忆（借鉴 dsh-agentsoul）
+
+四层人格文件放在 `~/.dsh/soulmirror/persona/`，缺失自动补种子、**绝不覆盖**已有内容，改完即时生效：
+
+```
+SOUL.md      如何判断、如何表达（最稳定）
+IDENTITY.md  我是谁、能做什么
+USER.md      对方长期信息：称呼、偏好、术语
+STATE.md     当前在推进什么
+```
+
+- 注入方式：每次调用模型前把四层拼成一段 system prompt 前缀（与会话无关，纯本地文件）
+- 长期记忆：`~/.dsh/soulmirror/memory.json`，记录"对方说的"与"我说的"；`soul_memory distill` 用 LLM 抽成
+  `persona / episodic / instruction` 三类，再回注到判定提示里
+
+工具：
+
+```
+soul_persona { action: get|set, which: soul|identity|user|state, text }
+soul_memory  { action: recent|add|distill, text?, limit? }
+```
