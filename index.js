@@ -32,6 +32,7 @@ import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
 import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi } from './lib/knowledge.js'
 import { MemoryStore } from './lib/memory.js'
+import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
 import { detectVirtualAudio, installPlan, installVirtualAudio, formatVirtualAudio } from './lib/vcard.js'
 
@@ -909,31 +910,58 @@ export function apply(ctx, config) {
   // ── 人格与长期记忆（四层文件 + JSON 记忆库）──────────────────────────
   // ── 会议工作区：一场会议 = 一个目录 + 一个 DSH session ───────────────
   const workspaceRoot = join(CONFIG_DIR, 'workspace')
-  let meeting = { id: '', dir: '', dshSessionId: '', startedAt: '' }
+  let meeting = { id: '', dir: '', dshSessionId: '', startedAt: '', key: '', display: '' }
+  const sessionMap = new SessionMap(join(CONFIG_DIR, 'sessions.json'))
+  let meetingIdOverride = ''
 
-  function ensureMeetingWorkspace(label = '') {
+  /** 以会议身份为准：显式 id > 标题里的会议号 > 标题 */
+  function currentMeetingKey(title) {
+    const ttl = title || lifecycle?.lastWindowTitle || ''
+    return deriveMeetingKey({ explicit: meetingIdOverride, title: ttl })
+  }
+
+  function ensureMeetingWorkspace(label = '', title = '') {
     if (meeting.id) return meeting
-    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const ident = currentMeetingKey(title)
+    const key = ident.key || ('time:' + new Date().toISOString().slice(0, 16))
+    const prev = sessionMap.get(key)
+    const now = new Date().toISOString()
     meeting = {
-      id: stamp + (label ? '-' + label : ''),
-      dir: join(workspaceRoot, stamp + (label ? '-' + label : '')),
-      dshSessionId: '',
-      startedAt: new Date().toISOString(),
+      id: safeName(key),
+      key,
+      display: ident.display || label || key,
+      dir: join(workspaceRoot, safeName(key)),
+      dshSessionId: prev?.dshSessionId || '',
+      startedAt: now,
     }
     try { mkdirSync(meeting.dir, { recursive: true }) } catch { /* ignore */ }
+    sessionMap.set(key, {
+      dshSessionId: meeting.dshSessionId,
+      dir: meeting.dir,
+      title: meeting.display,
+      source: ident.source,
+      lastStarted: now,
+    })
     return meeting
   }
 
+  function resetMeetingWorkspace() {
+    meeting = { id: '', dir: '', dshSessionId: '', startedAt: '', key: '', display: '' }
+  }
+
   let sessionBootstrapping = null
-  /** 会议一开始就建一个 DSH 会话（跑一句极短任务拿 sessionId），让端侧立刻可见 */
-  async function ensureMeetingSession(reason = '') {
+  /** 会议一开始就建一个 DSH 会话（跑一句极短任务拿 sessionId），端侧立刻可见 */
+  async function ensureMeetingSession(reason = '', title = '') {
     if (!cfg.twin.enabled || cfg.twin.autoSession === false) return ''
-    const ws = ensureMeetingWorkspace()
-    if (ws.dshSessionId) return ws.dshSessionId
+    const ws = ensureMeetingWorkspace(reason, title)
+    if (ws.dshSessionId) {
+      try { sessionMap.set(ws.key || ws.id, { dshSessionId: ws.dshSessionId, dir: ws.dir, title: ws.display }) } catch { /* ignore */ }
+      return ws.dshSessionId
+    }
     if (sessionBootstrapping) return sessionBootstrapping
     sessionBootstrapping = (async () => {
       try {
-        const prompt = '会议开始' + (reason ? '（' + reason + '）' : '') + '。用一句话确认你已就位，不要展开。'
+        const prompt = '会议开始' + (ws.display ? '（' + ws.display + '）' : '') + '。用一句话确认你已就位，不要展开。'
         const r = await runDshTask(prompt, {
           profile: cfg.twin.profile,
           cwd: ws.dir,
@@ -941,7 +969,9 @@ export function apply(ctx, config) {
         })
         if (r.sessionId) {
           ws.dshSessionId = r.sessionId
-          logger?.info?.('[soulmirror] 已创建会议会话 ' + r.sessionId)
+          try { sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display }) } catch { /* ignore */ }
+          try { sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display }) } catch { /* ignore */ }
+          logger?.info?.('[soulmirror] 已创建会议会话 ' + r.sessionId + '（会议：' + (ws.key || ws.id) + '）')
           return r.sessionId
         }
         logger?.warn?.('[soulmirror] 建会话失败：' + String(r.error || '').slice(0, 80))
@@ -953,10 +983,6 @@ export function apply(ctx, config) {
       return ''
     })()
     return sessionBootstrapping
-  }
-
-  function resetMeetingWorkspace() {
-    meeting = { id: '', dir: '', dshSessionId: '', startedAt: '' }
   }
 
   const personaDir = join(CONFIG_DIR, 'persona')
@@ -1536,15 +1562,26 @@ export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'soul_session',
     description: '查看本场会议的工作区与 DSH 会话：目录、会话 id、转写行数、最近一次任务。端侧可据此在 DSH 会话列表里翻看模型回复。',
-    parameters: { limit: { type: 'number', description: '列出最近几个会议工作区，默认 8' } },
+    parameters: {
+      limit: { type: 'number', description: '列出最近几个会议工作区，默认 8' },
+      setMeetingId: { type: 'string', description: '手动指定会议号（如 206-275-219），相同会议号会复用同一 session' },
+    },
     output: OUT(),
     execute: wrap('soul_session', async (a) => {
+      if (a.setMeetingId !== undefined) meetingIdOverride = String(a.setMeetingId || '').trim()
       const ws = ensureMeetingWorkspace()
       const lines = []
-      lines.push('当前会议：' + (ws.id || '（还没开始）'))
+      lines.push('当前会议：' + (ws.id || '（还没开始）') + (ws.key && ws.key !== ws.id ? '（key=' + ws.key + '）' : ''))
+      const ident = currentMeetingKey()
+      lines.push('会议身份：' + (ident.display || '未知') + '（来源 ' + ident.source + '）')
       if (ws.dir) lines.push('工作区：' + ws.dir)
       lines.push('DSH 会话：' + (ws.dshSessionId || '（还没创建；会议开始时自动建，或调 soul_task 时建）'))
       if (session.dir) lines.push('转写目录：' + session.dir + '（' + session.transcript.length + ' 行）')
+      const mapped = sessionMap.list(Math.max(1, Math.min(a.limit || 8, 20)))
+      if (mapped.length) {
+        lines.push('会议 → 会话（持久化）：')
+        for (const m of mapped) lines.push('  ' + (m.title || m.key).slice(0, 40) + '  →  ' + (m.dshSessionId || '（无）').slice(0, 24))
+      }
       const limit = Math.max(1, Math.min(a.limit || 8, 30))
       let dirs = []
       try {

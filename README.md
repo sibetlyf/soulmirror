@@ -106,3 +106,21 @@ ensureMeetingSession()  →  dsh --profile headless --json "会议开始…用�
 - 关掉：`twin.autoSession: false`
 
 `soul_session` 会显示当前会议的会话 id；端侧打开 DSH 会话列表即可翻看模型每一轮输出。
+
+## 会议身份与会话复用
+
+**同一场会议 → 同一条 DSH 会话**。身份判定顺序：
+
+1. 显式会议号（`soul_session { setMeetingId: "206-275-219" }`）
+2. 窗口标题里出现的会议号（`206-275-219` / `206 275 219`）
+3. 窗口标题本身（会议主题）
+4. 时间戳（兜底）
+
+映射持久化在 `~/.dsh/soulmirror/sessions.json`：
+
+```json
+{ "206275219": { "dshSessionId": "session-…", "title": "…", "lastSeen": "…" } }
+```
+
+所以退出会议再进去、甚至重启 DSH，只要会议身份一样，`soul_task` 都续接原来那条会话。
+`soul_session` 会打印「会议身份 + 来源 + 映射表」。
