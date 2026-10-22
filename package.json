@@ -1,0 +1,56 @@
+{
+  "name": "soulmirror",
+  "version": "0.1.0",
+  "description": "SoulMirror 数字分身：接入会议/桌面音频，实时转写与纠错，用大模型理解意图，可在会上主动发言，也能把任务交给 DSH 执行并回来汇报",
+  "type": "module",
+  "main": "index.js",
+  "license": "MIT",
+  "keywords": [
+    "dsh",
+    "soulmirror",
+    "digital-twin",
+    "meeting",
+    "asr",
+    "tts",
+    "wemeet",
+    "automation"
+  ],
+  "exports": {
+    ".": { "default": "./index.js" },
+    "./client": { "default": "./lib/client.js" },
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-remotes",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-locale"
+      ]
+    },
+    "compatibility": {
+      "node": ">=22"
+    }
+  },
+  "files": [
+    "index.js",
+    "lib/",
+    "tools/",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <1.0.0",
+    "@deepseek-ai/schemastery": ">=3.18.2 <4",
+    "react": ">=18.2.0 <19"
+  },
+  "peerDependenciesMeta": {
+    "react": { "optional": true }
+  }
+}

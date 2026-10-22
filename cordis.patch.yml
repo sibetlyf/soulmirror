@@ -1,0 +1,8 @@
+# soulmirror bundle patch：把数字分身插件插入 profile。
+- insert:
+    - id: soulmirror
+      name: soulmirror
+      config:
+        enabled: true
+        windowTitle: 腾讯会议
+        policy: auto
