@@ -200,7 +200,7 @@ export function apply(ctx, config) {
       baseUrl: '', model: 'cosyvoice-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '', speed: 1, sampleRate: 16000,
       ...(config.tts || {}),
     },
-    brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: '会议助手', minGapMs: 8000, ...(config.brain || {}) },
+    brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, autoSession: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
     knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
@@ -287,7 +287,7 @@ export function apply(ctx, config) {
         apiKey: '',
         keySet: !!(cfg.brain.apiKey || process.env[cfg.brain.apiKeyEnv || 'BRAIN_API_KEY']),
         keySource: cfg.brain.apiKey ? 'config' : (process.env[cfg.brain.apiKeyEnv || 'BRAIN_API_KEY'] ? 'env' : 'none'),
-        profile: cfg.brain.profile,
+        profile: cfg.brain.profile || 'SoulMirror',
         minGapMs: cfg.brain.minGapMs,
       },
       apps: cfg.apps || [],
@@ -1037,9 +1037,19 @@ export function apply(ctx, config) {
     try { memory.add({ role: 'user', text: item.text, session: session.dir }) } catch { /* ignore */ }
     const trig = brain.push(item)
     if (!trig) return
-    const d = await brain.decide(trig, { complete: completer, profile: cfg.brain.profile, persona: currentPersona(), memory: memory.digest(8) })
+    const d = await brain.decide(trig, { complete: completer, profile: cfg.brain.profile || 'SoulMirror', persona: currentPersona(), memory: memory.digest(8) })
     agent.lastDecision = { at: new Date().toISOString(), trigger: trig.reason, ...d }
     logger?.info?.(`[soulmirror] 决策: ${d.speak} / ${d.confidence} / ${d.reason}`)
+    // 兜底：问自身环境/外部事实但模型没给 task 时，强制委派
+    if (!d.task && cfg.twin.enabled && cfg.twin.autoDelegate) {
+      const FACT_RE = /插件|工具|能力|配置|安装|版本|几点|时间|天气|日程|汇率|股价|新闻|查一下|看一下|帮我查|告诉我/
+      const SELF_RE = /你(自己|这边|现在|安装了|有哪些|能|会)|你的(插件|工具|能力|配置)/
+      if (FACT_RE.test(item.text) && (SELF_RE.test(item.text) || /帮我|看一下|查一下|告诉我/.test(item.text))) {
+        d.task = item.text
+        if (!d.text || /记录|待命|随时/.test(d.text)) d.text = '我去查一下，稍等。'
+        logger?.info?.('[soulmirror] 兜底委派：' + item.text.slice(0, 40))
+      }
+    }
     if (d.task && cfg.twin.enabled && cfg.twin.autoDelegate) {
       // 不阻塞会议：后台跑，跑完再汇报
       startTaskInBackground(d.task).catch((e) => logger?.warn?.('[soulmirror] 任务异常: ' + e.message))
