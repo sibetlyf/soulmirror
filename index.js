@@ -116,6 +116,8 @@ export const Config = z.object({
     apiKey: z.string().default(''),
     profile: z.string().default('会议助手'),
     minGapMs: z.number().default(8000),
+    /** rules = 只靠关键词触发；llm = 每句都交给模型判断（默认，更准但更费） */
+    gate: z.string().default('llm'),
   }),
   /** 支持的会议软件：按进程名识别，插件自动选正在运行的那个。 */
   apps: z.array(z.object({
@@ -201,7 +203,7 @@ export function apply(ctx, config) {
       baseUrl: '', model: 'cosyvoice-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '', speed: 1, sampleRate: 16000,
       ...(config.tts || {}),
     },
-    brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, ...(config.brain || {}) },
+    brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, gate: 'llm', ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, autoSession: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
     knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
@@ -519,6 +521,8 @@ export function apply(ctx, config) {
       } catch { /* ignore */ }
     }
     if (r.ok && cfg.twin.reportSpeak) {
+      // 先等会议安静：有人正在说话就等他说完，再给简要总结
+      await waitQuiet(2500, 180000)
       const brief = await summarizeTask(clean, item.output)
       try {
         addAssistantLine(brief, '任务汇报')
@@ -1099,36 +1103,36 @@ export function apply(ctx, config) {
     : makeCorrector({ names: fixNames, context: (cfg.asr.context || '') + (currentPersona() ? '\n' + currentPersona().slice(0, 800) : ''), completer })
   const agent = { running: false, lastDecision: null, spoken: 0, errors: 0 }
 
-  session.acceptLine = () => Date.now() >= brain.muteUntil
-  session.onLine = async (item) => {
-    try {
-      const spk = await speakerNow()
-      if (spk) item.speaker = spk
-    } catch { /* ignore */ }
-    if (!agent.running) return
-    try { memory.add({ role: 'user', text: item.text, session: session.dir }) } catch { /* ignore */ }
-    const trig = brain.push(item)
-    if (!trig) return
-    const d = await brain.decide(trig, { complete: completer, profile: cfg.brain.profile || 'SoulMirror', persona: currentPersona(), memory: memory.digest(8) })
-    agent.lastDecision = { at: new Date().toISOString(), trigger: trig.reason, ...d }
-    logger?.info?.(`[soulmirror] 决策: ${d.speak} / ${d.confidence} / ${d.reason}`)
-    // 兜底：问自身环境/外部事实但模型没给 task 时，强制委派
-    if (!d.task && cfg.twin.enabled && cfg.twin.autoDelegate) {
-      const FACT_RE = /插件|工具|能力|配置|安装|版本|几点|时间|天气|日程|汇率|股价|新闻|查一下|看一下|帮我查|告诉我/
-      const SELF_RE = /你(自己|这边|现在|安装了|有哪些|能|会)|你的(插件|工具|能力|配置)/
-      if (FACT_RE.test(item.text) && (SELF_RE.test(item.text) || /帮我|看一下|查一下|告诉我/.test(item.text))) {
-        d.task = item.text
-        if (!d.text || /记录|待命|随时/.test(d.text)) d.text = '我去查一下，稍等。'
-        logger?.info?.('[soulmirror] 兜底委派：' + item.text.slice(0, 40))
-      }
+  // ── 谁在说话：用于「有人说话就等他说完」 ─────────────────────────────
+  let lastSpeechAt = 0
+  function noteSpeech() { lastSpeechAt = Date.now() }
+  function speechBusy(quietMs = 2500) {
+    return Date.now() - lastSpeechAt < quietMs
+  }
+  /** 等会议安静下来再说；最多等 maxWaitMs，超时照说 */
+  async function waitQuiet(quietMs = 2500, maxWaitMs = 180000) {
+    const t0 = Date.now()
+    while (speechBusy(quietMs) && Date.now() - t0 < maxWaitMs) {
+      await new Promise((r) => setTimeout(r, 500))
     }
-    if (d.task && cfg.twin.enabled && cfg.twin.autoDelegate) {
-      // 不阻塞会议：后台跑，跑完再汇报
+    const waited = Date.now() - t0
+    if (waited > 800) logger?.info?.('[soulmirror] 等安静 ' + Math.round(waited / 1000) + 's 后播报')
+    return waited
+  }
+
+  session.acceptLine = () => Date.now() >= brain.muteUntil
+  /** 决策落地：先表态 → 后台跑任务 → 说完再汇报 */
+  async function applyDecision(d, item) {
+    agent.lastDecision = { at: new Date().toISOString(), text: (item.text || "").slice(0, 60), ...d }
+    logger?.info?.('[soulmirror] 决策: speak=' + d.speak + " task=" + (d.task ? "有" : "无") + " / " + d.reason)
+    const wantTask = !!(d.task && cfg.twin.enabled && cfg.twin.autoDelegate)
+    if (wantTask) {
       startTaskInBackground(d.task).catch((e) => logger?.warn?.('[soulmirror] 任务异常: ' + e.message))
     }
     if (!d.speak || !d.text) return
     if (cfg.policy !== 'auto') return
-    brain.markSpoken(d.text)  // 先开静默窗口，再播，避免把自己的声音当成输入
+    await waitQuiet(2500, 120000)
+    brain.markSpoken(d.text)
     let unmutedByUs = false
     if (cfg.devices.speak && mic.state !== 'unmuted') {
       try {
@@ -1150,7 +1154,7 @@ export function apply(ctx, config) {
       try { memory.add({ role: 'assistant', text: d.text, session: session.dir }) } catch { /* ignore */ }
     } catch (e) {
       agent.errors += 1
-      logger?.warn?.(`[soulmirror] 自动回复失败: ${e.message}`)
+      logger?.warn?.('[soulmirror] 自动回复失败: ' + e.message)
     } finally {
       if (unmutedByUs) {
         try {
@@ -1161,6 +1165,31 @@ export function apply(ctx, config) {
     }
   }
 
+  session.onLine = async (item) => {
+    noteSpeech()
+    try {
+      const spk = await speakerNow()
+      if (spk) item.speaker = spk
+    } catch { /* ignore */ }
+    if (!agent.running) return
+    try { memory.add({ role: 'user', text: item.text, session: session.dir }) } catch { /* ignore */ }
+    const trig = brain.push(item)
+    if (!trig && cfg.brain.gate !== 'llm') return
+    // gate=llm：不靠关键字，整句+上下文交给模型判断要不要接
+    const trigger = trig || { kind: 'context', reason: '新转写', line: item, confidence: 0.5 }
+    if (!trig) logger?.info?.('[soulmirror] 规则未命中，交给模型判定')
+    const d = await brain.decide(trigger, { complete: completer, profile: cfg.brain.profile || 'SoulMirror', persona: currentPersona(), memory: memory.digest(8) })
+    // 兜底：问自身环境/外部事实但模型没给 task 时，强制委派
+    if (!d.task && cfg.twin.enabled && cfg.twin.autoDelegate) {
+      const FACT_RE = /插件|工具|能力|配置|安装|版本|几点|时间|天气|日程|汇率|股价|新闻|查一下|看一下|帮我查|告诉我/
+      const SELF_RE = /你(自己|这边|现在|安装了|有哪些|能|会)|你的(插件|工具|能力|配置)/
+      if (FACT_RE.test(item.text) && (SELF_RE.test(item.text) || /帮我|看一下|查一下|告诉我/.test(item.text))) {
+        d.task = item.text
+        if (!d.text) d.text = '收到，我去查，稍后告诉你。'
+      }
+    }
+    await applyDecision(d, item)
+  }
   ctx.tools.register(defineTool({
     name: 'meeting_agent_start',
     description: '开启后台会议大脑：持续采集会议声音 → 转写 → 判断是否该插话 → policy=auto 时自动用 TTS 回复（流式）。',
