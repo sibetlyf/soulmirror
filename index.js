@@ -1008,7 +1008,16 @@ export function apply(ctx, config) {
           logger?.info?.('[soulmirror] 已建会话（宿主内）' + ws.dshSessionId)
         }
         const r = await promptSession(ctx, ws.dshSessionId, prompt, { timeoutMs, onEvent })
-        return { ok: r.ok, text: r.text, error: r.error, sessionId: ws.dshSessionId, via: 'in-process' }
+        return {
+          ok: r.ok,
+          text: r.text,
+          error: r.error,
+          sessionId: ws.dshSessionId,
+          via: 'in-process',
+          outcome: r.outcome || null,
+          events: r.events || [],
+          tools: r.tools || [],
+        }
       } catch (e) {
         logger?.warn?.('[soulmirror] 宿主内会话失败，回退 headless：' + e.message)
       }
