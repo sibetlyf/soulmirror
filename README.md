@@ -170,3 +170,51 @@ brain:
 | 这个模块下周三上线，排期紧 | 不插话 |
 | 亚峰帮我查一下今晚的交通 | 回复 + 派任务 |
 
+## 活数据（Living Data）
+
+数据不是死的：记忆会呼吸、信念会进化、情绪聚成心像地形。
+
+### 记忆会呼吸
+
+每条记忆有 `vitality`（0~1），按半衰期指数衰减（默认 3 天）：
+
+```
+刚记下  → bloom（绽放）
+>0.15   → awake（清醒）
+<0.15   → sleep（沉睡）
+被想起  → vitality +0.3，沉睡的会重新绽放
+```
+
+### 信念会进化
+
+```
+seed(0.3) → sprout(0.35) → sapling(0.6) → tree(0.85) → dead(≤0.02)
+```
+
+反复强化会长成参天大树，长期被反驳会枯萎死亡（保留墓碑，不删除）。
+
+### 情绪成地形
+
+情绪事件按 1.5 天半衰期聚合，8×8 网格按主导情绪着色，形成心像地图：
+
+| 情绪 | 地形 |
+|---|---|
+| joy | 光原 |
+| sadness | 幽谷 |
+| anger | 火山 |
+| fear | 迷雾 |
+| calm | 静湖 |
+| surprise | 风原 |
+
+「情绪议会」是最近 24 小时各情绪的加权票数。活的信念在快照里呈现为建筑。
+
+### 工具
+
+```
+soul_world   { breathe? }         # 看内在宇宙；breathe 触发一次衰减/退化
+soul_belief  { action, ... }      # list | seed | reinforce | weaken | evolve
+soul_goal    { action, ... }      # add | list | run（目标驱动任务代理）
+```
+
+数据目录：`~/.dsh/soulmirror/living/`（`memory-living.json` / `beliefs.json` / `emotions.json`），
+`/status` 的 `world` 字段也会带回快照，端侧可看。

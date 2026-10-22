@@ -32,6 +32,7 @@ import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
 import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi } from './lib/knowledge.js'
 import { MemoryStore } from './lib/memory.js'
+import { LivingWorld } from './lib/living.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
 import { getController, createSession, promptSession } from './lib/dsh-session.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
@@ -349,6 +350,7 @@ export function apply(ctx, config) {
           transcript: session.transcript.slice(-60),
           tasks: (agent.tasks || []).slice(0, 10),
           pendingKnowledge: (agent.pendingKnowledge || []).slice(0, 5),
+          world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
           meeting: {
             app: (cfg.apps || []).find((x) => x.name === cfg.activeApp)?.name || cfg.activeApp || '全部',
@@ -1080,6 +1082,7 @@ export function apply(ctx, config) {
 
   const personaDir = join(CONFIG_DIR, 'persona')
   const memory = new MemoryStore(join(CONFIG_DIR, 'memory.json'), { maxEntries: 2000 })
+  const living = new LivingWorld(join(CONFIG_DIR, 'living'))
   let personaAt = 0
   let personaCache = ''
   function currentPersona() {
@@ -1173,6 +1176,7 @@ export function apply(ctx, config) {
     } catch { /* ignore */ }
     if (!agent.running) return
     try { memory.add({ role: 'user', text: item.text, session: session.dir }) } catch { /* ignore */ }
+    try { living.absorb(item.text, { speaker: item.speaker || '', source: 'meeting' }) } catch { /* ignore */ }
     const trig = brain.push(item)
     if (!trig && cfg.brain.gate !== 'llm') return
     // gate=llm：不靠关键字，整句+上下文交给模型判断要不要接
@@ -1784,6 +1788,82 @@ export function apply(ctx, config) {
     }),
   }))
 
+  // ── 活数据：心像世界 / 信念 / 目标 ───────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'soul_world',
+    description: '看分身的内在宇宙：记忆活力分布、信念树木、情绪议会、心像地形。可触发一次「呼吸」（记忆衰减 + 信念退化）。',
+    parameters: { breathe: { type: 'boolean', description: '是否执行一次呼吸（衰减/退化）' } },
+    output: OUT(),
+    execute: wrap('soul_world', async (a) => {
+      let acted = ''
+      if (a.breathe) {
+        const r = living.breathe()
+        acted = '呼吸：沉睡 ' + r.decay.slept + ' 条记忆，枯萎 ' + r.wither.died + ' 条信念\n\n'
+      }
+      const s = living.snapshot()
+      const lines = [acted + '记忆：' + s.memory.total + ' 条（绽放 ' + (s.memory.bloom || 0) + ' / 清醒 ' + (s.memory.awake || 0) + ' / 沉睡 ' + (s.memory.sleep || 0) + '），平均活力 ' + s.memory.avgVitality]
+      lines.push('信念：' + ['seed', 'sprout', 'sapling', 'tree'].map((k) => k + ' ' + (s.beliefs[k] || 0)).join(' · ') + ' · dead ' + (s.beliefs.dead || 0))
+      if (s.council.length) lines.push('情绪议会：' + s.council.slice(0, 4).map((c) => c.emotion + '(' + c.biome + ' ' + c.score + ')').join(' · '))
+      lines.push('心像主导地形：' + s.terrain.dominant)
+      if (s.buildings.length) lines.push('信念建筑：\n' + s.buildings.slice(0, 6).map((b) => '  [' + b.stage + ' ' + b.height + '] ' + b.name).join('\n'))
+      if (s.topMemories.length) lines.push('最鲜活的记忆：\n' + s.topMemories.map((m) => '  [' + m.stage + ' ' + m.vitality + '] ' + m.text.slice(0, 40)).join('\n'))
+      return { ok: true, result: lines.join('\n') }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'soul_belief',
+    description: '信念系统：从种子长成大树，或走向死亡。可列出、种下、强化、反驳、演化。',
+    parameters: {
+      action: { type: 'string', enum: ['list', 'seed', 'reinforce', 'weaken', 'evolve'], required: true },
+      statement: { type: 'string', description: 'seed 时的信念内容' },
+      id: { type: 'string', description: 'reinforce / weaken 的信念 id' },
+      delta: { type: 'number', description: '强化/反驳的强度，默认 0.2 / 0.25' },
+    },
+    output: OUT(),
+    execute: wrap('soul_belief', async (a) => {
+      if (a.action === 'seed') return { ok: true, result: '已种下：' + (living.beliefs.seed(a.statement, { source: 'manual' }) || {})?.statement }
+      if (a.action === 'reinforce') return { ok: true, result: JSON.stringify(living.beliefs.reinforce(a.id, 'manual', a.delta || 0.2) || 'not found') }
+      if (a.action === 'weaken') return { ok: true, result: JSON.stringify(living.beliefs.weaken(a.id, 'manual', a.delta || 0.25) || 'not found') }
+      if (a.action === 'evolve') return { ok: true, result: JSON.stringify(living.beliefs.evolve()) }
+      const list = living.beliefs.beliefs.map((b) => '[' + b.stage + ' ' + b.strength.toFixed(2) + '] ' + b.id + ' ' + b.statement)
+      return { ok: true, result: list.length ? list.join('\n') : '（还没有信念，试试 seed）' }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'soul_goal',
+    description: '目标驱动任务代理：登记目标、列出目标、或让分身基于目标立刻执行一次（交给会议会话里的 DSH）。',
+    parameters: {
+      action: { type: 'string', enum: ['add', 'list', 'run'], required: true },
+      goal: { type: 'string', description: 'add 时的目标描述' },
+      id: { type: 'string', description: 'run 时的目标 id' },
+    },
+    output: OUT(),
+    execute: wrap('soul_goal', async (a) => {
+      const file = join(CONFIG_DIR, 'goals.json')
+      const load = () => { try { return JSON.parse(readFileSync(file, 'utf8')) } catch { return [] } }
+      const save = (rows) => { try { mkdirSync(CONFIG_DIR, { recursive: true }); writeFileSync(file, JSON.stringify(rows, null, 1), 'utf8') } catch { /* ignore */ } }
+      const goals = load()
+      if (a.action === 'add') {
+        const goal = String(a.goal || '').trim()
+        if (!goal) return { ok: false, result: 'goal 不能为空' }
+        const row = { id: 'goal-' + Math.random().toString(36).slice(2, 8), goal, status: 'active', at: new Date().toISOString() }
+        goals.push(row); save(goals)
+        return { ok: true, result: '已登记目标 ' + row.id + '：' + goal }
+      }
+      if (a.action === 'run') {
+        const row = goals.find((g) => g.id === a.id)
+        if (!row) return { ok: false, result: '没有这个目标：' + a.id }
+        const prompt = '按这个目标开始推进，能自己做的直接做，做不了就说明缺什么：' + row.goal
+        startTaskInBackground(prompt).catch(() => {})
+        row.status = 'running'; row.lastRunAt = new Date().toISOString(); save(goals)
+        return { ok: true, result: '已开始推进目标 ' + row.id + '，完成后会在会议里汇报' }
+      }
+      const list = goals.map((g) => '[' + g.status + '] ' + g.id + ' ' + g.goal)
+      return { ok: true, result: list.length ? list.join('\n') : '（还没有目标，试试 add）' }
+    }),
+  }))
   // ── 自检 ────────────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_selftest',
