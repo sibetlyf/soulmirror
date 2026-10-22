@@ -208,7 +208,7 @@ export function apply(ctx, config) {
       ? config.apps
       : [
         { name: '腾讯会议', proc: 'wemeetapp', title: '腾讯会议', classes: 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView|BaseDialog' },
-        { name: '移动会议', proc: '', title: '移动会议', classes: '' },
+        { name: '移动会议', proc: 'CloudVideo', title: '移动会议', classes: 'VideoMainWindow|MeetingMainWindow|BaseDialog' },
       ],
     asr: {
       provider: 'dashscope', baseUrl: '', model: 'whisper-1', dashscopeModel: 'paraformer-realtime-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '',
@@ -557,7 +557,19 @@ export function apply(ctx, config) {
   function detectApp(wins) {
     for (const app of activeApps()) {
       if (!app.proc) continue
-      if (wins.some((w) => w.proc === app.proc)) return app
+      const proc = (app.proc || '').toLowerCase()
+      const procHit = proc && wins.some((w) => (w.proc || '').toLowerCase() === proc)
+      if (procHit) return app
+      // proc 没配或对不上时，用窗口标题/类名兜底（移动会议这类自定义客户端常见）
+      const nameHit = wins.find((w) => {
+        const title = (w.title || '')
+        const cls = (w.cls || '')
+        return (app.name && title.includes(app.name)) || (app.title && title.includes(app.title)) || (app.name && cls.includes(app.name))
+      })
+      if (nameHit) {
+        app.proc = nameHit.proc
+        return app
+      }
     }
     return null
   }
@@ -923,6 +935,11 @@ export function apply(ctx, config) {
   function ensureMeetingWorkspace(label = '', title = '') {
     if (meeting.id) return meeting
     const ident = currentMeetingKey(title)
+    const winTitle = title || lifecycle?.lastWindowTitle || ''
+    const hit = (cfg.apps || []).find((x) => x.name && winTitle.includes(x.name))
+      || (cfg.apps || []).find((x) => x.title && winTitle.includes(x.title))
+    const appPrefix = (cfg.activeApp || (hit && hit.name) || '').trim()
+    if (appPrefix && ident.key && !ident.key.includes(':')) ident.key = appPrefix + ':' + ident.key
     const key = ident.key || ('time:' + new Date().toISOString().slice(0, 16))
     const prev = sessionMap.get(key)
     const now = new Date().toISOString()
