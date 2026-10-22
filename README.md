@@ -99,3 +99,17 @@ STATE.md     当前在推进什么
 soul_persona { action: get|set, which: soul|identity|user|state, text }
 soul_memory  { action: recent|add|distill, text?, limit? }
 ```
+
+## 会议工作区与会话（端侧可查看）
+
+一场会议 = 一个工作区目录 + 一个 DSH 会话：
+
+```
+~/.dsh/soulmirror/workspace/<会议时间-标签>/      ← dsh 的 cwd，任务产物落这里
+~/.dsh/sessions/--...-soulmirror-workspace-<id>--/session.v4.jsonl.zstd
+                                                  ← DSH 会话记录，端侧会话列表可见
+```
+
+- 首次 `soul_task` 用 `--json` 事件拿到 `sessionId` 并记住，后续任务自动 `--session-id` 续接
+- 所以"这场会里模型说过什么"可以在 DSH 的会话页直接翻，不用看插件日志
+- `soul_session` 返回：当前会议 id、工作区路径、会话 id、转写行数、最近几个会议工作区

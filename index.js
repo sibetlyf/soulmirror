@@ -805,6 +805,27 @@ export function apply(ctx, config) {
   }))
   // ── 后台大脑：实时听 → 判断 → 自动回复 ─────────────────────────────
   // ── 人格与长期记忆（四层文件 + JSON 记忆库）──────────────────────────
+  // ── 会议工作区：一场会议 = 一个目录 + 一个 DSH session ───────────────
+  const workspaceRoot = join(CONFIG_DIR, 'workspace')
+  let meeting = { id: '', dir: '', dshSessionId: '', startedAt: '' }
+
+  function ensureMeetingWorkspace(label = '') {
+    if (meeting.id) return meeting
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    meeting = {
+      id: stamp + (label ? '-' + label : ''),
+      dir: join(workspaceRoot, stamp + (label ? '-' + label : '')),
+      dshSessionId: '',
+      startedAt: new Date().toISOString(),
+    }
+    try { mkdirSync(meeting.dir, { recursive: true }) } catch { /* ignore */ }
+    return meeting
+  }
+
+  function resetMeetingWorkspace() {
+    meeting = { id: '', dir: '', dshSessionId: '', startedAt: '' }
+  }
+
   const personaDir = join(CONFIG_DIR, 'persona')
   const memory = new MemoryStore(join(CONFIG_DIR, 'memory.json'), { maxEntries: 2000 })
   let personaAt = 0
@@ -1107,12 +1128,17 @@ export function apply(ctx, config) {
     execute: wrap('soul_task', async (a) => {
       if (!cfg.twin.enabled) return { ok: false, result: '数字分身未启用（config.twin.enabled = false）' }
       const t0 = Date.now()
+      const ws = ensureMeetingWorkspace()
       const r = await runDshTask(a.prompt, {
         profile: cfg.twin.profile,
+        cwd: ws.dir,
+        sessionId: ws.dshSessionId || undefined,
         timeoutMs: a.timeoutMs || cfg.twin.timeoutMs,
+        onSession: (sid) => { ws.dshSessionId = sid },
       })
+      if (r.sessionId) ws.dshSessionId = r.sessionId
       const ms = Date.now() - t0
-      const task = { at: new Date().toISOString(), prompt: a.prompt, ok: r.ok, ms, output: (r.output || '').slice(0, 1200) }
+      const task = { at: new Date().toISOString(), prompt: a.prompt, ok: r.ok, ms, sessionId: r.sessionId || '', output: (r.output || '').slice(0, 1200) }
       agent.tasks = [task, ...(agent.tasks || [])].slice(0, 20)
       if (!r.ok) return { ok: false, result: '任务失败（' + ms + 'ms）：' + (r.error || '') }
       let spoke = ''
@@ -1237,6 +1263,38 @@ export function apply(ctx, config) {
       const digest = memory.digest(20)
       const body = list.map((x) => (x.at || '').slice(11, 19) + ' [' + (x.role === 'assistant' ? '我' : '对方') + '] ' + x.text).join('\n')
       return { ok: true, result: '最近记忆：\n' + (body || '（空）') + (digest ? '\n\n已蒸馏：\n' + digest : '') }
+    }),
+  }))
+
+  // ── 会议工作区 / 会话 ───────────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'soul_session',
+    description: '查看本场会议的工作区与 DSH 会话：目录、会话 id、转写行数、最近一次任务。端侧可据此在 DSH 会话列表里翻看模型回复。',
+    parameters: { limit: { type: 'number', description: '列出最近几个会议工作区，默认 8' } },
+    output: OUT(),
+    execute: wrap('soul_session', async (a) => {
+      const ws = ensureMeetingWorkspace()
+      const lines = []
+      lines.push('当前会议：' + (ws.id || '（还没开始）'))
+      if (ws.dir) lines.push('工作区：' + ws.dir)
+      lines.push('DSH 会话：' + (ws.dshSessionId || '（还没跑过任务，首次 soul_task 时创建）'))
+      if (session.dir) lines.push('转写目录：' + session.dir + '（' + session.transcript.length + ' 行）')
+      const limit = Math.max(1, Math.min(a.limit || 8, 30))
+      let dirs = []
+      try {
+        dirs = (await import('node:fs')).readdirSync(workspaceRoot, { withFileTypes: true })
+          .filter((d) => d.isDirectory()).map((d) => d.name).sort().reverse().slice(0, limit)
+      } catch { /* 还没有工作区 */ }
+      if (dirs.length) {
+        lines.push('最近会议工作区：')
+        for (const d of dirs) {
+          const full = join(workspaceRoot, d)
+          let n = 0
+          try { n = (await import('node:fs')).readdirSync(full).length } catch { /* ignore */ }
+          lines.push('  ' + d + '  (' + n + ' 个文件)')
+        }
+      }
+      return { ok: true, result: lines.join('\n') }
     }),
   }))
 
