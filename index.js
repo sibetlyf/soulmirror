@@ -33,6 +33,7 @@ import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPer
 import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi } from './lib/knowledge.js'
 import { MemoryStore } from './lib/memory.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
+import { getController, createSession, promptSession } from './lib/dsh-session.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
 import { detectVirtualAudio, installPlan, installVirtualAudio, formatVirtualAudio } from './lib/vcard.js'
 
@@ -481,13 +482,13 @@ export function apply(ctx, config) {
     agent.tasks = [item, ...(agent.tasks || [])].slice(0, 20)
     const t0 = Date.now()
     logger?.info?.('[soulmirror] 开始执行任务：' + clean.slice(0, 60))
-    const r = await runDshTask(clean, {
-      profile: cfg.twin.profile,
-      cwd: ws.dir,
-      sessionId: ws.dshSessionId || undefined,
+    const r = await runInMeetingSession(clean, {
       timeoutMs: cfg.twin.timeoutMs,
-      onSession: (sid) => { ws.dshSessionId = sid; item.sessionId = sid },
+      onEvent: (ev) => {
+        if (ev.stage === 'tool') item.lastTool = ev.name
+      },
     }).catch((e) => ({ ok: false, error: e.message }))
+    if (r.sessionId) item.sessionId = r.sessionId
 
     item.ms = Date.now() - t0
     item.ok = !!r.ok
@@ -968,34 +969,75 @@ export function apply(ctx, config) {
 
   let sessionBootstrapping = null
   /** 会议一开始就建一个 DSH 会话（跑一句极短任务拿 sessionId），端侧立刻可见 */
-  async function ensureMeetingSession(reason = '', title = '') {
-    if (!cfg.twin.enabled || cfg.twin.autoSession === false) return ''
-    const ws = ensureMeetingWorkspace(reason, title)
-    if (ws.dshSessionId) {
-      try { sessionMap.set(ws.key || ws.id, { dshSessionId: ws.dshSessionId, dir: ws.dir, title: ws.display }) } catch { /* ignore */ }
-      return ws.dshSessionId
+  /**
+   * 在会议会话里跑一轮：优先用宿主内的 sessionController（会话在界面上可见），
+   * 拿不到再回退到 headless 子进程。
+   */
+  async function runInMeetingSession(prompt, { title, timeoutMs, onEvent } = {}) {
+    const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
+    const controller = getController(ctx)
+    if (controller) {
+      try {
+        if (!ws.dshSessionId) {
+          ws.dshSessionId = await createSession(ctx, {
+            cwd: ws.dir,
+            title: title || (ws.display ? '会议 · ' + ws.display : '会议'),
+          })
+          sessionMap.set(ws.key || ws.id, { dshSessionId: ws.dshSessionId, dir: ws.dir, title: ws.display })
+          logger?.info?.('[soulmirror] 已建会话（宿主内）' + ws.dshSessionId)
+        }
+        const r = await promptSession(ctx, ws.dshSessionId, prompt, { timeoutMs, onEvent })
+        return { ok: r.ok, text: r.text, error: r.error, sessionId: ws.dshSessionId, via: 'in-process' }
+      } catch (e) {
+        logger?.warn?.('[soulmirror] 宿主内会话失败，回退 headless：' + e.message)
+      }
     }
+    const r = await runDshTask(prompt, { profile: cfg.twin.profile, cwd: ws.dir, sessionId: ws.dshSessionId || undefined, timeoutMs })
+    if (r.sessionId) {
+      ws.dshSessionId = r.sessionId
+      sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display })
+    }
+    return { ok: r.ok, text: r.text, error: r.error, sessionId: r.sessionId, via: 'headless' }
+  }
+
+  /** 会议一开始就建一个 DSH 会话（宿主内创建，界面立即可见，不花模型调用） */
+  async function ensureMeetingSession(reason = '', title = '') {
+    if (cfg.twin.enabled === false) return ''
+    const ws = ensureMeetingWorkspace(reason, title)
+    if (ws.dshSessionId) return ws.dshSessionId
     if (sessionBootstrapping) return sessionBootstrapping
     sessionBootstrapping = (async () => {
       try {
-        const prompt = '会议开始' + (ws.display ? '（' + ws.display + '）' : '') + '。用一句话确认你已就位，不要展开。'
-        const r = await runDshTask(prompt, {
+        const controller = getController(ctx)
+        if (controller) {
+          ws.dshSessionId = await createSession(ctx, {
+            cwd: ws.dir,
+            title: ws.display ? '会议 · ' + ws.display : '会议',
+          })
+          sessionMap.set(ws.key || ws.id, { dshSessionId: ws.dshSessionId, dir: ws.dir, title: ws.display })
+          logger?.info?.('[soulmirror] 已创建会议会话（宿主内）' + ws.dshSessionId)
+          return ws.dshSessionId
+        }
+      } catch (e) {
+        logger?.warn?.('[soulmirror] 宿主内建会话失败：' + e.message)
+      } finally {
+        sessionBootstrapping = null
+      }
+      // 回退：headless 建会话
+      if (cfg.twin.autoSession === false) return ''
+      try {
+        const r = await runDshTask('会议开始。用一句话确认你已就位。', {
           profile: cfg.twin.profile,
           cwd: ws.dir,
           timeoutMs: Math.min(cfg.twin.timeoutMs, 60000),
         })
         if (r.sessionId) {
           ws.dshSessionId = r.sessionId
-          try { sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display }) } catch { /* ignore */ }
-          try { sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display }) } catch { /* ignore */ }
-          logger?.info?.('[soulmirror] 已创建会议会话 ' + r.sessionId + '（会议：' + (ws.key || ws.id) + '）')
+          sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display })
           return r.sessionId
         }
-        logger?.warn?.('[soulmirror] 建会话失败：' + String(r.error || '').slice(0, 80))
       } catch (e) {
-        logger?.warn?.('[soulmirror] 建会话异常: ' + e.message)
-      } finally {
-        sessionBootstrapping = null
+        logger?.warn?.('[soulmirror] headless 建会话失败: ' + e.message)
       }
       return ''
     })()
@@ -1448,22 +1490,16 @@ export function apply(ctx, config) {
       if (!cfg.twin.enabled) return { ok: false, result: '数字分身未启用（config.twin.enabled = false）' }
       const t0 = Date.now()
       const ws = ensureMeetingWorkspace()
-      const r = await runDshTask(a.prompt, {
-        profile: cfg.twin.profile,
-        cwd: ws.dir,
-        sessionId: ws.dshSessionId || undefined,
-        timeoutMs: a.timeoutMs || cfg.twin.timeoutMs,
-        onSession: (sid) => { ws.dshSessionId = sid },
-      })
+      const r = await runInMeetingSession(a.prompt, { timeoutMs: a.timeoutMs || cfg.twin.timeoutMs })
       if (r.sessionId) ws.dshSessionId = r.sessionId
       const ms = Date.now() - t0
-      const task = { at: new Date().toISOString(), prompt: a.prompt, ok: r.ok, ms, sessionId: r.sessionId || '', output: (r.output || '').slice(0, 1200) }
+      const task = { at: new Date().toISOString(), prompt: a.prompt, ok: r.ok, ms, sessionId: r.sessionId || '', output: (r.text || r.output || '').slice(0, 1200) }
       agent.tasks = [task, ...(agent.tasks || [])].slice(0, 20)
       if (!r.ok) return { ok: false, result: '任务失败（' + ms + 'ms）：' + (r.error || '') }
       let spoke = ''
       if (a.speak) {
         try {
-          const brief = (r.output || '').trim().slice(0, 120) || '任务完成'
+          const brief = (r.text || r.output || '').trim().slice(0, 120) || '任务完成'
           brain.markSpoken(brief)
           await sayToMeeting(brief, cfg.tts, {
             speakDevice: cfg.devices.speak,
@@ -1475,7 +1511,7 @@ export function apply(ctx, config) {
           spoke = '\n已在会议里汇报'
         } catch (e) { spoke = '\n播报失败：' + e.message }
       }
-      return { ok: true, result: '任务完成（' + ms + 'ms）' + spoke + '\n\n' + (r.output || '（无输出）') }
+      return { ok: true, result: '任务完成（' + ms + 'ms）' + spoke + '\n\n' + (r.text || r.output || '（无输出）') }
     }),
   }))
 
