@@ -194,3 +194,23 @@ soul_setup { action: "links" }
 - **收尾去重**：`onExit` 与手动停止同时触发时只跑一次；60 秒内不重复收尾
 - **人格追加去重**：同一条事实不会重复写进 `USER.md`，超过 8000 字自动淘汰最旧的「自动积累」小节
 - **焦点冲突**：本插件与 computer-use 都会发键盘事件，发言前会先把会议窗口置前——如果你同时在用 computer-use 操作别的应用，可能互相抢焦点
+
+## 与 dsh-knowledge 的联动
+
+知识库插件**已安装在 `web` profile**；本插件用 `headless` profile 执行写入，因此需要给它也装上：
+
+```bash
+dsh plugin --profile headless add "file:C:/Users/<你>/.dsh/profiles/web/plugins/dsh-knowledge"
+```
+
+检测机制（不会因为没装而报错）：
+
+- `detectKnowledge()` 读各 profile 的 `package.json`，判断 bundles 里有没有 `dsh-knowledge`
+- 没装 → 会后纪要只落本地 `minutes.md`，日志写 `知识库=跳过（未安装 dsh-knowledge）`，其它功能不受影响
+- 装了 → 选中该 profile 执行写入；`soul_setup { action: "links" }` 可查看当前选中的是哪个 profile
+
+写入方式（为什么不用知识库的 note 工具）：note 类工具是"提议 + 等你确认"的交互流程，headless 里没人确认会一直等下去（实测 240 秒超时）。所以改成：
+
+1. 本地在工作区 `knowledge/` 下生成 `会议纪要-<时间>.md`
+2. 让 headless 用 **write 工具**把同一内容写回该路径——dsh-knowledge 对"文件工具写入"会自动归档成知识文档
+3. 全程 90 秒上限，超时/失败只记日志，不阻塞会议收尾（实测 8.5 秒完成）

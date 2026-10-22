@@ -30,7 +30,7 @@ import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
-import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge } from './lib/knowledge.js'
+import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge } from './lib/knowledge.js'
 import { MemoryStore } from './lib/memory.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
 import { detectVirtualAudio, installPlan, installVirtualAudio, formatVirtualAudio } from './lib/vcard.js'
@@ -1120,11 +1120,11 @@ export function apply(ctx, config) {
 
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
     if (cfg.knowledge.enabled && md && cfg.twin.enabled) {
-      const target = pickKnowledgeProfile(cfg.knowledge.profile || '')
-      if (!target) {
-        results.knowledge = '跳过：没有装了 dsh-knowledge 的 profile（建议建 soulmirror-worker）'
-      } else if (isHostProfile(target) && target !== (cfg.knowledge.profile || '')) {
-        results.knowledge = '跳过：只能选中正在运行的 ' + target + '，请显式配置 knowledge.profile'
+      const kd = detectKnowledge(cfg.knowledge.profile || '')
+      const target = kd.profile
+      if (!kd.installed || !target) {
+        // 没装知识库插件：静默跳过，不当作错误
+        results.knowledge = '跳过（未安装 dsh-knowledge）'
       } else {
         const r = await writeToKnowledge({
           title,
@@ -1512,16 +1512,14 @@ export function apply(ctx, config) {
       }
       if (a.action === 'links') {
         const s = linkStatus(cfg.twin.profile)
+        const kd = detectKnowledge(cfg.knowledge.profile || '')
         const lines = []
         lines.push('任务 profile：' + cfg.twin.profile + (s.twin.exists ? '（存在）' : '（不存在）'))
-        lines.push('知识库能力：')
-        for (const c of s.knowledge.candidates) {
-          lines.push('  ' + (c.hasKnowledge ? '✓' : '✗') + ' ' + c.profile)
-        }
-        lines.push('自动选用：' + (s.knowledge.pick || '无（会后纪要只落本地）'))
-        if (s.knowledge.pick === 'web') lines.push('⚠️ 选中的是正在跑宿主的 web profile，建议建专用 worker：')
-        if (!s.knowledge.pick || s.knowledge.pick === 'web') {
-          lines.push('  dsh plugin --profile soulmirror-worker add file:<知识库插件路径>')
+        lines.push('知识库插件：' + (kd.installed ? '已安装 → ' + kd.profile : '未安装（会后只落本地，不影响其它功能）'))
+        if (kd.installed) {
+          for (const c of kd.candidates) if (c.hasKnowledge) lines.push('  ✓ ' + c.profile)
+          if (kd.sameAsHost) lines.push('  ⚠ 与宿主同 profile，任务串行执行；如担心争用可建专用 worker：')
+          if (kd.sameAsHost) lines.push('     dsh plugin --profile soulmirror-worker add file:<知识库插件路径>')
         }
         if (s.others.length) {
           lines.push('其它联动：')
