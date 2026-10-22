@@ -135,6 +135,8 @@ export const Config = z.object({
     reportSpeak: z.boolean().default(true),
     /** 任务结果汇报前先用模型压缩成"总结"，不硬截断。 */
     summarize: z.boolean().default(true),
+    /** 会议一开始就建一个 DSH 会话，方便端侧立刻看到。 */
+    autoSession: z.boolean().default(true),
     /** dsh 的 profile 名。 */
     profile: z.string().default('headless'),
     /** 单次任务超时（毫秒）。 */
@@ -198,7 +200,7 @@ export function apply(ctx, config) {
       ...(config.tts || {}),
     },
     brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: '会议助手', minGapMs: 8000, ...(config.brain || {}) },
-    twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
+    twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, autoSession: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
     knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
     apps: Array.isArray(config.apps) && config.apps.length
@@ -922,6 +924,37 @@ export function apply(ctx, config) {
     return meeting
   }
 
+  let sessionBootstrapping = null
+  /** 会议一开始就建一个 DSH 会话（跑一句极短任务拿 sessionId），让端侧立刻可见 */
+  async function ensureMeetingSession(reason = '') {
+    if (!cfg.twin.enabled || cfg.twin.autoSession === false) return ''
+    const ws = ensureMeetingWorkspace()
+    if (ws.dshSessionId) return ws.dshSessionId
+    if (sessionBootstrapping) return sessionBootstrapping
+    sessionBootstrapping = (async () => {
+      try {
+        const prompt = '会议开始' + (reason ? '（' + reason + '）' : '') + '。用一句话确认你已就位，不要展开。'
+        const r = await runDshTask(prompt, {
+          profile: cfg.twin.profile,
+          cwd: ws.dir,
+          timeoutMs: Math.min(cfg.twin.timeoutMs, 60000),
+        })
+        if (r.sessionId) {
+          ws.dshSessionId = r.sessionId
+          logger?.info?.('[soulmirror] 已创建会议会话 ' + r.sessionId)
+          return r.sessionId
+        }
+        logger?.warn?.('[soulmirror] 建会话失败：' + String(r.error || '').slice(0, 80))
+      } catch (e) {
+        logger?.warn?.('[soulmirror] 建会话异常: ' + e.message)
+      } finally {
+        sessionBootstrapping = null
+      }
+      return ''
+    })()
+    return sessionBootstrapping
+  }
+
   function resetMeetingWorkspace() {
     meeting = { id: '', dir: '', dshSessionId: '', startedAt: '' }
   }
@@ -1236,6 +1269,7 @@ export function apply(ctx, config) {
         if (!cfg.autoWatch) return
         if (!session.capturing) await session.startCapture('auto').catch(() => {})
         agent.running = true
+        ensureMeetingSession(reason).catch(() => {})
         logger?.info?.('[soulmirror] 自动开始记录：' + reason)
       },
       onExit: async () => {
@@ -1509,7 +1543,7 @@ export function apply(ctx, config) {
       const lines = []
       lines.push('当前会议：' + (ws.id || '（还没开始）'))
       if (ws.dir) lines.push('工作区：' + ws.dir)
-      lines.push('DSH 会话：' + (ws.dshSessionId || '（还没跑过任务，首次 soul_task 时创建）'))
+      lines.push('DSH 会话：' + (ws.dshSessionId || '（还没创建；会议开始时自动建，或调 soul_task 时建）'))
       if (session.dir) lines.push('转写目录：' + session.dir + '（' + session.transcript.length + ' 行）')
       const limit = Math.max(1, Math.min(a.limit || 8, 30))
       let dirs = []

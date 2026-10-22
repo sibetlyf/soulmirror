@@ -91,3 +91,18 @@ personaAutoUpdate: true
 - 播报期间按字数估算静音窗口，窗口内转写丢弃，避免自说自听
 - 发言前轮询 `mic-usage` 确认会议真的切到虚拟麦，否则不播
 - 分身说的每句话带 `role: 'assistant'` 写进转写，面板里高亮
+
+## 自动建会话
+
+会议一开始（检测到进入会议，或手动 `meeting_agent_start`）就会**自动创建一条 DSH 会话**：
+
+```
+ensureMeetingSession()  →  dsh --profile headless --json "会议开始…用一句话确认你已就位"
+                        →  拿到 sessionId，存进当前会议工作区
+```
+
+- 实测约 4.8 秒、一次极短调用，会话立刻出现在 DSH 会话列表里，端侧可查看
+- 之后这场会的所有任务（调研、整理、汇报）都续接这条会话
+- 关掉：`twin.autoSession: false`
+
+`soul_session` 会显示当前会议的会话 id；端侧打开 DSH 会话列表即可翻看模型每一轮输出。
