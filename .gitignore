@@ -16,3 +16,6 @@ config.local.json
 tools/whisper/models/*.bin
 tools/whisper/*.zip
 *.exe
+# whisper 本地运行时（可选能力，不入库）
+tools/whisper/Release/
+tools/whisper/models/
