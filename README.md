@@ -145,3 +145,21 @@ twin:
 ```
 
 并发上限 2 个任务，超出会跳过并在日志里说明；面板顶部会显示"任务：执行中 / 完成 / 失败"。
+
+## 会后：写知识库 + 沉淀人格
+
+会议结束（窗口消失 3 次确认）后自动执行：
+
+1. **纪要落盘** → 会话目录 + 会议工作区各一份 `minutes.md`
+2. **写知识库** → 起一个 DSH 任务，让装了 `dsh-knowledge` 的 profile 调知识库工具创建文档（标题 `会议纪要 · <时间>`，分组 `会议纪要`）
+3. **沉淀人格** → 用模型从纪要里抽 `user` / `state` 两类信息，追加到 `USER.md` / `STATE.md` 的「自动积累」小节（带日期，不覆盖原文）
+
+```yaml
+knowledge:
+  enabled: true
+  profile: headless      # 需要这个 profile 装了 dsh-knowledge
+  titlePrefix: 会议纪要
+personaAutoUpdate: true
+```
+
+任务汇报也不再硬截断：`twin.summarize: true` 时用模型压成 1-3 句口语总结（实测 118 字），全文留在 `minutes.md` 与工作区里。

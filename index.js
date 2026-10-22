@@ -132,6 +132,8 @@ export const Config = z.object({
     autoDelegate: z.boolean().default(true),
     /** 任务完成后是否在会议里播报结果。 */
     reportSpeak: z.boolean().default(true),
+    /** 任务结果汇报前先用模型压缩成"总结"，不硬截断。 */
+    summarize: z.boolean().default(true),
     /** dsh 的 profile 名。 */
     profile: z.string().default('headless'),
     /** 单次任务超时（毫秒）。 */
@@ -139,6 +141,16 @@ export const Config = z.object({
     /** 允许执行的本机 shell 白名单命令前缀（空 = 禁用 shell）。 */
     allowShell: z.array(z.string()).default([]),
   }),
+  /** 会后写回知识库（通过 DSH 的 knowledge 工具完成）。 */
+  knowledge: z.object({
+    enabled: z.boolean().default(true),
+    /** 交给哪个 profile 去写（需要该 profile 装了 dsh-knowledge）。 */
+    profile: z.string().default('headless'),
+    /** 文档标题前缀。 */
+    titlePrefix: z.string().default('会议纪要'),
+  }),
+  /** 会后用人格文件沉淀（USER.md / STATE.md）。 */
+  personaAutoUpdate: z.boolean().default(true),
   /** 用户名字：作为默认唤醒词。 */
   userName: z.string().default(''),
   /** 额外唤醒词（覆盖默认推导；留空则用 用户名+称呼+通用词）。 */
@@ -179,7 +191,9 @@ export function apply(ctx, config) {
       ...(config.tts || {}),
     },
     brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: '会议助手', minGapMs: 8000, ...(config.brain || {}) },
-    twin: { enabled: true, autoDelegate: true, reportSpeak: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
+    twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
+    knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', ...(config.knowledge || {}) },
+    personaAutoUpdate: config.personaAutoUpdate !== false,
     apps: Array.isArray(config.apps) && config.apps.length
       ? config.apps
       : [
@@ -419,6 +433,26 @@ export function apply(ctx, config) {
   }
   const session = new MeetingSession(cfg, logger)
 
+  /** 把任务结果压成一句口语化总结（不硬截断） */
+  async function summarizeTask(prompt, output) {
+    const raw = String(output || '').trim()
+    if (!raw) return '任务完成，但没有拿到有效结果。'
+    if (!completer || cfg.twin.summarize === false) {
+      const first = raw.split(/\n+/).filter(Boolean).slice(0, 2).join(' ')
+      return '任务完成：' + first
+    }
+    try {
+      const out = await completer([
+        { role: 'system', content: '把下面的任务结果压缩成 1-3 句中文口语总结，直接说结论和关键数字，不要客套、不要分点、不要超过 150 字。' },
+        { role: 'user', content: '任务：' + prompt + '\n\n结果：\n' + raw.slice(0, 4000) },
+      ])
+      const clean = String(out || '').trim()
+      return clean || ('任务完成：' + raw.slice(0, 80))
+    } catch {
+      return '任务完成：' + raw.split(/\n+/)[0]
+    }
+  }
+
   /** 后台跑一个 DSH 任务，完成后（可选）在会议里汇报。 */
   async function startTaskInBackground(prompt) {
     const clean = String(prompt || '').trim()
@@ -452,7 +486,7 @@ export function apply(ctx, config) {
     logger?.info?.('[soulmirror] 任务' + (r.ok ? '完成' : '失败') + '（' + item.ms + 'ms）')
 
     if (r.ok && cfg.twin.reportSpeak) {
-      const brief = '任务完成：' + (item.output || '').replace(/\s+/g, ' ').slice(0, 120)
+      const brief = await summarizeTask(clean, item.output)
       try {
         addAssistantLine(brief, '任务汇报')
         brain.markSpoken(brief)
@@ -1057,6 +1091,90 @@ export function apply(ctx, config) {
     return '## 会议要点（抽取式）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
   }
 
+  /** 会后：纪要落盘 → 写知识库 → 沉淀人格 */
+  async function finalizeMeeting({ speak = false } = {}) {
+    const md = await buildMinutes()
+    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
+    const title = (cfg.knowledge.titlePrefix || '会议纪要') + ' · ' + stamp
+    const results = { minutes: '', knowledge: '', persona: '' }
+
+    // 1) 落盘（会话目录 + 会议工作区）
+    if (md) {
+      try {
+        const { writeFile } = await import('node:fs/promises')
+        if (session.dir) {
+          results.minutes = join(session.dir, 'minutes.md')
+          await writeFile(results.minutes, md, 'utf8')
+        }
+        const ws = ensureMeetingWorkspace()
+        if (ws.dir) await writeFile(join(ws.dir, 'minutes.md'), md, 'utf8')
+      } catch { /* ignore */ }
+    }
+
+    // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
+    if (cfg.knowledge.enabled && md && cfg.twin.enabled) {
+      const prompt = [
+        '把下面的会议纪要写入知识库，使用知识库工具创建一篇文档：',
+        '标题：' + title,
+        '分组：会议纪要',
+        '正文直接使用下面的 Markdown，不要改写内容。',
+        '',
+        md.slice(0, 6000),
+      ].join('\n')
+      const r = await runDshTask(prompt, {
+        profile: cfg.knowledge.profile || 'headless',
+        cwd: ensureMeetingWorkspace().dir || undefined,
+        timeoutMs: Math.min(cfg.twin.timeoutMs, 180000),
+      }).catch(() => ({ ok: false }))
+      results.knowledge = r.ok ? '已写入知识库' : '写入失败：' + String(r.error || '').slice(0, 120)
+      if (r.ok) addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
+    }
+
+    // 3) 沉淀人格（USER.md / STATE.md）
+    if (cfg.personaAutoUpdate && md && completer) {
+      try {
+        const out = await completer([
+          {
+            role: 'system',
+            content: '从会议纪要里抽取值得长期记住的两类信息，只输出 JSON：'
+              + '{"user":["关于参会者/用户本人的稳定事实或偏好"],"state":["当前项目进展/下一步"]}。'
+              + '没有就给空数组；每条不超过 40 字；不要编造。',
+          },
+          { role: 'user', content: md.slice(0, 6000) },
+        ])
+        const jsonText = String(out).replace(/^```(?:json)?|```$/g, '').trim()
+        const j = JSON.parse(jsonText)
+        const appendSection = (key, items) => {
+          if (!items || !items.length) return
+          const body = readPersonaFile(personaDir, key) || ""
+          const block = '\n\n## 自动积累 · ' + stamp + '\n' + items.map((x) => '- ' + x).join('\n')
+          writePersonaFile(personaDir, key, body.trimEnd() + block)
+        }
+        appendSection('user', j.user)
+        appendSection('state', j.state)
+        personaAt = 0
+        results.persona = (j.user || []).length + (j.state || []).length + ' 条'
+      } catch { /* ignore */ }
+    }
+
+    logger?.info?.('[soulmirror] 会议收尾：纪要=' + (results.minutes ? '已保存' : '空') + '，知识库=' + (results.knowledge || '跳过') + '，人格=' + (results.persona || '跳过'))
+    if (speak) {
+      const brief = '这场会到这里，纪要' + (results.minutes ? '已经保存' : '没生成')
+        + (results.knowledge ? '，' + results.knowledge : '') + '。'
+      try {
+        addAssistantLine(brief, '会议收尾')
+        brain.markSpoken(brief)
+        await sayToMeeting(brief, cfg.tts, {
+          speakDevice: cfg.devices.speak,
+          micRestore: cfg.devices.micRestore,
+          windowTitle: cfg.windowTitle,
+          logger,
+        })
+      } catch { /* ignore */ }
+    }
+    return results
+  }
+
   async function saveMinutes() {
     const md = await buildMinutes()
     if (!md || !session.dir) return ''
@@ -1079,11 +1197,15 @@ export function apply(ctx, config) {
         agent.running = true
         logger?.info?.('[soulmirror] 自动开始记录：' + reason)
       },
-      onExit: async (ended) => {
+      onExit: async () => {
         agent.running = false
         await session.stopCapture().catch(() => {})
-        const path = await saveMinutes()
-        logger?.info?.('[soulmirror] 会议结束，纪要' + (path ? '已保存: ' + path : '为空'))
+        try {
+          const r = await finalizeMeeting({ speak: false })
+          logger?.info?.('[soulmirror] 会议结束：' + JSON.stringify(r).slice(0, 200))
+        } catch (e) {
+          logger?.warn?.('[soulmirror] 会议收尾失败: ' + e.message)
+        }
       },
     },
   )
