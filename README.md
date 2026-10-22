@@ -129,3 +129,19 @@ pactl load-module module-remap-source master=SoulMirrorSink.monitor source_name=
 ```
 
 不装也能用：`devices.speak` 留空，分身改为扬声器外放（音质差、可能有回声），采集与转写不受影响。
+
+## 会上自动执行任务
+
+会上有人说"帮我调研 X / 整理一下 / 查一下"，分身会：
+
+1. 立刻用一句话回应（"我现在就去做"），**不会说"会后给你"**
+2. 同时在后台起一个 DSH 任务（`dsh --profile headless --json`），跑在当前会议的工作区里
+3. 任务完成后，把结果前 120 字直接说进会议，并写进转写（标 `任务汇报`）
+
+```yaml
+twin:
+  autoDelegate: true    # 被交代任务时自动执行
+  reportSpeak: true     # 完成后在会议里播报
+```
+
+并发上限 2 个任务，超出会跳过并在日志里说明；面板顶部会显示"任务：执行中 / 完成 / 失败"。

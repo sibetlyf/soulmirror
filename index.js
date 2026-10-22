@@ -128,6 +128,10 @@ export const Config = z.object({
   /** 数字分身：允许把任务交给 DSH 执行（headless）。 */
   twin: z.object({
     enabled: z.boolean().default(true),
+    /** 会上被交代任务时，自动起一个 DSH 任务去执行。 */
+    autoDelegate: z.boolean().default(true),
+    /** 任务完成后是否在会议里播报结果。 */
+    reportSpeak: z.boolean().default(true),
     /** dsh 的 profile 名。 */
     profile: z.string().default('headless'),
     /** 单次任务超时（毫秒）。 */
@@ -175,7 +179,7 @@ export function apply(ctx, config) {
       ...(config.tts || {}),
     },
     brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: '会议助手', minGapMs: 8000, ...(config.brain || {}) },
-    twin: { enabled: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
+    twin: { enabled: true, autoDelegate: true, reportSpeak: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
     apps: Array.isArray(config.apps) && config.apps.length
       ? config.apps
       : [
@@ -316,6 +320,7 @@ export function apply(ctx, config) {
         return json(200, {
           session: session.snapshot(),
           transcript: session.transcript.slice(-60),
+          tasks: (agent.tasks || []).slice(0, 10),
           partial: session.partial || '',
           meeting: {
             app: (cfg.apps || []).find((x) => x.name === cfg.activeApp)?.name || cfg.activeApp || '全部',
@@ -413,6 +418,57 @@ export function apply(ctx, config) {
     return spkCache.name
   }
   const session = new MeetingSession(cfg, logger)
+
+  /** 后台跑一个 DSH 任务，完成后（可选）在会议里汇报。 */
+  async function startTaskInBackground(prompt) {
+    const clean = String(prompt || '').trim()
+    if (!clean) return null
+    const running = (agent.tasks || []).filter((x) => x.status === 'running').length
+    if (running >= 2) {
+      logger?.warn?.('[soulmirror] 已有 2 个任务在跑，先排队放弃：' + clean.slice(0, 40))
+      return null
+    }
+    const ws = ensureMeetingWorkspace()
+    const item = {
+      at: new Date().toISOString(), prompt: clean, ok: null, status: 'running',
+      ms: 0, sessionId: ws.dshSessionId || '', output: '',
+    }
+    agent.tasks = [item, ...(agent.tasks || [])].slice(0, 20)
+    const t0 = Date.now()
+    logger?.info?.('[soulmirror] 开始执行任务：' + clean.slice(0, 60))
+    const r = await runDshTask(clean, {
+      profile: cfg.twin.profile,
+      cwd: ws.dir,
+      sessionId: ws.dshSessionId || undefined,
+      timeoutMs: cfg.twin.timeoutMs,
+      onSession: (sid) => { ws.dshSessionId = sid; item.sessionId = sid },
+    }).catch((e) => ({ ok: false, error: e.message }))
+
+    item.ms = Date.now() - t0
+    item.ok = !!r.ok
+    item.status = r.ok ? 'done' : 'failed'
+    item.sessionId = r.sessionId || item.sessionId
+    item.output = String(r.output || r.error || '').slice(0, 800)
+    logger?.info?.('[soulmirror] 任务' + (r.ok ? '完成' : '失败') + '（' + item.ms + 'ms）')
+
+    if (r.ok && cfg.twin.reportSpeak) {
+      const brief = '任务完成：' + (item.output || '').replace(/\s+/g, ' ').slice(0, 120)
+      try {
+        addAssistantLine(brief, '任务汇报')
+        brain.markSpoken(brief)
+        await sayToMeeting(brief, cfg.tts, {
+          speakDevice: cfg.devices.speak,
+          micRestore: cfg.devices.micRestore,
+          windowTitle: cfg.windowTitle,
+          logger,
+        })
+        agent.spoken += 1
+      } catch (e) {
+        logger?.warn?.('[soulmirror] 汇报失败: ' + e.message)
+      }
+    }
+    return item
+  }
 
   /** 把分身的发言写进转写流，面板按角色区分显示。 */
   function addAssistantLine(text, reason = '') {
@@ -866,6 +922,10 @@ export function apply(ctx, config) {
     const d = await brain.decide(trig, { complete: completer, profile: cfg.brain.profile, persona: currentPersona(), memory: memory.digest(8) })
     agent.lastDecision = { at: new Date().toISOString(), trigger: trig.reason, ...d }
     logger?.info?.(`[soulmirror] 决策: ${d.speak} / ${d.confidence} / ${d.reason}`)
+    if (d.task && cfg.twin.enabled && cfg.twin.autoDelegate) {
+      // 不阻塞会议：后台跑，跑完再汇报
+      startTaskInBackground(d.task).catch((e) => logger?.warn?.('[soulmirror] 任务异常: ' + e.message))
+    }
     if (!d.speak || !d.text) return
     if (cfg.policy !== 'auto') return
     brain.markSpoken(d.text)  // 先开静默窗口，再播，避免把自己的声音当成输入
