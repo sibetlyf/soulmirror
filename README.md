@@ -105,3 +105,27 @@ soul_setup { action: "auto" }    # 能做的都做
 ```
 
 密钥与模型都在「SoulMirror → 配置」里填，不用改代码。
+
+## 虚拟声卡（注入通道）
+
+分身要把声音当成"会议麦克风"送进去，需要一个虚拟录音设备。检测与安装：
+
+```
+soul_setup { action: "deps" }         # 检测当前有没有可用虚拟声卡
+soul_setup { action: "install-deps" } # 尝试安装（仅 Linux 能全自动）
+```
+
+| 平台 | 驱动 | 能否自动 |
+|---|---|---|
+| Windows | VB-CABLE | ❌ 内核驱动，需管理员 + 重启 |
+| macOS | BlackHole | ❌ brew 需要 sudo |
+| Linux | 不需要驱动 | ✅ `pactl` 加载 null-sink，无需 root |
+
+Linux 上会自动执行：
+
+```bash
+pactl load-module module-null-sink sink_name=SoulMirrorSink …
+pactl load-module module-remap-source master=SoulMirrorSink.monitor source_name=SoulMirrorMic …
+```
+
+不装也能用：`devices.speak` 留空，分身改为扬声器外放（音质差、可能有回声），采集与转写不受影响。

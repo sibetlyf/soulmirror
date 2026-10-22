@@ -32,6 +32,7 @@ import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, PERSONA_FILES } from './lib/persona.js'
 import { MemoryStore } from './lib/memory.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
+import { detectVirtualAudio, installPlan, installVirtualAudio, formatVirtualAudio } from './lib/vcard.js'
 
 export const name = 'soulmirror'
 
@@ -1311,7 +1312,7 @@ export function apply(ctx, config) {
     name: 'soul_setup',
     description: '检查并自动配置运行环境（Windows 编译 mbridge；macOS/Linux 提示 ffmpeg 等依赖）。装完先跑一次这个。',
     parameters: {
-      action: { type: 'string', enum: ['check', 'build', 'auto'], required: true, description: 'check 只看 / build 编译 mbridge / auto 能自动做的都做' },
+      action: { type: 'string', enum: ['check', 'build', 'auto', 'deps', 'install-deps'], required: true, description: 'check 看环境 / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡' },
     },
     output: OUT(),
     execute: wrap('soul_setup', async (a) => {
@@ -1319,10 +1320,30 @@ export function apply(ctx, config) {
         const r = buildBridge({ logger })
         return { ok: r.ok, result: (r.ok ? '编译完成：' + r.path : '失败：' + (r.error || r.reason || '')) + '\n\n' + formatEnv(detectEnv()) }
       }
+      if (a.action === 'deps') {
+        const v = await detectVirtualAudio()
+        const plan = installPlan()
+        const lines = [formatVirtualAudio(v)]
+        if (!v.available) {
+          lines.push('安装方式（' + (plan.auto ? '可自动' : '需管理员') + '）：' + plan.reason)
+          for (const s of plan.steps) lines.push('  · ' + s)
+          if (plan.commands && plan.commands.length) lines.push('命令：\n  ' + plan.commands.join('\n  '))
+        }
+        return { ok: v.available, result: lines.join('\n') }
+      }
+      if (a.action === 'install-deps') {
+        const r = await installVirtualAudio({ logger })
+        if (r.manual) {
+          return { ok: false, result: '这台机器不能静默安装：' + r.reason + '\n\n' + r.steps.map((s) => '· ' + s).join('\n') + (r.commands && r.commands.length ? '\n\n命令：\n' + r.commands.join('\n') : '') }
+        }
+        const after = await detectVirtualAudio()
+        return { ok: r.ok, result: (r.results || []).map((x) => (x.ok ? '✓ ' : '✗ ') + x.cmd + (x.err ? '  ' + x.err : '')).join('\n') + '\n\n' + formatVirtualAudio(after) }
+      }
       if (a.action === 'auto') {
         const r = await autoSetup({ logger })
+        const vinfo = await detectVirtualAudio()
         const done = r.actions.length ? r.actions.map((x) => '- ' + x.what + '：' + (x.ok ? (x.skipped ? '已存在' : '完成') : '失败 ' + (x.error || ''))).join('\n') : '- 没有需要自动处理的项目'
-        return { ok: r.ready, result: done + '\n\n' + formatEnv(r.after) }
+        return { ok: r.ready && vinfo.available, result: done + '\n\n' + formatEnv(r.after) + '\n' + formatVirtualAudio(vinfo) }
       }
       const env = detectEnv()
       return { ok: env.ready, result: formatEnv(env) }
