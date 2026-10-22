@@ -29,7 +29,8 @@ import { startDashScopeAsr } from './lib/dashscope.js'
 import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
-import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, PERSONA_FILES } from './lib/persona.js'
+import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
+import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge } from './lib/knowledge.js'
 import { MemoryStore } from './lib/memory.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
 import { detectVirtualAudio, installPlan, installVirtualAudio, formatVirtualAudio } from './lib/vcard.js'
@@ -1092,7 +1093,13 @@ export function apply(ctx, config) {
   }
 
   /** 会后：纪要落盘 → 写知识库 → 沉淀人格 */
+  let finalizing = false
+  let lastFinalizedAt = 0
   async function finalizeMeeting({ speak = false } = {}) {
+    if (finalizing) return { skipped: '正在收尾中' }
+    if (Date.now() - lastFinalizedAt < 60000) return { skipped: '刚刚收尾过' }
+    finalizing = true
+    try {
     const md = await buildMinutes()
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
     const title = (cfg.knowledge.titlePrefix || '会议纪要') + ' · ' + stamp
@@ -1113,21 +1120,23 @@ export function apply(ctx, config) {
 
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
     if (cfg.knowledge.enabled && md && cfg.twin.enabled) {
-      const prompt = [
-        '把下面的会议纪要写入知识库，使用知识库工具创建一篇文档：',
-        '标题：' + title,
-        '分组：会议纪要',
-        '正文直接使用下面的 Markdown，不要改写内容。',
-        '',
-        md.slice(0, 6000),
-      ].join('\n')
-      const r = await runDshTask(prompt, {
-        profile: cfg.knowledge.profile || 'headless',
-        cwd: ensureMeetingWorkspace().dir || undefined,
-        timeoutMs: Math.min(cfg.twin.timeoutMs, 180000),
-      }).catch(() => ({ ok: false }))
-      results.knowledge = r.ok ? '已写入知识库' : '写入失败：' + String(r.error || '').slice(0, 120)
-      if (r.ok) addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
+      const target = pickKnowledgeProfile(cfg.knowledge.profile || '')
+      if (!target) {
+        results.knowledge = '跳过：没有装了 dsh-knowledge 的 profile（建议建 soulmirror-worker）'
+      } else if (isHostProfile(target) && target !== (cfg.knowledge.profile || '')) {
+        results.knowledge = '跳过：只能选中正在运行的 ' + target + '，请显式配置 knowledge.profile'
+      } else {
+        const r = await writeToKnowledge({
+          title,
+          markdown: md,
+          profile: target,
+          cwd: ensureMeetingWorkspace().dir || undefined,
+          timeoutMs: Math.min(cfg.twin.timeoutMs, 180000),
+          runDshTask,
+        })
+        results.knowledge = r.ok ? '已写入知识库（' + (r.handle || 'ok') + '）' : '写入失败：' + r.error
+        if (r.ok) addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
+      }
     }
 
     // 3) 沉淀人格（USER.md / STATE.md）
@@ -1144,19 +1153,15 @@ export function apply(ctx, config) {
         ])
         const jsonText = String(out).replace(/^```(?:json)?|```$/g, '').trim()
         const j = JSON.parse(jsonText)
-        const appendSection = (key, items) => {
-          if (!items || !items.length) return
-          const body = readPersonaFile(personaDir, key) || ""
-          const block = '\n\n## 自动积累 · ' + stamp + '\n' + items.map((x) => '- ' + x).join('\n')
-          writePersonaFile(personaDir, key, body.trimEnd() + block)
-        }
-        appendSection('user', j.user)
-        appendSection('state', j.state)
+        const r1 = appendPersonaSection(personaDir, 'user', j.user, { stamp })
+        const r2 = appendPersonaSection(personaDir, 'state', j.state, { stamp })
+        results.personaDetail = '新增 user ' + r1.added + ' 条、state ' + r2.added + ' 条（重复跳过 ' + (r1.skipped + r2.skipped) + '）'
         personaAt = 0
         results.persona = (j.user || []).length + (j.state || []).length + ' 条'
       } catch { /* ignore */ }
     }
 
+    lastFinalizedAt = Date.now()
     logger?.info?.('[soulmirror] 会议收尾：纪要=' + (results.minutes ? '已保存' : '空') + '，知识库=' + (results.knowledge || '跳过') + '，人格=' + (results.persona || '跳过'))
     if (speak) {
       const brief = '这场会到这里，纪要' + (results.minutes ? '已经保存' : '没生成')
@@ -1173,6 +1178,9 @@ export function apply(ctx, config) {
       } catch { /* ignore */ }
     }
     return results
+    } finally {
+      finalizing = false
+    }
   }
 
   async function saveMinutes() {
@@ -1494,13 +1502,34 @@ export function apply(ctx, config) {
     name: 'soul_setup',
     description: '检查并自动配置运行环境（Windows 编译 mbridge；macOS/Linux 提示 ffmpeg 等依赖）。装完先跑一次这个。',
     parameters: {
-      action: { type: 'string', enum: ['check', 'build', 'auto', 'deps', 'install-deps'], required: true, description: 'check 看环境 / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡' },
+      action: { type: 'string', enum: ['check', 'build', 'auto', 'deps', 'install-deps', 'links'], required: true, description: 'check 看环境 / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡' },
     },
     output: OUT(),
     execute: wrap('soul_setup', async (a) => {
       if (a.action === 'build') {
         const r = buildBridge({ logger })
         return { ok: r.ok, result: (r.ok ? '编译完成：' + r.path : '失败：' + (r.error || r.reason || '')) + '\n\n' + formatEnv(detectEnv()) }
+      }
+      if (a.action === 'links') {
+        const s = linkStatus(cfg.twin.profile)
+        const lines = []
+        lines.push('任务 profile：' + cfg.twin.profile + (s.twin.exists ? '（存在）' : '（不存在）'))
+        lines.push('知识库能力：')
+        for (const c of s.knowledge.candidates) {
+          lines.push('  ' + (c.hasKnowledge ? '✓' : '✗') + ' ' + c.profile)
+        }
+        lines.push('自动选用：' + (s.knowledge.pick || '无（会后纪要只落本地）'))
+        if (s.knowledge.pick === 'web') lines.push('⚠️ 选中的是正在跑宿主的 web profile，建议建专用 worker：')
+        if (!s.knowledge.pick || s.knowledge.pick === 'web') {
+          lines.push('  dsh plugin --profile soulmirror-worker add file:<知识库插件路径>')
+        }
+        if (s.others.length) {
+          lines.push('其它联动：')
+          for (const o of s.others) lines.push('  · ' + o)
+        }
+        lines.push('提示：computer-use 与本插件都会发键盘事件，同时操作桌面时可能互相打断；')
+        lines.push('      分身发言前会先把会议窗口置前，若你正在用 computer-use 操作别的应用，可能抢焦点。')
+        return { ok: true, result: lines.join('\n') }
       }
       if (a.action === 'deps') {
         const v = await detectVirtualAudio()

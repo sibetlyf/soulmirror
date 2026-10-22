@@ -163,3 +163,34 @@ personaAutoUpdate: true
 ```
 
 任务汇报也不再硬截断：`twin.summarize: true` 时用模型压成 1-3 句口语总结（实测 118 字），全文留在 `minutes.md` 与工作区里。
+
+## 插件联动与防错
+
+### 知识库回写（重点）
+
+踩过的坑：`headless` profile 默认**没装** dsh-knowledge，任务丢过去会"看起来成功、实际没写"。现在：
+
+- 先读 profile 的 `package.json` 判断有没有知识库能力（不发任务、不烧 token）
+- 自动挑选顺序：`soulmirror-worker` → `headless` → `tui`；**不会自动选正在跑宿主的 `web`**
+- 要求 agent 回复里带 `KB_DOC:<handle>` 标记，拿不到就算失败，不假装成功
+- 没有可用 profile 时明确写"跳过：没有装了 dsh-knowledge 的 profile"，纪要仍落本地
+
+建议建一个专用 worker：
+
+```bash
+dsh plugin --profile soulmirror-worker add file:<知识库插件路径>
+```
+
+### 联动体检
+
+```
+soul_setup { action: "links" }
+```
+
+输出会告诉你：任务 profile 是否存在、哪个 profile 有知识库能力、会被自动选中的是哪个、以及 computer-use / gateway 的共存风险。
+
+### 其它防错
+
+- **收尾去重**：`onExit` 与手动停止同时触发时只跑一次；60 秒内不重复收尾
+- **人格追加去重**：同一条事实不会重复写进 `USER.md`，超过 8000 字自动淘汰最旧的「自动积累」小节
+- **焦点冲突**：本插件与 computer-use 都会发键盘事件，发言前会先把会议窗口置前——如果你同时在用 computer-use 操作别的应用，可能互相抢焦点
