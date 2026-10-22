@@ -214,3 +214,26 @@ dsh plugin --profile headless add "file:C:/Users/<你>/.dsh/profiles/web/plugins
 1. 本地在工作区 `knowledge/` 下生成 `会议纪要-<时间>.md`
 2. 让 headless 用 **write 工具**把同一内容写回该路径——dsh-knowledge 对"文件工具写入"会自动归档成知识文档
 3. 全程 90 秒上限，超时/失败只记日志，不阻塞会议收尾（实测 8.5 秒完成）
+
+### 为什么默认不让插件自己去写库
+
+DSH 的插件之间**不能互相调用工具**（工具是给模型用的，不是给插件用的）。所以 SoulMirror 没法直接调用你看得见的那些 `knowledge_*` 工具。
+
+三条路：
+
+| mode | 做法 | 前提 |
+|---|---|---|
+| `off` | 不碰知识库 | — |
+| `agent`（默认） | 会后把纪要存盘并记成"待写入知识库"，面板可见；你在会话里说一句就能让我用知识库工具写进去 | 宿主 profile 装了知识库（你已装） |
+| `headless` | 插件起一个 DSH 任务去写 | **目标 profile 里也要装 dsh-knowledge**（默认 headless 没有） |
+
+所以：**只要你在当前 profile 装了知识库，就不需要再往 headless 里装一份**。默认走 `agent` 模式，不会重复安装。
+
+```yaml
+knowledge:
+  enabled: true
+  mode: agent        # off | agent | headless
+```
+
+> 之前给 headless 装的那份（`dsh plugin --profile headless add …dsh-knowledge`）是实验 `headless` 模式用的，
+> 不想要可以移除：`dsh plugin --profile headless remove dsh-knowledge`。

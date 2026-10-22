@@ -149,6 +149,12 @@ export const Config = z.object({
     profile: z.string().default('headless'),
     /** 文档标题前缀。 */
     titlePrefix: z.string().default('会议纪要'),
+    /**
+     * off       = 完全不碰知识库
+     * agent     = 只把纪要存盘并记成待办，由会话里的 agent 用知识库工具写入（默认）
+     * headless  = 由插件起一个装了 dsh-knowledge 的 profile 去写（需目标 profile 里也装了知识库）
+     */
+    mode: z.string().default('agent'),
   }),
   /** 会后用人格文件沉淀（USER.md / STATE.md）。 */
   personaAutoUpdate: z.boolean().default(true),
@@ -193,7 +199,7 @@ export function apply(ctx, config) {
     },
     brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: '会议助手', minGapMs: 8000, ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
-    knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', ...(config.knowledge || {}) },
+    knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'agent', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
     apps: Array.isArray(config.apps) && config.apps.length
       ? config.apps
@@ -336,6 +342,7 @@ export function apply(ctx, config) {
           session: session.snapshot(),
           transcript: session.transcript.slice(-60),
           tasks: (agent.tasks || []).slice(0, 10),
+          pendingKnowledge: (agent.pendingKnowledge || []).slice(0, 5),
           partial: session.partial || '',
           meeting: {
             app: (cfg.apps || []).find((x) => x.name === cfg.activeApp)?.name || cfg.activeApp || '全部',
@@ -1121,11 +1128,22 @@ export function apply(ctx, config) {
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
     if (cfg.knowledge.enabled && md && cfg.twin.enabled) {
       const kd = detectKnowledge(cfg.knowledge.profile || '')
-      const target = kd.profile
-      if (!kd.installed || !target) {
-        // 没装知识库插件：静默跳过，不当作错误
+      const mode = String(cfg.knowledge.mode || 'agent')
+      if (mode === 'off') {
+        results.knowledge = '已关闭（knowledge.mode = off）'
+      } else if (!kd.installed && !kd.host) {
         results.knowledge = '跳过（未安装 dsh-knowledge）'
+      } else if (mode === 'agent') {
+        // 插件之间不能直接调工具：记成待办，让会话里的 agent 写
+        addAssistantLine('会议纪要已生成：' + title + '（待写入知识库）', '知识库')
+        agent.pendingKnowledge = (agent.pendingKnowledge || []).concat([{
+          at: new Date().toISOString(), title, path: results.minutes,
+        }]).slice(-10)
+        results.knowledge = '待写入知识库（' + (kd.host || kd.profile) + ' 已装，可在会话里让我写）'
+      } else if (!kd.profile) {
+        results.knowledge = '跳过（headless 里没装 dsh-knowledge）'
       } else {
+        const target = kd.profile
         const r = await writeToKnowledge({
           title,
           markdown: md,
