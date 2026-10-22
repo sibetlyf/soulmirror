@@ -30,7 +30,7 @@ import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
-import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge } from './lib/knowledge.js'
+import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi } from './lib/knowledge.js'
 import { MemoryStore } from './lib/memory.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
 import { detectVirtualAudio, installPlan, installVirtualAudio, formatVirtualAudio } from './lib/vcard.js'
@@ -154,7 +154,7 @@ export const Config = z.object({
      * agent     = 只把纪要存盘并记成待办，由会话里的 agent 用知识库工具写入（默认）
      * headless  = 由插件起一个装了 dsh-knowledge 的 profile 去写（需目标 profile 里也装了知识库）
      */
-    mode: z.string().default('agent'),
+    mode: z.string().default('host'),
   }),
   /** 会后用人格文件沉淀（USER.md / STATE.md）。 */
   personaAutoUpdate: z.boolean().default(true),
@@ -199,7 +199,7 @@ export function apply(ctx, config) {
     },
     brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: '会议助手', minGapMs: 8000, ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
-    knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'agent', ...(config.knowledge || {}) },
+    knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
     apps: Array.isArray(config.apps) && config.apps.length
       ? config.apps
@@ -1128,11 +1128,26 @@ export function apply(ctx, config) {
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
     if (cfg.knowledge.enabled && md && cfg.twin.enabled) {
       const kd = detectKnowledge(cfg.knowledge.profile || '')
-      const mode = String(cfg.knowledge.mode || 'agent')
+      const mode = String(cfg.knowledge.mode || 'host')
       if (mode === 'off') {
         results.knowledge = '已关闭（knowledge.mode = off）'
       } else if (!kd.installed && !kd.host) {
         results.knowledge = '跳过（未安装 dsh-knowledge）'
+      } else if (mode === 'host') {
+        // 直连宿主里知识库插件的本地管理 API：不需要额外安装、不需要模型
+        let port = 0
+        try { port = (ctx.webServer || ctx.get?.('webServer'))?.port || 0 } catch { port = 0 }
+        if (kd.host && port) {
+          const r = await writeViaHostApi({ port, title, markdown: md, type: 'decision', group: '会议纪要' })
+          if (r.ok) {
+            results.knowledge = '已写入知识库（' + (r.id || 'ok').toString().slice(0, 8) + '）'
+            addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
+          } else {
+            results.knowledge = '写入失败：' + (r.error || r.status || '')
+          }
+        } else {
+          results.knowledge = '跳过（宿主没装知识库或拿不到端口）'
+        }
       } else if (mode === 'agent') {
         // 插件之间不能直接调工具：记成待办，让会话里的 agent 写
         addAssistantLine('会议纪要已生成：' + title + '（待写入知识库）', '知识库')
@@ -1533,12 +1548,9 @@ export function apply(ctx, config) {
         const kd = detectKnowledge(cfg.knowledge.profile || '')
         const lines = []
         lines.push('任务 profile：' + cfg.twin.profile + (s.twin.exists ? '（存在）' : '（不存在）'))
-        lines.push('知识库插件：' + (kd.installed ? '已安装 → ' + kd.profile : '未安装（会后只落本地，不影响其它功能）'))
-        if (kd.installed) {
-          for (const c of kd.candidates) if (c.hasKnowledge) lines.push('  ✓ ' + c.profile)
-          if (kd.sameAsHost) lines.push('  ⚠ 与宿主同 profile，任务串行执行；如担心争用可建专用 worker：')
-          if (kd.sameAsHost) lines.push('     dsh plugin --profile soulmirror-worker add file:<知识库插件路径>')
-        }
+        lines.push('知识库插件：' + (kd.host ? '宿主已装（' + kd.host + '）→ host 模式直连本地 API' : (kd.installed ? '装在 ' + kd.profile : '未安装（会后只落本地，其它功能不受影响）')))
+        if (kd.host) lines.push('  会后纪要自动写入知识库，不需要额外安装')
+        else if (kd.installed) lines.push('  别名 profile 里装了知识库，可切 knowledge.mode = headless')
         if (s.others.length) {
           lines.push('其它联动：')
           for (const o of s.others) lines.push('  · ' + o)
