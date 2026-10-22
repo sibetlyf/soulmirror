@@ -438,8 +438,8 @@ export function apply(ctx, config) {
     const name = (cfg.userName || '').trim()
     if (!name) return base
     const extra = [name]
-    if (name.length >= 3) extra.push(name.slice(1))          // 李亚峰 → 亚峰
-    if (name.length >= 2) extra.push(name.slice(-2))          // 李亚峰 → 亚峰
+    if (name.length >= 3) extra.push(name.slice(1))          // 张三丰 → 三丰
+    if (name.length >= 2) extra.push(name.slice(-2))          // 张三丰 → 三丰
     return Array.from(new Set([...extra, ...base]))
   }
 
@@ -840,7 +840,7 @@ export function apply(ctx, config) {
 
   const brain = new MeetingBrain({ minGapMs: cfg.brain.minGapMs, names: resolveWakeWords() })
 
-  // ── ASR 纠错：用大模型把同音错字（大峰/杨峰 → 亚峰）改回来 ────────────
+  // ── ASR 纠错：用大模型把同音错字改回正确人名/术语 ──────────────
   const fixNames = Array.from(new Set([cfg.userName, ...(cfg.wakeWords || []), ...((cfg.apps || []).map((a) => a.name))].filter(Boolean)))
 
   const completer = createCompleter(cfg.brain)

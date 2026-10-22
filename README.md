@@ -8,7 +8,7 @@
 |---|---|
 | 听 | WASAPI 环回采集系统声音，只采会议客户端所在设备的音频 |
 | 转 | 阿里云百炼实时 ASR（`paraformer-realtime-v2`），中间结果 + 标点 + ITN + 顺滑 + VAD 断句 + 时间戳 |
-| 校 | 每句过一遍大模型同音字纠正（"大峰/杨峰" → "亚峰"），人名来自 `userName` + 唤醒词 |
+| 校 | 每句过一遍大模型同音字纠正（识别误差 → 正确人名），人名来自 `userName` + 唤醒词 |
 | 懂 | 大模型判定"是在叫我吗、要不要接话"，支持点名、提问、被交代事项 |
 | 说 | 切默认麦克风到虚拟声卡 → 按住空格 → 流式 TTS → 松开 → 切回 |
 | 干 | `soul_task` 把任务交给 `dsh --profile headless` 执行，结果可以当场汇报 |
@@ -36,13 +36,13 @@ soul_status  {}                               # 在线状态 / 唤醒词 / 最�
 ## 配置要点
 
 ```yaml
-userName: 李亚峰          # 唤醒词自动派生：李亚峰 / 亚峰 / DSH / 助手 …
+userName: 你的名字        # 唤醒词自动派生：全名 / 去掉姓 / DSH / 助手 …
 activeApp: 腾讯会议       # 只盯这个会议软件
 policy: auto              # observe | suggest | auto
 asr:
   provider: dashscope
   llmCorrect: true        # 大模型纠正同音错字
-  context: '产品周会，参会人：李亚峰。'
+  context: '团队周会，涉及排期与预算。'
   sentenceSilenceMs: 800
 tts:
   provider: dashscope

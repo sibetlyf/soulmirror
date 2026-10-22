@@ -10,7 +10,7 @@
  *   node tools/meeting-cli.mjs capture 20 --process wemeetapp   # 只采腾讯会议（实验）
  *   node tools/meeting-cli.mjs say "你好，我是会议助手"          # TTS → 发言设备
  *   node tools/meeting-cli.mjs watch 60 --speak   # 监听，听到名字自动回复（--speak 真播）
- *   node tools/meeting-cli.mjs mute / unmute / join 206-275-219 / leave
+ *   node tools/meeting-cli.mjs mute / unmute / join <会议号> / leave
  *   node tools/meeting-cli.mjs selftest
  *
  * 环境变量：MEETING_SPEAK_DEVICE=耳机  MEETING_CAPTURE_DEVICE=扬声器  BOT_NAMES=DSH,助手

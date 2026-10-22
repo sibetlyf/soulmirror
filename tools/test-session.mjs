@@ -1,4 +1,4 @@
-﻿import { MeetingSession } from 'file:///C:/Users/liyafeng/.dsh/profiles/web/plugins/dsh-meeting-agent/lib/session.js'
+import { MeetingSession } from '../lib/session.js'
 const cfg = {
   devices: { capture: '', captureMode: 'loopback', speak: '', micName: '' },
   tts: { provider: 'sapi', voice: 'Microsoft Huihui Desktop', rate: 0 },
