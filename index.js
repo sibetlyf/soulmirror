@@ -493,10 +493,31 @@ export function apply(ctx, config) {
     item.ms = Date.now() - t0
     item.ok = !!r.ok
     item.status = r.ok ? 'done' : 'failed'
+    item.error = r.error || ''
+    item.outcome = r.outcome || null
+    item.events = (r.events || []).slice(-15)
+    item.via = r.via || ''
     item.sessionId = r.sessionId || item.sessionId
     item.output = String(r.output || r.error || '').slice(0, 800)
-    logger?.info?.('[soulmirror] 任务' + (r.ok ? '完成' : '失败') + '（' + item.ms + 'ms）')
+    logger?.info?.('[soulmirror] 任务' + (r.ok ? '完成' : '失败') + '（' + item.ms + 'ms，' + (r.via || '?') + '）' + (r.error ? '：' + String(r.error).slice(0, 120) : ''))
+    try {
+      const { writeFileSync } = await import('node:fs')
+      writeFileSync(join(ws.dir, 'last-task.json'), JSON.stringify(item, null, 1), 'utf8')
+    } catch { /* ignore */ }
 
+    if (!r.ok && cfg.twin.reportSpeak) {
+      const why = '这个任务没跑成：' + String(r.error || '原因未知').slice(0, 60)
+      try {
+        addAssistantLine(why, '任务失败')
+        brain.markSpoken(why)
+        await sayToMeeting(why, cfg.tts, {
+          speakDevice: cfg.devices.speak,
+          micRestore: cfg.devices.micRestore,
+          windowTitle: cfg.windowTitle,
+          logger,
+        })
+      } catch { /* ignore */ }
+    }
     if (r.ok && cfg.twin.reportSpeak) {
       const brief = await summarizeTask(clean, item.output)
       try {
@@ -1554,7 +1575,9 @@ export function apply(ctx, config) {
       if (tasks.length) {
         lines.push('最近任务：')
         for (const x of tasks.slice(0, 5)) {
-          lines.push('  ' + x.at.slice(11, 19) + ' ' + (x.ok ? '✓' : '✗') + ' ' + x.prompt.slice(0, 40) + ' (' + x.ms + 'ms)')
+          lines.push('  ' + x.at.slice(11, 19) + ' ' + (x.ok ? '✓' : '✗') + ' ' + x.prompt.slice(0, 40) + ' (' + x.ms + 'ms' + (x.via ? ', ' + x.via : '') + ')')
+        if (!x.ok && x.error) lines.push('      错误：' + String(x.error).slice(0, 160))
+        if (!x.ok && x.events && x.events.length) lines.push('      事件：' + x.events.join(' → '))
         }
       }
       return { ok: true, result: lines.join('\n') }
