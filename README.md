@@ -130,19 +130,37 @@ ensureMeetingSession()  →  dsh --profile headless --json "会议开始…用�
 | 软件 | 进程名 | 状态 |
 |---|---|---|
 | 腾讯会议 | `wemeetapp` | 已验证 |
-| 移动会议（中移动云视讯） | `CloudVideo` | 进程名已确认，窗口/控件层未实测 |
+| 移动会议（中移动云视讯） | `CloudVideo` | 已验证首页/加入弹窗，支持 `meeting_join` |
 
 配置里 `apps` 可加任意软件：
 
 ```yaml
+activeApp: 移动会议
 apps:
-  - { name: 腾讯会议, proc: wemeetapp,  title: 腾讯会议 }
-  - { name: 移动会议, proc: CloudVideo, title: 移动会议 }
+  - { name: 腾讯会议, proc: wemeetapp, title: 腾讯会议,
+      classes: "VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView|BaseDialog",
+      path: "E:/Tencent/Meeting/WeMeet/wemeetapp.exe" }
+  - { name: 移动会议, proc: CloudVideo, title: 移动会议,
+      classes: "FrameWorkWnd|MainWindow|ParticipantWnd|VideoCellWnd",
+      path: "E:/CloudVideo/CloudVideo.exe" }
 ```
 
 - 进程名比较**不区分大小写**
 - `proc` 没填或对不上时，用窗口标题包含的软件名兜底，并自动把推断出的进程名写回配置
 - 会议身份会带软件前缀（如 `腾讯会议:206275219`），避免不同软件同名会议撞到同一个会话
+- `activeApp` 决定 `meeting_status` / `meeting_join` / `meeting_leave` 默认操作哪个软件；也可给这些工具传 `app: 移动会议` 临时指定
+
+### 移动会议（CloudVideo）加入流程
+
+`meeting_join` 对移动会议会走专用控件：
+
+1. 聚焦 `移动会议` 主窗口；
+2. 点首页「加入会议」；
+3. 在弹窗的 `lineEditLeft` 填会议号；
+4. 点弹窗 `MeetJoinClass.widget.pushButton`；
+5. 读取 `TipsDlg`：`会议已结束 / HY20013` 这类会原样返回，不会误报成功。
+
+移动会议的在会界面是自绘窗口，UIA 读不到「离开」按钮；`meeting_leave` 找不到按钮时会用 `Alt+F4` 关闭窗口作为离开。加入前务必确认会议号，界面改版后先用 `meeting_ui dump app=移动会议` 看控件。
 
 
 ## 主动式服务

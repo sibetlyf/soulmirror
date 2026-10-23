@@ -127,6 +127,7 @@ export const Config = z.object({
     proc: z.string().default('wemeetapp'),
     title: z.string().default('腾讯会议'),
     classes: z.string().default('VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView|BaseDialog'),
+    path: z.string().default(''),
   })),
   /** 自动监听：检测到会议开始就自动采集+托管，结束后自动出纪要。 */
   autoWatch: z.boolean().default(true),
@@ -610,6 +611,25 @@ export function apply(ctx, config) {
     const hit = all.filter((a) => a.name === pick || a.proc === pick)
     return hit.length ? hit : all
   }
+  /** 选中一个会议软件（可显式指定），并统一出 title/proc/classes/path 供 UIA 使用。 */
+  function meetingApp(requested = '') {
+    const all = cfg.apps || []
+    const pick = String(requested || cfg.activeApp || '').trim()
+    const app = all.find((a) => a.name === pick || a.proc === pick)
+      || all.find((a) => a.name === '腾讯会议')
+      || all[0]
+      || {}
+    return {
+      name: app.name || '腾讯会议',
+      proc: app.proc || cfg.processName || 'wemeetapp',
+      title: app.title || cfg.windowTitle || '腾讯会议',
+      classes: app.classes || cfg.windowClass || '',
+      path: app.path || cfg.appPath || '',
+    }
+  }
+  function meetingOpts(app) {
+    return { cls: app.classes, proc: app.proc }
+  }
   function detectApp(wins) {
     for (const app of activeApps()) {
       if (!app.proc) continue
@@ -655,11 +675,13 @@ export function apply(ctx, config) {
       inMeeting: { type: 'boolean' },
     }),
     execute: wrap('meeting_status', async () => {
+      const app = meetingApp()
       const wins = await listWindows()
-      const meeting = pickMeetingWindows(wins, cfg.windowTitle, cfg.processName)
-      const inMeeting = meeting.some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView/.test(w.cls))
+      const meeting = pickMeetingWindows(wins, app.title, app.proc)
+      const inMeeting = meeting.some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls))
       const lines = []
-      lines.push(`客户端：${resolveAppPath(cfg.appPath) || '未找到 wemeetapp.exe'}`)
+      lines.push(`会议软件：${app.name}（${app.proc}）`)
+      lines.push(`客户端：${resolveAppPath(app.path) || '未找到 ' + app.proc + '.exe'}`)
       lines.push(`会议窗口：${meeting.length} 个${inMeeting ? '（检测到进行中的会议）' : ''}`)
       for (const w of meeting.slice(0, 5)) lines.push(`  · [${w.cls}] ${w.title}`)
       lines.push(`采集：${cfg.devices.capture || '系统默认渲染设备'}（${cfg.devices.captureMode}）`)
@@ -703,21 +725,24 @@ export function apply(ctx, config) {
       keys: { type: 'string', description: 'key 的按键组合，如 ctrl+m、enter。' },
       text: { type: 'string', description: 'type 的输入文本。' },
       max: { type: 'integer', description: 'dump 最多返回多少控件，默认 60。' },
+      app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
     },
     output: OUT(),
     execute: wrap('meeting_ui', async (a) => {
-      const title = a.title || cfg.windowTitle
+      const app = meetingApp(a.app)
+      const title = a.title || app.title
+      const opts = meetingOpts(app)
       switch (a.action) {
         case 'list': {
           const wins = await listWindows()
           return { ok: true, result: wins.map((w) => `${w.pid}\t[${w.cls}]\t${w.title}`).join('\n') }
         }
-        case 'dump': return { ok: true, result: await dump(title, a.max || 60) }
-        case 'focus': return { ok: true, result: await focus(title) }
-        case 'click': return { ok: true, result: await click(title, a.name || '') }
-        case 'settext': return { ok: true, result: await setText(title, a.name || '', a.value || '') }
-        case 'key': return { ok: true, result: await pressKey(title, a.keys || '') }
-        case 'type': return { ok: true, result: await typeText(title, a.text || '') }
+        case 'dump': return { ok: true, result: await dump(title, a.max || 60, opts) }
+        case 'focus': return { ok: true, result: await focus(title, opts) }
+        case 'click': return { ok: true, result: await click(title, a.name || '', opts) }
+        case 'settext': return { ok: true, result: await setText(title, a.name || '', a.value || '', opts) }
+        case 'key': return { ok: true, result: await pressKey(title, a.keys || '', opts) }
+        case 'type': return { ok: true, result: await typeText(title, a.text || '', opts) }
         default: return { ok: false, result: `未知 action: ${a.action}` }
       }
     }),
@@ -727,14 +752,17 @@ export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'meeting_open',
     description: '启动会议客户端（已运行则只返回窗口信息），不加入任何会议。',
-    parameters: {},
+    parameters: {
+      app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
+    },
     output: OUT(),
-    execute: wrap('meeting_open', async () => {
-      const app = resolveAppPath(cfg.appPath)
-      if (!app) return { ok: false, result: '未找到会议客户端，请在插件配置里填写 appPath' }
-      const r = await ensureApp(app, cfg.windowTitle, cfg.processName)
+    execute: wrap('meeting_open', async (a) => {
+      const app = meetingApp(a.app)
+      const path = resolveAppPath(app.path)
+      if (!path) return { ok: false, result: `未找到 ${app.name} 客户端，请在配置里填写 apps[].path` }
+      const r = await ensureApp(path, app.title, app.proc)
       const lines = r.windows.map((w) => `[${w.cls}] ${w.title}`)
-      return { ok: true, result: (r.launched ? '已启动：' : '已运行：') + '\n' + (lines.join('\n') || '(窗口尚未出现)') }
+      return { ok: true, result: (r.launched ? '已启动：' : '已运行：') + app.name + '\n' + (lines.join('\n') || '(窗口尚未出现)') }
     }),
   }))
 
@@ -746,6 +774,7 @@ export function apply(ctx, config) {
       code: { type: 'string', required: true, description: '会议号（如 123-456-789）。' },
       password: { type: 'string', description: '入会密码（可选）。' },
       displayName: { type: 'string', description: '入会昵称（可选）。' },
+      app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
       confirm: { type: 'boolean', description: '确认执行，必须为 true。' },
     },
     output: OUT(),
@@ -753,33 +782,76 @@ export function apply(ctx, config) {
       if (!cfg.enabled) return { ok: false, result: '插件已禁用' }
       if (a.confirm !== true) return { ok: false, result: '拒绝：meeting_join 会操作真实客户端，请传 confirm=true 再执行。' }
       if (!a.code) return { ok: false, result: '缺少会议号' }
-      const app = resolveAppPath(cfg.appPath)
-      if (app) await ensureApp(app, cfg.windowTitle, cfg.processName)
-      await focus(cfg.windowTitle)
+      const app = meetingApp(a.app)
+      const opts = meetingOpts(app)
+      const path = resolveAppPath(app.path)
+      if (path) await ensureApp(path, app.title, app.proc)
+      await focus(app.title, opts)
       const steps = []
-      try { steps.push(await click(cfg.windowTitle, '加入会议')) } catch (e) { steps.push('点击「加入会议」失败: ' + e.message) }
+      const cloudVideo = /移动会议|CloudVideo/i.test(app.name + ' ' + app.proc)
+
+      if (cloudVideo) {
+        // 移动会议是自绘 Qt 界面。首页的加入按钮和弹窗里的输入框/加入按钮
+        // 都能通过 AutomationId 找到，但弹窗不是顶层窗口，必须从主窗口往下找。
+        for (let i = 0; i < 2; i++) {
+          await pressKey(app.title, 'escape', opts).catch(() => undefined)
+          await new Promise((r) => setTimeout(r, 250))
+        }
+        try {
+          steps.push(await click(app.title, '加入会议', opts))
+        } catch (e) {
+          steps.push('点击首页「加入会议」失败: ' + e.message)
+        }
+        await new Promise((r) => setTimeout(r, 700))
+        try {
+          await setText(app.title, 'lineEditLeft', a.code, opts)
+          steps.push('已填会议号')
+        } catch (e) {
+          steps.push('未找到会议号输入框: ' + e.message)
+        }
+        if (a.displayName) {
+          // 移动会议的入会弹窗通常不带昵称输入；保留尝试，失败不阻塞。
+          for (const cand of ['昵称', '姓名', 'name', 'lineEditRight']) {
+            try { await setText(app.title, cand, a.displayName, opts); steps.push('已填昵称'); break } catch { /* next */ }
+          }
+        }
+        try {
+          steps.push(await click(app.title, 'MeetJoinClass.widget.pushButton', opts))
+        } catch (e) {
+          steps.push('点击弹窗「加入会议」失败: ' + e.message)
+        }
+        await new Promise((r) => setTimeout(r, 2500))
+        const text = await dump(app.title, 220, opts).catch(() => '')
+        const err = text.split(/\r?\n/).map((l) => l.split('\t')[3] || '').find((x) => /会议已结束|会议不存在|HY\d{4,}/.test(x))
+        const wins = await listWindows()
+        const joined = wins.some((w) => w.proc === app.proc && /ParticipantWnd|VideoCellWnd/.test(w.cls))
+        if (err) return { ok: false, result: steps.join('\n') + '\n移动会议返回：' + err }
+        return { ok: true, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
+      }
+
+      try { steps.push(await click(app.title, '加入会议', opts)) } catch (e) { steps.push('点击「加入会议」失败: ' + e.message) }
       await new Promise((r) => setTimeout(r, 800))
       let filled = false
       for (const cand of ['会议号', '请输入会议号', 'meeting_code', 'code']) {
-        try { await setText(cfg.windowTitle, cand, a.code); filled = true; steps.push('已填会议号(' + cand + ')'); break } catch { /* next */ }
+        try { await setText(app.title, cand, a.code, opts); filled = true; steps.push('已填会议号(' + cand + ')'); break } catch { /* next */ }
       }
       if (!filled) steps.push('未找到会议号输入框')
       if (a.password) {
         for (const cand of ['密码', '入会密码', 'password']) {
-          try { await setText(cfg.windowTitle, cand, a.password); steps.push('已填密码'); break } catch { /* next */ }
+          try { await setText(app.title, cand, a.password, opts); steps.push('已填密码'); break } catch { /* next */ }
         }
       }
       if (a.displayName) {
         for (const cand of ['昵称', '姓名', '您的名称', 'name']) {
-          try { await setText(cfg.windowTitle, cand, a.displayName); steps.push('已填昵称'); break } catch { /* next */ }
+          try { await setText(app.title, cand, a.displayName, opts); steps.push('已填昵称'); break } catch { /* next */ }
         }
       }
       for (const cand of ['加入', '加入会议', '进入会议']) {
-        try { await click(cfg.windowTitle, cand); steps.push('已点「' + cand + '」'); break } catch { /* next */ }
+        try { await click(app.title, cand, opts); steps.push('已点「' + cand + '」'); break } catch { /* next */ }
       }
       await new Promise((r) => setTimeout(r, 2000))
       const wins = await listWindows()
-      const joined = pickMeetingWindows(wins, cfg.windowTitle, cfg.processName).some((w) => /VideoMainWindow|MeetingView|FloatSpeakingWnd/.test(w.cls))
+      const joined = pickMeetingWindows(wins, app.title, app.proc).some((w) => /VideoMainWindow|MeetingView|FloatSpeakingWnd|ParticipantWnd|VideoCellWnd/.test(w.cls))
       return { ok: true, result: steps.join('\n') + '\n' + (joined ? '看起来已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
     }),
   }))
@@ -787,18 +859,28 @@ export function apply(ctx, config) {
   ctx.tools.register(defineTool({
     name: 'meeting_leave',
     description: '离开当前会议（点「离开」→ 确认）。必须传 confirm=true。',
-    parameters: { confirm: { type: 'boolean', description: '确认执行，必须为 true。' } },
+    parameters: {
+      app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
+      confirm: { type: 'boolean', description: '确认执行，必须为 true。' },
+    },
     output: OUT(),
     execute: wrap('meeting_leave', async (a) => {
       if (a.confirm !== true) return { ok: false, result: '拒绝：请传 confirm=true。' }
+      const app = meetingApp(a.app)
+      const opts = meetingOpts(app)
       await session.stopCapture().catch(() => undefined)
       const steps = []
       for (const cand of ['离开会议', '离开', '结束会议']) {
-        try { await click(cfg.windowTitle, cand); steps.push('点了「' + cand + '」'); break } catch { /* next */ }
+        try { await click(app.title, cand, opts); steps.push('点了「' + cand + '」'); break } catch { /* next */ }
       }
       await new Promise((r) => setTimeout(r, 600))
       for (const cand of ['离开会议', '确定', '离开']) {
-        try { await click(cfg.windowTitle, cand); steps.push('确认「' + cand + '」'); break } catch { /* next */ }
+        try { await click(app.title, cand, opts); steps.push('确认「' + cand + '」'); break } catch { /* next */ }
+      }
+      if (steps.length === 0 && /移动会议|CloudVideo/i.test(app.name + ' ' + app.proc)) {
+        // 移动会议的自绘会议窗口没有可读的离开按钮；关闭窗口即离开。
+        await pressKey(app.title, 'alt+f4', opts).catch(() => undefined)
+        steps.push('未找到离开按钮，已用 Alt+F4 关闭移动会议窗口')
       }
       return { ok: true, result: steps.join('\n') || '未找到离开按钮，请用 meeting_ui dump 查看' }
     }),
@@ -810,16 +892,18 @@ export function apply(ctx, config) {
     description: '开/闭会议麦克风：点击会议窗口里的麦克风控件（按 mic 关键字匹配 AutomationId）。必须传 confirm=true。',
     parameters: {
       state: { type: 'string', enum: ['mute', 'unmute', 'toggle'], description: '目标状态，默认 toggle。' },
+      app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
       confirm: { type: 'boolean', description: '确认执行，必须为 true。' },
     },
     output: OUT(),
     execute: wrap('meeting_set_mute', async (a) => {
       if (a.confirm !== true) return { ok: false, result: '拒绝：开关麦克风会影响真实会议，请传 confirm=true。' }
-      const title = cfg.windowTitle
-      const text = await dump(title, 200)
+      const app = meetingApp(a.app)
+      const opts = meetingOpts(app)
+      const text = await dump(app.title, 200, opts)
       const micLines = text.split(/\r?\n/).filter((l) => /mic/i.test(l) && /Button/i.test(l))
       if (micLines.length === 0) return { ok: false, result: '没找到麦克风控件，请用 meeting_ui dump 确认控件树' }
-      const r = await click(title, 'mic')
+      const r = await click(app.title, 'mic', opts)
       mic.state = mic.state === 'muted' ? 'unmuted' : 'muted'
       return { ok: true, result: '点击麦克风控件：' + micLines[0].split('\t').slice(1, 3).join(' ') + '\n' + r + '\n当前记录状态：' + mic.state }
     }),
