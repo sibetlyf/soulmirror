@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile)
 import { bridge, listDevices, toolsDir, micUsage } from './lib/bridge.js'
 import {
   listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
-  ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker,
+  ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect,
 } from './lib/desktop.js'
 import { MeetingSession } from './lib/session.js'
 import { pickLocalModel } from './lib/asr.js'
@@ -136,6 +136,11 @@ export const Config = z.object({
   })),
   /** 自动监听：检测到会议开始就自动采集+托管，结束后自动出纪要。 */
   autoWatch: z.boolean().default(true),
+  /** 入会按钮相对窗口的坐标（0~1）。Qt 自绘界面点不到控件名时用它兜底。 */
+  joinClickRatio: z.object({
+    x: z.number().default(0.18),
+    y: z.number().default(0.28),
+  }).default({ x: 0.18, y: 0.28 }),
   /** 自动跟随：哪个会议软件在开会就用哪个（activeApp 为空时生效）。 */
   autoAppSelect: z.boolean().default(true),
   /** 只盯某个会议软件（填 apps 里的 name 或 proc；空 = 任意支持的软件都盯）。 */
@@ -242,6 +247,7 @@ export function apply(ctx, config) {
     },
     policy: config.policy || 'suggest',
     autoWatch: config.autoWatch !== false,
+    joinClickRatio: { x: 0.18, y: 0.28, ...(config.joinClickRatio || {}) },
     autoAppSelect: config.autoAppSelect !== false,
     activeApp: config.activeApp || '',
     meetingCode: config.meetingCode || '',
@@ -508,7 +514,7 @@ export function apply(ctx, config) {
         cfg.meetingCode = code
         cfg.meetingCodeManual = true
         savePersisted({ meetingCode: code, meetingCodeManual: true })
-        const r = await joinTool.execute({ code, app: app.name, confirm: true })
+        const r = await joinTool.execute({ code, app: app.name, displayName: cfg.userName || '', confirm: true })
         return json(200, { ...r, code, app: app.name })
       }
       return json(404, { error: 'not found' })
@@ -1079,65 +1085,87 @@ export function apply(ctx, config) {
         return { ok: true, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
       }
 
-    // 加入入口：先用候选名点，失败就扫一遍控件按名字模糊匹配
-    let opened = false
-    for (const cand of ['加入会议', '加入', 'Join', 'join', '进入会议']) {
-      try {
-        await click(app.title, cand, opts)
-        opened = true
-        steps.push('已点「' + cand + '」')
-        break
-      } catch { /* next */ }
+    // 腾讯会议首页是 Qt 自绘：「加入会议」按钮点不到名字，只能按客户区相对坐标点。
+    // 点开后会弹出「加入会议」对话框，那里面的控件都是有名字的。
+    const JOIN_DIALOG = '加入会议'
+    const dialogOpen = async () => {
+      const wins = await listWindows().catch(() => [])
+      return wins.some((w) => w.proc === app.proc && /JoinMeetingDialog/.test(w.cls || ''))
     }
+
+    // 已在对话框里就不重复点首页，避免关掉它
+    let opened = await dialogOpen()
+    if (opened) steps.push('入会对话框已打开')
+
+    if (!opened) {
+      // 先试具名按钮（有的版本会暴露），失败再按比例点
+      for (const cand of ['加入会议', '加入', 'Join']) {
+        try {
+          await click(app.title, cand, opts)
+          await new Promise((r) => setTimeout(r, 600))
+          if (await dialogOpen()) { opened = true; steps.push('已点「' + cand + '」'); break }
+        } catch { /* next */ }
+      }
+    }
+
+    if (!opened) {
+      const ratio = cfg.joinClickRatio || { x: 0.18, y: 0.28 }
+      try {
+        const hit = await clickRatio(app.title, ratio.x, ratio.y, opts)
+        steps.push('按坐标点首页「加入会议」（' + ratio.x + ', ' + ratio.y + ' → ' + hit.x + ',' + hit.y + '）')
+        await new Promise((r) => setTimeout(r, 1200))
+        opened = await dialogOpen()
+      } catch (e) {
+        steps.push('点首页按钮失败: ' + e.message)
+      }
+    }
+
     if (!opened) {
       const names = await listClickableNames(app)
-      const hit = names.find((n) => /加入|join|进入会议|参会/i.test(n))
-      if (hit) {
-        try { await click(app.title, hit, opts); opened = true; steps.push('按模糊匹配点「' + hit + '」') } catch { /* ignore */ }
-      }
-      if (!opened) {
-        steps.push('没找到「加入会议」入口。当前可见控件：' + (names.slice(0, 12).join(' / ') || '（读不到，可能窗口被遮挡或已最小化）'))
-        steps.push('建议：先把腾讯会议主窗口显示出来，或直接在客户端手动入会')
-        return { ok: false, result: steps.join('\n') }
-      }
+      steps.push('没能打开入会对话框。首页可见控件：' + (names.slice(0, 10).join(' / ') || '（读不到）'))
+      steps.push('排查：确认会议客户端停在首页（不是已入会状态），或调 config.joinClickRatio')
+      return { ok: false, result: steps.join('\n') }
     }
-    await new Promise((r) => setTimeout(r, 800))
+
+    // 对话框里：会议号 → 昵称 → 自动连音频 → 加入
     let filled = false
-    const editNames = await listEditableNames(app).catch(() => [])
-    const cands = ['会议号', '请输入会议号', 'meeting_code', 'code', ...editNames]
-    for (const cand of cands) {
+    for (const cand of ['请输入会议号', 'meeting_code', '会议号']) {
       try {
-        await setText(app.title, cand, a.code, opts)
+        await setText(JOIN_DIALOG, cand, a.code, opts)
         filled = true
         steps.push('已填会议号(' + cand + ')')
         break
       } catch { /* next */ }
     }
-    if (!filled) steps.push('未找到会议号输入框（可见编辑框：' + (editNames.slice(0, 6).join(' / ') || '无') + '）')
-      if (a.password) {
-        for (const cand of ['密码', '入会密码', 'password']) {
-          try { await setText(app.title, cand, a.password, opts); steps.push('已填密码'); break } catch { /* next */ }
-        }
+    if (!filled) steps.push('没找到会议号输入框')
+
+    if (a.displayName) {
+      for (const cand of ['请输入您的名字', 'nick_name', '您的名称']) {
+        try { await setText(JOIN_DIALOG, cand, a.displayName, opts); steps.push('已填昵称'); break } catch { /* next */ }
       }
-      if (a.displayName) {
-        for (const cand of ['昵称', '姓名', '您的名称', 'name']) {
-          try { await setText(app.title, cand, a.displayName, opts); steps.push('已填昵称'); break } catch { /* next */ }
-        }
-      }
+    }
+
+    // 自动连接音频：入会就有声音，否则采集到的是静音
+    try { await click(JOIN_DIALOG, '自动连接音频', opts); steps.push('已勾选自动连接音频') } catch { /* 已勾选或不存在 */ }
+
     let confirmed = false
-    for (const cand of ['加入', '加入会议', '进入会议']) {
-      try { await click(app.title, cand, opts); steps.push('已点「' + cand + '」'); confirmed = true; break } catch { /* next */ }
+    for (const cand of ['加入会议', 'join_meeting_btn', '加入']) {
+      try { await click(JOIN_DIALOG, cand, opts); confirmed = true; steps.push('已点「' + cand + '」'); break } catch { /* next */ }
     }
     if (!confirmed) {
-      try { await pressKey(app.title, 'Return', opts); steps.push('已回车提交（兜底）') } catch { /* ignore */ }
+      try { await pressKey(JOIN_DIALOG, 'Return', opts); steps.push('已回车提交（兜底）') } catch { /* ignore */ }
     }
-    await new Promise((r) => setTimeout(r, 2000))
+
+    await new Promise((r) => setTimeout(r, 3000))
     const wins = await listWindows()
     const joined = meetingInProgress(app, wins)
+    // 入会失败常见于会议号不存在/已结束，读一下对话框里的提示
+    const text = joined ? '' : await dump(JOIN_DIALOG, 120, opts).catch(() => '')
+    const errLine = String(text).split(/\r?\n/).find((l) => /会议号|不存在|已结束|错误|无效/.test(l))
     if (!joined) {
-      try { await pressKey(app.title, 'escape', opts); steps.push('已按 Esc 关闭残留对话框') } catch { /* ignore */ }
+      try { await pressKey(JOIN_DIALOG, 'escape', opts); steps.push('已按 Esc 关闭对话框') } catch { /* ignore */ }
     }
-    return { ok: joined, result: steps.join('\n') + '\n' + (joined ? '看起来已进入会议' : '尚未确认进入会议，可用 meeting_status 复查；若界面已改版，用 meeting_ui dump 看控件名') }
+    return { ok: joined, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议' + (errLine ? '\n客户端提示：' + errLine.split('\t').slice(1, 3).join(' ') : '；可用 meeting_status 复查')) }
     }),
   })
   ctx.tools.register(joinTool)
@@ -1705,6 +1733,38 @@ export function apply(ctx, config) {
       const wins = await listWindows().catch(() => [])
       const running = wins.some((w) => (w.proc || '').toLowerCase() === (hit.proc || '').toLowerCase())
       return { ok: true, result: '当前抓取：' + hit.name + '（proc=' + (hit.proc || '未配置') + '）' + (running ? ' · 已在运行' : ' · 未检测到进程') }
+    }),
+  }))
+  // ── 按比例点击窗口（Qt 自绘界面标定用）──────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_click_ratio',
+    description: '按窗口相对坐标点击（0~1），用于标定腾讯会议这类自绘界面的按钮位置。返回点击前后的窗口变化，方便确认点到了什么。',
+    parameters: {
+      x: { type: 'number', required: true, description: '横向比例 0~1' },
+      y: { type: 'number', required: true, description: '纵向比例 0~1' },
+      app: { type: 'string', description: '会议软件名（可选）' },
+      save: { type: 'boolean', description: '把这个比例存为 joinClickRatio' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_click_ratio', async (a) => {
+      const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
+      const opts = meetingOpts(app)
+      const before = await listWindows()
+      const wins = pickMeetingWindows(before, app.title, app.proc)
+      const win = wins.sort((m, n) => (n.w * n.h) - (m.w * m.h))[0]
+      if (!win) return { ok: false, result: '没找到 ' + app.name + ' 的窗口' }
+      const x = Math.round(win.x + win.w * Math.max(0, Math.min(1, a.x)))
+      const y = Math.round(win.y + win.h * Math.max(0, Math.min(1, a.y)))
+      await clickXY(app.title, x, y, opts).catch((e) => { throw new Error('点击失败: ' + e.message) })
+      await new Promise((r) => setTimeout(r, 800))
+      const after = await listWindows()
+      const beforeKeys = new Set(before.map((w) => w.proc + '|' + w.cls + '|' + w.title))
+      const added = after.filter((w) => !beforeKeys.has(w.proc + '|' + w.cls + '|' + w.title))
+      if (a.save) { cfg.joinClickRatio = { x: a.x, y: a.y }; savePersisted({ joinClickRatio: cfg.joinClickRatio }) }
+      const lines = ['点击 (' + x + ', ' + y + ')，窗口 ' + win.w + '×' + win.h + ' @' + win.x + ',' + win.y]
+      lines.push(added.length ? '新窗口：' + added.map((w) => w.title + '[' + w.cls + ']').join(' / ') : '没有新窗口出现')
+      if (a.save) lines.push('已保存为入会按钮坐标')
+      return { ok: true, result: lines.join('\n') }
     }),
   }))
   // ── 会议软件列表 ────────────────────────────────────────────────────

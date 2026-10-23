@@ -17,10 +17,21 @@ param(
   [string]$text = '',
   [string]$keys = '',
   [int]$max = 40,
+  [int]$x = 0,
+  [int]$y = 0,
   [switch]$json
 )
 
 $ErrorActionPreference = 'Stop'
+
+# 多显示器 + 缩放环境下，必须 DPI 感知，否则坐标与鼠标位置不同尺度
+try {
+  Add-Type -Namespace W32Dpi -Name Native -MemberDefinition @'
+    [DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
+    [DllImport("user32.dll")] public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+'@ -ErrorAction Stop
+  [W32Dpi.Native]::SetProcessDpiAwarenessContext([IntPtr]-4) | Out-Null
+} catch { try { [W32Dpi.Native]::SetProcessDPIAware() | Out-Null } catch { } }
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 Add-Type -AssemblyName UIAutomationClient
@@ -38,6 +49,9 @@ public class W32 {
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint dx, uint dy, uint d, IntPtr e);
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X, Y; }
+  [DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
 }
 "@
 
@@ -194,6 +208,29 @@ switch ($cmd) {
         $c.Name, $c.AutomationId, (Rect-Text $c.BoundingRectangle)
       $i++
     }
+  }
+  'rect' {
+    $w = Find-Window $title $cls $proc
+    if (-not $w) { Write-Error "window not found: $title"; exit 3 }
+    # Find-Window 返回 AutomationElement，需要转成窗口句柄
+    $hwnd = [IntPtr]$w.Current.NativeWindowHandle
+    $r = New-Object W32+RECT
+    [W32]::GetClientRect($hwnd, [ref]$r) | Out-Null
+    $pt = New-Object W32+POINT
+    [W32]::ClientToScreen($hwnd, [ref]$pt) | Out-Null
+    "OK rect $($pt.X),$($pt.Y) $($r.Right - $r.Left)x$($r.Bottom - $r.Top)"
+  }
+  'clickxy' {
+    $w = Find-Window $title $cls $proc
+    if (-not $w) { Write-Error "window not found: $title"; exit 3 }
+    Focus-Window $w
+    Start-Sleep -Milliseconds 150
+    [W32]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 60
+    [W32]::mouse_event(0x0002, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 40
+    [W32]::mouse_event(0x0004, 0, 0, 0, [IntPtr]::Zero)
+    "OK clickxy $x,$y"
   }
   'click' {
     $w = Find-Window $title $cls $proc

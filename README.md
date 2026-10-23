@@ -102,8 +102,8 @@ dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
 
 | 软件 | 进程 | 状态 |
 |---|---|---|
-| 腾讯会议 | `wemeetapp` / `TencentMeeting` | 主用，全链路验证过 |
-| 移动会议（云视讯） | `CloudVideo` / `ydmeeting` | 首页与入会弹窗已适配 |
+| 腾讯会议 | `wemeetapp` / `TencentMeeting` | 主用，采集/转写/发言/入会全链路验证过 |
+| 移动会议（云视讯） | `CloudVideo` / `ydmeeting` | 首页与入会弹窗已适配，未做完整链路 |
 | 飞书会议 | `Feishu` / `Lark` | 预设就绪，未实测 |
 | 钉钉会议 | `DingTalk` | 预设就绪，未实测 |
 | Zoom / Teams | `Zoom` / `ms-teams` | 预设就绪 |
@@ -127,6 +127,27 @@ apps:
   - { name: 腾讯会议, proc: wemeetapp }
   - { name: 自定义会议, proc: MyMeeting }
 ```
+
+### 入会怎么点进去
+
+腾讯会议首页是 Qt 自绘的，UIA 抓不到「加入会议」这个名字，只能按客户区相对坐标点。
+点开后弹的对话框反而规规矩矩，控件全有名字：
+
+| 控件 | 名字 |
+|---|---|
+| 会议号输入框 | `请输入会议号` / `meeting_code` |
+| 昵称输入框 | `请输入您的名字` / `nick_name` |
+| 自动连接音频 | `auto_audio`（会自动勾上，否则采到静音） |
+| 加入按钮 | `加入会议` / `join_meeting_btn` |
+
+所以流程是：对话框没开就按坐标点首页 → 等 `JoinMeetingDialog` 出现 → 填号填昵称 → 点加入。
+默认坐标 `joinClickRatio: { x: 0.18, y: 0.28 }`，窗口改版点歪了就这样重新标定：
+
+```
+meeting_click_ratio { x: 0.18, y: 0.28, save: true }
+```
+
+它会告诉你点在哪、有没有弹出新窗口，对上了就把比例存下来。
 
 ## 🧵 会话与会议身份
 
@@ -241,9 +262,9 @@ brain:
 ## ⚠️ 已知限制
 
 - 飞书、钉钉、Zoom 只有预设，没在真机上跑过。接入前建议先 `meeting_apps` 看一眼，再 `meeting_mic_status` 确认麦克风行为
-- 入会靠 UI 自动化，客户端改版就会失效。找不到控件时它会把可见控件名打出来，照着补规则
+- 入会靠 UI 自动化（首页要按坐标点），客户端改版就会失效；找不到入口时它会把可见控件名列出来
 - macOS / Linux 的采集链路（ffmpeg + BlackHole/PulseAudio）只是设计好了，没实机验证
-- 腾讯会议把会议号画在画布上，自动识别有时读不到，需要手填一次
+- 腾讯会议把会议号画在画布上，自动识别会扫界面文本兜底，读不到时手填一次即可
 - 记忆与情绪的衰减参数是拍出来的，用久了该调
 
 ## ✅ 测试
