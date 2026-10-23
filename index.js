@@ -23,7 +23,7 @@ const execFileAsync = promisify(execFile)
 import { bridge, listDevices, toolsDir, micUsage } from './lib/bridge.js'
 import {
   listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
-  ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect,
+  ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect, shotWindow,
 } from './lib/desktop.js'
 import { MeetingSession } from './lib/session.js'
 import { pickLocalModel } from './lib/asr.js'
@@ -38,6 +38,8 @@ import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, w
 import { MemoryStore } from './lib/memory.js'
 import { LivingWorld } from './lib/living.js'
 import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
+import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio } from './lib/uimap.js'
+import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib/join-url.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
 import { getController, createSession, promptSession } from './lib/dsh-session.js'
@@ -247,7 +249,7 @@ export function apply(ctx, config) {
     },
     policy: config.policy || 'suggest',
     autoWatch: config.autoWatch !== false,
-    joinClickRatio: { x: 0.18, y: 0.28, ...(config.joinClickRatio || {}) },
+    joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
     autoAppSelect: config.autoAppSelect !== false,
     activeApp: config.activeApp || '',
     meetingCode: config.meetingCode || '',
@@ -509,7 +511,9 @@ export function apply(ctx, config) {
         for await (const chunk of req) bufJ.push(chunk)
         const body = JSON.parse(Buffer.concat(bufJ).toString('utf8') || '{}')
         const app = await detectMeetingApp(body.app)
-        const code = normalizeMeetingCode(body.code || '') || await detectMeetingCode(app)
+        const urlIn = String(body.url || '').trim()
+    const code = normalizeMeetingCode(body.code || '') || await detectMeetingCode(app)
+    if (!code && !urlIn) return json(200, { ok: false, result: '没有会议号或入会链接' })
         if (!code) return json(200, { ok: false, result: '没有会议号，请先识别或手动输入' })
         cfg.meetingCode = code
         cfg.meetingCodeManual = true
@@ -892,6 +896,21 @@ export function apply(ctx, config) {
     return null
   }
 
+  /** 用系统默认方式打开链接（会交给会议客户端处理，不需要点界面） */
+  async function openExternal(url) {
+    const { spawn } = await import('node:child_process')
+    const cmd = process.platform === 'win32'
+      ? ['cmd', ['/c', 'start', '', url]]
+      : process.platform === 'darwin'
+        ? ['open', [url]]
+        : ['xdg-open', [url]]
+    await new Promise((resolve, reject) => {
+      const child = spawn(cmd[0], cmd[1], { detached: true, stdio: 'ignore' })
+      child.on('error', reject)
+      child.on('spawn', () => { child.unref(); resolve() })
+    })
+  }
+
   const wrap = (toolName, impl) => async (args) => {
     try {
       return await impl(args || {})
@@ -1021,9 +1040,10 @@ export function apply(ctx, config) {
   const joinTool = defineTool({
     name: 'meeting_join',
     description:
-      '加入会议（实验性）：聚焦客户端 → 点「加入会议」→ 填会议号/昵称 → 点「加入」。界面改版可能失败；失败时用 meeting_ui dump 看控件后手动组合操作。必须传 confirm=true。',
+      '加入会议。优先走入会链接（给 url，或 code 里贴邀请文案）：打开链接即可入会，完全不碰屏幕。只有拿不到链接时才退回界面操作（会议号 → 找入会对话框 → 填号 → 点加入）。必须传 confirm=true。',
     parameters: {
-      code: { type: 'string', required: true, description: '会议号（如 123-456-789）。' },
+      code: { type: 'string', description: '会议号（如 123-456-789）。用 url 时可不填。' },
+      url: { type: 'string', description: '入会链接（https://meeting.tencent.com/dm/… 或整段邀请文案）。给了它就不碰界面，直接打开链接入会。' },
       password: { type: 'string', description: '入会密码（可选）。' },
       displayName: { type: 'string', description: '入会昵称（可选）。' },
       app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
@@ -1033,7 +1053,25 @@ export function apply(ctx, config) {
     execute: wrap('meeting_join', async (a) => {
       if (!cfg.enabled) return { ok: false, result: '插件已禁用' }
       if (a.confirm !== true) return { ok: false, result: '拒绝：meeting_join 会操作真实客户端，请传 confirm=true 再执行。' }
-      if (!a.code) return { ok: false, result: '缺少会议号' }
+      // ── 首选：入会链接（不依赖屏幕）──────────────────────────────
+    const rawUrl = String(a.url || '').trim() || extractJoinUrl(a.code || '')
+    if (rawUrl && isJoinUrl(rawUrl)) {
+      if (a.confirm !== true) return { ok: false, result: '拒绝：打开会议链接会真的入会，请传 confirm=true。' }
+      // 这里 app 还没解析，先按参数/自动识别拿一份用于结果判定
+      const urlApp = a.app ? meetingApp(a.app) : await detectMeetingApp()
+      try {
+        await openExternal(rawUrl)
+      } catch (e) {
+        return { ok: false, result: '打不开链接：' + e.message }
+      }
+      for (let i = 0; i < 15; i++) {
+        await new Promise((r) => setTimeout(r, 1000))
+        const wins0 = await listWindows().catch(() => [])
+        if (joinedAfterOpening(wins0, urlApp)) return { ok: true, result: '已通过链接入会：' + rawUrl }
+      }
+      return { ok: false, result: '已打开链接但没检测到入会：' + rawUrl + '\n（可能需要在客户端里确认一下，或链接已过期）' }
+    }
+    if (!a.code) return { ok: false, result: '缺少会议号（也可以直接给入会链接 url）' }
       const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
       const opts = meetingOpts(app)
       const path = resolveAppPath(app.path)
@@ -1109,14 +1147,35 @@ export function apply(ctx, config) {
     }
 
     if (!opened) {
-      const ratio = cfg.joinClickRatio || { x: 0.18, y: 0.28 }
-      try {
-        const hit = await clickRatio(app.title, ratio.x, ratio.y, opts)
-        steps.push('按坐标点首页「加入会议」（' + ratio.x + ', ' + ratio.y + ' → ' + hit.x + ',' + hit.y + '）')
-        await new Promise((r) => setTimeout(r, 1200))
-        opened = await dialogOpen()
-      } catch (e) {
-        steps.push('点首页按钮失败: ' + e.message)
+      // 坐标不写死：查标定表；没有就返回"去标定"，绝不盲点
+      const saved = uiMap.get(app.name, 'join')
+      if (!saved) {
+        steps.push('首页按钮没有可点的控件名，也还没有标定过坐标')
+        steps.push('跑一次 meeting_calibrate 截图，看完图用 meeting_set_ui_map 存下「加入会议」位置即可')
+        return { ok: false, result: steps.join('\n') }
+      }
+      // 点一次 → 验证 → 失败就在附近小范围重试
+      for (const off of probeOffsets(0.02, 2)) {
+        const rx = saved.x + off.dx
+        const ry = saved.y + off.dy
+        if (!validRatio(rx, ry)) continue
+        try {
+          const hit = await clickRatio(app.title, rx, ry, opts)
+          await new Promise((r) => setTimeout(r, 900))
+          if (await dialogOpen()) {
+            opened = true
+            if (off.dx || off.dy) {
+              // 记住修正后的位置，下次一步到位
+              uiMap.set(app.name, 'join', { x: rx, y: ry }, { via: 'probe' })
+              steps.push('标定位置有偏移，已修正到 ' + rx.toFixed(3) + ', ' + ry.toFixed(3))
+            }
+            steps.push('已按标定坐标打开入会对话框（' + rx.toFixed(3) + ', ' + ry.toFixed(3) + ' → ' + hit.x + ',' + hit.y + '）')
+            break
+          }
+        } catch (e) {
+          steps.push('点击失败: ' + e.message)
+          break
+        }
       }
     }
 
@@ -1537,6 +1596,8 @@ export function apply(ctx, config) {
 
   const personaDir = join(CONFIG_DIR, 'persona')
   const memory = new MemoryStore(join(CONFIG_DIR, 'memory.json'), { maxEntries: 2000 })
+  const uiMap = new UiMap(join(CONFIG_DIR, 'uimap.json'))
+  const calibDir = join(CONFIG_DIR, 'calib')
   const living = new LivingWorld(join(CONFIG_DIR, 'living'))
   let personaAt = 0
   let personaCache = ''
@@ -1700,6 +1761,73 @@ export function apply(ctx, config) {
     }),
   }))
 
+  // ── 界面标定：首用截一张图，交给会看图的一方确定按钮位置 ──────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_calibrate',
+    description:
+      '首次使用或界面改版后标定按钮位置。会截一张客户端窗口图并存盘，返回图片路径、窗口尺寸和已有坐标；随后看图确认按钮位置，再用 meeting_set_ui_map 写回。',
+    parameters: {
+      app: { type: 'string', description: '会议软件名（可选，默认当前）' },
+      action: { type: 'string', description: '要标定的动作：join / quick / schedule / share / leave（默认 join）' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_calibrate', async (a) => {
+      const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
+      const action = String(a.action || 'join')
+      const opts = meetingOpts(app)
+      const name = String(app.name || 'meeting').replace(/[\\/:*?"<>|]/g, '_')
+      const out = join(calibDir, name + '-' + action + '-' + Date.now().toString(36) + '.png')
+      let shot = null
+      try {
+        shot = await shotWindow(app.title, out, opts)
+      } catch (e) {
+        return { ok: false, result: '截不到 ' + app.name + ' 的窗口：' + e.message + '\n先把客户端打开并切到首页' }
+      }
+      const rect = await clientRect(app.title, opts).catch(() => null)
+      const cur = uiMap.get(app.name, action)
+      const lines = []
+      lines.push('已截图：' + shot.path)
+      lines.push('窗口内容 ' + shot.w + '×' + shot.h + (rect ? '（屏幕位置 ' + rect.x + ',' + rect.y + '）' : ''))
+      lines.push('当前 ' + action + ' 坐标：' + (cur ? cur.x + ', ' + cur.y : '未标定'))
+      lines.push('')
+      lines.push('下一步：看这张图，找到目标按钮的中心（像素坐标 px, py），然后调用')
+      lines.push('  meeting_set_ui_map { app: "' + app.name + '", action: "' + action + '", px: ' + 'X' + ', py: ' + 'Y' + ', w: ' + shot.w + ', h: ' + shot.h + ' }')
+      lines.push('插件会换算成相对比例存起来，以后不再需要看图。')
+      return { ok: true, result: lines.join('\n'), image: shot.path }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'meeting_set_ui_map',
+    description: '保存界面按钮坐标。可用截图像素（配 w/h）或直接给相对比例（x/y，0~1）。存好之后入会等流程直接用它。',
+    parameters: {
+      app: { type: 'string', required: true, description: '会议软件名' },
+      action: { type: 'string', description: 'join / quick / schedule / share / leave（默认 join）' },
+      px: { type: 'number', description: '截图里的 x 像素' },
+      py: { type: 'number', description: '截图里的 y 像素' },
+      w: { type: 'number', description: '截图宽度（与 px/py 配套）' },
+      h: { type: 'number', description: '截图高度（与 px/py 配套）' },
+      x: { type: 'number', description: '相对比例 0~1' },
+      y: { type: 'number', description: '相对比例 0~1' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_set_ui_map', async (a) => {
+      const app = meetingApp(a.app)
+      const action = String(a.action || 'join')
+      let ratio = null
+      if (Number.isFinite(a.px) && Number.isFinite(a.py) && a.w > 0 && a.h > 0) {
+        ratio = pixelToRatio(a.px, a.py, a.w, a.h)
+      } else if (Number.isFinite(a.x) && Number.isFinite(a.y)) {
+        ratio = { x: a.x, y: a.y }
+      }
+      if (!ratio || !validRatio(ratio.x, ratio.y)) {
+        return { ok: false, result: '坐标不合法：需要 px/py/w/h，或 x/y 在 0~1 之间' }
+      }
+      const saved = uiMap.set(app.name, action, ratio, { via: 'calibrate' })
+      if (!saved) return { ok: false, result: '保存失败（action 是否拼错？）' }
+      return { ok: true, result: app.name + ' · ' + action + ' 已存：' + saved.x + ', ' + saved.y }
+    }),
+  }))
   // ── 手动切换会议软件 ────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_app_select',
@@ -1760,10 +1888,18 @@ export function apply(ctx, config) {
       const after = await listWindows()
       const beforeKeys = new Set(before.map((w) => w.proc + '|' + w.cls + '|' + w.title))
       const added = after.filter((w) => !beforeKeys.has(w.proc + '|' + w.cls + '|' + w.title))
-      if (a.save) { cfg.joinClickRatio = { x: a.x, y: a.y }; savePersisted({ joinClickRatio: cfg.joinClickRatio }) }
+      const rectNow = await clientRect(app.title, opts).catch(() => null)
+      if (a.save) {
+        // 存成相对客户区的比例（与窗口大小无关）
+        if (rectNow) {
+          const rx = (x - rectNow.x) / rectNow.w
+          const ry = (y - rectNow.y) / rectNow.h
+          if (validRatio(rx, ry)) uiMap.set(app.name, 'join', { x: rx, y: ry }, { via: 'click_ratio' })
+        }
+      }
       const lines = ['点击 (' + x + ', ' + y + ')，窗口 ' + win.w + '×' + win.h + ' @' + win.x + ',' + win.y]
       lines.push(added.length ? '新窗口：' + added.map((w) => w.title + '[' + w.cls + ']').join(' / ') : '没有新窗口出现')
-      if (a.save) lines.push('已保存为入会按钮坐标')
+      if (a.save) lines.push('已存为 ' + app.name + ' 的 join 坐标')
       return { ok: true, result: lines.join('\n') }
     }),
   }))
