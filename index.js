@@ -235,7 +235,8 @@ const OUT = (extra = {}) => ({
 export function apply(ctx, config) {
   const logger = ctx.logger
   const cfg = {
-    enabled: config.enabled !== false,
+    // 总开关：默认关。必须在面板里打开之后，各功能才工作
+    enabled: config.enabled === true,
     appPath: config.appPath || '',
     windowTitle: config.windowTitle || '腾讯会议',
     windowClass: config.windowClass || 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView',
@@ -426,6 +427,7 @@ export function apply(ctx, config) {
           brain: brain.stats,
           agent,
           mic: mic.state,
+          enabled: cfg.enabled === true,
           armed: isArmed(),
           auto: !!(cfg.autoWatch && lifecycle.timer),
           lifecycle: lifecycle.snapshot(),
@@ -463,19 +465,21 @@ export function apply(ctx, config) {
         if (action === 'start') {
           // 用户明确开启：这时才允许自动采集/入会/标定
           armed = true
+          cfg.enabled = true
           cfg.autoWatch = true
           if (!lifecycle.timer) lifecycle.start()
           logger?.info?.('[soulmirror] 已开启会议功能（armed），允许自动操作')
         } else if (action === 'stop') {
           // 关闭：立刻解除，停止采集与所有自动动作
           armed = false
+          cfg.enabled = false
           cfg.autoWatch = false
           lifecycle.stop()
           try { await session.stopCapture() } catch { /* ignore */ }
           logger?.info?.('[soulmirror] 已关闭会议功能（disarmed），不再自动操作')
         }
-        try { savePersisted({ autoWatch: cfg.autoWatch }) } catch { /* ignore */ }
-        return json(200, { ok: true, armed, auto: !!(cfg.autoWatch && lifecycle.timer), lifecycle: lifecycle.snapshot() })
+        try { savePersisted({ autoWatch: cfg.autoWatch, enabled: cfg.enabled }) } catch { /* ignore */ }
+        return json(200, { ok: true, enabled: cfg.enabled === true, armed, auto: !!(cfg.autoWatch && lifecycle.timer), lifecycle: lifecycle.snapshot() })
       }
       if (req.method === 'POST' && sub === 'test') {
         const buf = []
@@ -583,7 +587,7 @@ export function apply(ctx, config) {
   // 关键：装了插件 ≠ 允许它动电脑。只有用户显式开启（面板开关 / meeting_agent_start）
   // 之后，才允许自动采集、自动建会话、自动标定、自动入会这些会碰桌面的动作。
   let armed = false
-  const isArmed = () => armed === true
+  const isArmed = () => armed === true && cfg.enabled === true
 
 
   /** 把任务结果压成一句口语化总结（不硬截断） */
@@ -947,7 +951,22 @@ export function apply(ctx, config) {
     })
   }
 
+  // 这些工具会操作桌面、占用麦克风或对外产出，总开关关着时一律拒绝
+  const NEEDS_ENABLED = new Set([
+    'meeting_join', 'meeting_auto_join', 'meeting_agent_start', 'meeting_agent_stop',
+    'meeting_capture_start', 'meeting_capture_stop', 'meeting_calibrate', 'meeting_recalibrate',
+    'meeting_click_ratio', 'meeting_set_default', 'meeting_leave', 'meeting_open',
+    'meeting_quick', 'meeting_schedule', 'meeting_share',
+    'soul_say', 'soul_task',
+  ])
+
   const wrap = (toolName, impl) => async (args) => {
+    if (NEEDS_ENABLED.has(toolName) && cfg.enabled !== true) {
+      return {
+        ok: false,
+        result: '会议插件未开启，已拦下「' + toolName + '」。\n先在面板顶部打开开关（或在对话里说"打开会议插件"），我再执行。',
+      }
+    }
     try {
       return await impl(args || {})
     } catch (err) {
@@ -2224,7 +2243,7 @@ export function apply(ctx, config) {
         // 分两级权限：
         //   采集转写 = 只读音频，安全 → 默认自动开始
         //   建会话 / 标定 / 入会 / 发言 = 会碰桌面或产生副作用 → 需要 armed
-        if (cfg.autoCapture && !session.capturing) {
+        if (cfg.enabled && cfg.autoCapture && !session.capturing) {
           await session.startCapture('auto').catch((e) => logger?.warn?.('[soulmirror] 自动采集失败: ' + e.message))
           logger?.info?.('[soulmirror] 检测到会议（' + reason + '），已开始采集转写')
         }
@@ -2252,6 +2271,8 @@ export function apply(ctx, config) {
       },
     },
   )
+  // 恢复上次的开关状态：上次开着就继续开，上次关着就保持待命
+  if (cfg.enabled === true) armed = true
   if (cfg.autoWatch && process.env.SOULMIRROR_TEST !== '1') lifecycle.start()
 
   // 启动时做一次环境自检（只打日志，不阻塞）
