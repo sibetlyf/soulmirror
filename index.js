@@ -158,6 +158,8 @@ export const Config = z.object({
   autoCalibrate: z.boolean().default(true),
   /** 连续失败几次就重新标定。 */
   recalibrateThreshold: z.number().default(2),
+  /** 检测到会议就自动开始采集转写（只听，不操作桌面；不受 armed 限制）。 */
+  autoCapture: z.boolean().default(true),
   /** 自动跟随：哪个会议软件在开会就用哪个（activeApp 为空时生效）。 */
   autoAppSelect: z.boolean().default(true),
   /** 只盯某个会议软件（填 apps 里的 name 或 proc；空 = 任意支持的软件都盯）。 */
@@ -266,6 +268,7 @@ export function apply(ctx, config) {
     autoWatch: config.autoWatch !== false,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
     autoJoin: { enabled: true, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
+    autoCapture: config.autoCapture !== false,
     autoCalibrate: config.autoCalibrate !== false,
     recalibrateThreshold: Number(config.recalibrateThreshold || 2),
     autoAppSelect: config.autoAppSelect !== false,
@@ -2085,7 +2088,7 @@ export function apply(ctx, config) {
   /** 会后：纪要落盘 → 写知识库 → 沉淀人格 */
   let finalizing = false
   let lastFinalizedAt = 0
-  async function finalizeMeeting({ speak = false } = {}) {
+  async function finalizeMeeting({ speak = false, writeKnowledge = true } = {}) {
     if (finalizing) return { skipped: '正在收尾中' }
     if (Date.now() - lastFinalizedAt < 60000) return { skipped: '刚刚收尾过' }
     finalizing = true
@@ -2109,10 +2112,12 @@ export function apply(ctx, config) {
     }
 
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
-    if (cfg.knowledge.enabled && md && cfg.twin.enabled) {
+    if (writeKnowledge && cfg.knowledge.enabled && md && cfg.twin.enabled) {
       const kd = detectKnowledge(cfg.knowledge.profile || '')
       const mode = String(cfg.knowledge.mode || 'host')
-      if (mode === 'off') {
+      if (!writeKnowledge) {
+        results.knowledge = '已跳过（会议功能未开启，只落本地纪要）'
+      } else if (mode === 'off') {
         results.knowledge = '已关闭（knowledge.mode = off）'
       } else if (!kd.installed && !kd.host) {
         results.knowledge = '跳过（未安装 dsh-knowledge）'
@@ -2216,25 +2221,30 @@ export function apply(ctx, config) {
       meters: metersMax,
       logger,
       onEnter: async ({ reason }) => {
-        // 只检测、不动手：没开启会议功能就只记一行日志
+        // 分两级权限：
+        //   采集转写 = 只读音频，安全 → 默认自动开始
+        //   建会话 / 标定 / 入会 / 发言 = 会碰桌面或产生副作用 → 需要 armed
+        if (cfg.autoCapture && !session.capturing) {
+          await session.startCapture('auto').catch((e) => logger?.warn?.('[soulmirror] 自动采集失败: ' + e.message))
+          logger?.info?.('[soulmirror] 检测到会议（' + reason + '），已开始采集转写')
+        }
         if (!isArmed()) {
-          logger?.info?.('[soulmirror] 检测到会议（' + reason + '），但会议功能未开启，不做任何自动操作')
+          logger?.info?.('[soulmirror] 会议功能未开启：只转写，不建会话、不发言、不操作桌面')
           return
         }
         try { await autoPickApp() } catch { /* ignore */ }
-        if (!session.capturing) await session.startCapture('auto').catch(() => {})
         agent.running = true
         ensureMeetingSession(reason).catch(() => {})
-        logger?.info?.('[soulmirror] 自动开始记录：' + reason)
+        logger?.info?.('[soulmirror] 已开启状态：建会话并准备发言')
       },
       onExit: async () => {
-        // 没有在采集（说明本来就没开启）→ 不要生成纪要、不要写知识库
         const wasCapturing = !!session.capturing
         agent.running = false
         if (!wasCapturing) return
         await session.stopCapture().catch(() => {})
         try {
-          const r = await finalizeMeeting({ speak: false })
+          // 纪要写本地；知识库回写与发言属于"对外动作"，未开启时不做
+          const r = await finalizeMeeting({ speak: false, writeKnowledge: isArmed() })
           logger?.info?.('[soulmirror] 会议结束：' + JSON.stringify(r).slice(0, 200))
         } catch (e) {
           logger?.warn?.('[soulmirror] 会议收尾失败: ' + e.message)
