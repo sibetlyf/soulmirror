@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-appapi-'))
+process.env.SOULMIRROR_TEST = '1'
 process.env.USERPROFILE = fakeHome
 process.env.HOME = fakeHome
 

@@ -40,6 +40,7 @@ import { LivingWorld } from './lib/living.js'
 import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
 import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio } from './lib/uimap.js'
 import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib/join-url.js'
+import { resolveApiKey, keyInfo } from './lib/env.js'
 import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
 import { findMeeting, findMeetingInEvent, AutoJoinGate } from './lib/auto-join.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
@@ -316,8 +317,8 @@ export function apply(ctx, config) {
         baseUrl: cfg.asr.baseUrl,
         apiKeyEnv: cfg.asr.apiKeyEnv,
         apiKey: '',
-        keySet: !!(cfg.asr.apiKey || process.env[cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY']),
-        keySource: cfg.asr.apiKey ? 'config' : (process.env[cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY'] ? 'env' : 'none'),
+        keySet: keyInfo(cfg.asr).set,
+        keySource: keyInfo(cfg.asr).source,
         chunkSeconds: cfg.asr.chunkSeconds,
         lang: cfg.asr.lang,
       },
@@ -2215,14 +2216,16 @@ export function apply(ctx, config) {
       },
     },
   )
-  if (cfg.autoWatch) lifecycle.start()
+  if (cfg.autoWatch && process.env.SOULMIRROR_TEST !== '1') lifecycle.start()
 
   // 启动时做一次环境自检（只打日志，不阻塞）
-  try {
-    const env = detectEnv()
-    if (!env.ready) logger?.warn?.('[soulmirror] 环境待补：' + env.missing.join('、') + ' → 运行 soul_setup')
-    else logger?.info?.('[soulmirror] 环境自检：就绪（' + env.platform + '）')
-  } catch { /* ignore */ }
+  if (process.env.SOULMIRROR_TEST !== '1') {
+    try {
+      const env = detectEnv()
+      if (!env.ready) logger?.warn?.('[soulmirror] 环境待补：' + env.missing.join('、') + ' → 运行 soul_setup')
+      else logger?.info?.('[soulmirror] 环境自检：就绪（' + env.platform + '）')
+    } catch { /* ignore */ }
+  }
   // ── 实时纪要 ────────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_minutes',
@@ -2736,6 +2739,7 @@ export function apply(ctx, config) {
   const firstRunCalibrate = setTimeout(() => {
     if (!cfg.autoCalibrate || !cfg.enabled) return
     // 没有真实会话服务（测试/受限环境）就别去探索，否则每个启动都在跑 PowerShell
+    if (process.env.SOULMIRROR_TEST === '1') return
     if (!getController(ctx)) return
     detectMeetingApp()
       .then((app) => {

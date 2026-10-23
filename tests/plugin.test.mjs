@@ -6,6 +6,7 @@ import { join } from 'node:path'
 
 // 关键：在导入插件之前把 HOME 指向临时目录，避免污染真实配置
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-home-'))
+process.env.SOULMIRROR_TEST = '1'
 process.env.USERPROFILE = fakeHome
 process.env.HOME = fakeHome
 
