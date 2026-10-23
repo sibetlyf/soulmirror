@@ -423,6 +423,7 @@ export function apply(ctx, config) {
           brain: brain.stats,
           agent,
           mic: mic.state,
+          armed: isArmed(),
           auto: !!(cfg.autoWatch && lifecycle.timer),
           lifecycle: lifecycle.snapshot(),
         })
@@ -457,14 +458,21 @@ export function apply(ctx, config) {
         for await (const chunk of req) bufA.push(chunk)
         const action = JSON.parse(Buffer.concat(bufA).toString('utf8') || '{}').action
         if (action === 'start') {
+          // 用户明确开启：这时才允许自动采集/入会/标定
+          armed = true
           cfg.autoWatch = true
           if (!lifecycle.timer) lifecycle.start()
+          logger?.info?.('[soulmirror] 已开启会议功能（armed），允许自动操作')
         } else if (action === 'stop') {
+          // 关闭：立刻解除，停止采集与所有自动动作
+          armed = false
           cfg.autoWatch = false
           lifecycle.stop()
+          try { await session.stopCapture() } catch { /* ignore */ }
+          logger?.info?.('[soulmirror] 已关闭会议功能（disarmed），不再自动操作')
         }
         try { savePersisted({ autoWatch: cfg.autoWatch }) } catch { /* ignore */ }
-        return json(200, { ok: true, auto: !!(cfg.autoWatch && lifecycle.timer), lifecycle: lifecycle.snapshot() })
+        return json(200, { ok: true, armed, auto: !!(cfg.autoWatch && lifecycle.timer), lifecycle: lifecycle.snapshot() })
       }
       if (req.method === 'POST' && sub === 'test') {
         const buf = []
@@ -567,6 +575,13 @@ export function apply(ctx, config) {
     return spkCache.name
   }
   const session = new MeetingSession(cfg, logger)
+
+  // ── 是否"已开启会议功能" ─────────────────────────────────────────────
+  // 关键：装了插件 ≠ 允许它动电脑。只有用户显式开启（面板开关 / meeting_agent_start）
+  // 之后，才允许自动采集、自动建会话、自动标定、自动入会这些会碰桌面的动作。
+  let armed = false
+  const isArmed = () => armed === true
+
 
   /** 把任务结果压成一句口语化总结（不硬截断） */
   async function summarizeTask(prompt, output) {
@@ -1653,6 +1668,7 @@ export function apply(ctx, config) {
 
   /** 需要就触发一次标定（后台跑，不挡主流程） */
   function maybeCalibrate(app, action = "join", reason = "") {
+    if (!isArmed()) return { started: false, skipped: "not-armed" }
     if (!cfg.autoCalibrate) return { started: false, skipped: "disabled" }
     const need = uiMap.needsRecalibration(app && app.name, action, cfg.recalibrateThreshold)
     if (!need.needed) return { started: false, skipped: "not-needed" }
@@ -1782,12 +1798,13 @@ export function apply(ctx, config) {
     execute: wrap('meeting_agent_start', async (a) => {
       if (cfg.asr.provider === 'none') return { ok: false, result: 'ASR 未配置，无法开启' }
       if (cfg.asr.provider === 'dashscope') {
-        const key = cfg.asr.apiKey || process.env[cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY']
+        const key = resolveApiKey(cfg.asr).key
         if (!key) {
           return { ok: false, result: '缺少 DashScope Key：环境变量 ' + (cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY') + ' 未设置，配置里也没有填。\n在「会议 → 配置」里填 Key 并保存，或 setx 后重启 DSH。' }
         }
       }
       agent.running = true
+      armed = true
       await session.startCapture(a.label || 'agent')
       return {
         ok: true,
@@ -1803,6 +1820,7 @@ export function apply(ctx, config) {
     output: OUT(),
     execute: wrap('meeting_agent_stop', async () => {
       agent.running = false
+      armed = false
       await session.stopCapture()
       return { ok: true, result: `已停止：听过 ${brain.stats.seen} 句，触发 ${brain.stats.triggered} 次，播报 ${agent.spoken} 次` }
     }),
@@ -1838,12 +1856,13 @@ export function apply(ctx, config) {
       const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
       const action = String(a.action || 'join')
       if (!app || !app.name) return { ok: false, result: '没检测到会议软件，先把客户端打开' }
+      if (!isArmed()) return { ok: false, result: '会议功能未开启，不会去操作桌面。先在面板里打开开关，或调用 meeting_agent_start' }
       if (!cfg.autoCalibrate) return { ok: false, result: '自动标定已在配置里关闭（autoCalibrate: false）' }
       const meta = uiMap.meta(app.name, action)
       const need = uiMap.needsRecalibration(app.name, action, cfg.recalibrateThreshold)
       const r = calibrator.trigger({ app: app.name, action, reason: meta.lastReason || '', failures: meta.failures || 0 })
       if (!r.started) {
-        return { ok: false, result: '没启动：' + (r.skipped === 'running' ? '已经在标定了，等它跑完' : r.skipped === 'cooldown' ? '刚标定过，几分钟后再试' : String(r.skipped)) }
+        return { ok: false, result: '没启动：' + (r.skipped === 'running' ? '已经在标定了，等它跑完' : r.skipped === 'cooldown' ? '刚标定过，几分钟后再试' : r.skipped === 'not-armed' ? '会议功能未开启' : String(r.skipped)) }
       }
       const entry = await r.job
       const saved = uiMap.get(app.name, action)
@@ -2197,15 +2216,22 @@ export function apply(ctx, config) {
       meters: metersMax,
       logger,
       onEnter: async ({ reason }) => {
+        // 只检测、不动手：没开启会议功能就只记一行日志
+        if (!isArmed()) {
+          logger?.info?.('[soulmirror] 检测到会议（' + reason + '），但会议功能未开启，不做任何自动操作')
+          return
+        }
         try { await autoPickApp() } catch { /* ignore */ }
-        if (!cfg.autoWatch) return
         if (!session.capturing) await session.startCapture('auto').catch(() => {})
         agent.running = true
         ensureMeetingSession(reason).catch(() => {})
         logger?.info?.('[soulmirror] 自动开始记录：' + reason)
       },
       onExit: async () => {
+        // 没有在采集（说明本来就没开启）→ 不要生成纪要、不要写知识库
+        const wasCapturing = !!session.capturing
         agent.running = false
+        if (!wasCapturing) return
         await session.stopCapture().catch(() => {})
         try {
           const r = await finalizeMeeting({ speak: false })
@@ -2689,6 +2715,7 @@ export function apply(ctx, config) {
   const autoJoinGate = new AutoJoinGate({ cooldownMs: (cfg.autoJoin && cfg.autoJoin.cooldownMs) || 300000 })
   const autoJoinBusy = { at: 0 }
   async function autoJoinFromSession(text, source) {
+    if (!isArmed()) return null
     if (!cfg.autoJoin || cfg.autoJoin.enabled === false) return null
     const hit = findMeeting(text)
     if (!hit) return null
@@ -2735,23 +2762,8 @@ export function apply(ctx, config) {
     logger?.warn?.("[soulmirror] 会话自动入会监听失败: " + e.message)
   }
 
-  // 首次安装：蹲一会儿等客户端就绪，再让 computer-use 探一遍按钮位置
-  const firstRunCalibrate = setTimeout(() => {
-    if (!cfg.autoCalibrate || !cfg.enabled) return
-    // 没有真实会话服务（测试/受限环境）就别去探索，否则每个启动都在跑 PowerShell
-    if (process.env.SOULMIRROR_TEST === '1') return
-    if (!getController(ctx)) return
-    detectMeetingApp()
-      .then((app) => {
-        if (!app || !app.name) return
-        const need = uiMap.needsRecalibration(app.name, 'join', cfg.recalibrateThreshold)
-        if (!need.needed) return
-        logger?.info?.('[soulmirror] 首次使用，交给 computer-use 标定 ' + app.name + ' 的入会按钮')
-        maybeCalibrate(app, 'join', need.why)
-      })
-      .catch(() => {})
-  }, 8000)
-  if (firstRunCalibrate.unref) firstRunCalibrate.unref()
+  // 说明：标定不再随安装自动触发。只有"已开启会议功能"且入会失败时才自动重学，
+  // 或者由用户/agent 显式调用 meeting_recalibrate。
 
   logger?.info?.('soulmirror: 全部工具已注册')
 }
