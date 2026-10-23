@@ -1,102 +1,134 @@
-# SoulMirror · DSH 数字分身
+# SoulMirror
 
-听会议、懂意图、能开口，还能把活交给 DSH 干完再回来汇报。
+接到会议里，听人说话，该开口时开口，该干活时去干活。跑在 DeepSeek Harness 上。
 
-## 设计哲学
-
-> 数据不是死的。每一条数据都有自己的生命周期。
-
-大多数助手把对话存成日志：读得越多，堆得越厚，最后没人再打开它。
-SoulMirror 走另一条路——**让数据活着**。
-
-**记忆会呼吸。**
-每段记忆带着活力。不被想起来的会慢慢沉下去、沉睡；被说起的会重新绽开。
-所以它不是"记住一切"，而是"记得住重要的"。
-
-**信念会进化。**
-一句话可以是种子。被反复印证，它长成小苗、长成树；被一次次推翻，它会枯。
-死掉的信念不删，留作墓碑——那也是一种诚实。
-
-**情绪成地形。**
-喜悦、疲惫、焦虑、平静，按时间衰减后聚成一片地貌：光原、幽谷、火山、迷雾、静湖。
-活着的小信念立在里面，就是建筑。于是"此刻的我"有了形状。
-
----
-
-过去、现在、未来，是一条线，不是三个抽屉。
-
-- **过去**：说过的每句话、冒出的每种情绪，被捕获、被称重、被保存。
-- **现在**：它们自动编织成此刻的你——活的信念、情绪的议会、心像的地形。
-- **未来**：分身带着这套东西去预演、去干活、去替你先试一遍。
-
-**过去构建现在，现在投射未来。**
-
----
-
-禅在这里不是装饰，是几条工程纪律：
-
-| 禅 | 落在代码里 |
-|---|---|
-| 无常 | 一切都带衰减系数。记忆、情绪、信念都会变，没有"永久有效"的缓存 |
-| 无住 | 不执着于一次回答的正确。说错了就改，纠正器每句都过一遍 |
-| 无我 | 分身不假装是人。它承认自己是工具，把"我是谁"写进可编辑的 `IDENTITY.md` |
-| 留白 | 没人应答时不硬等：5 秒后自己走进下一步（`autoAnswer`） |
-| 诚实 | 做不到就说做不到。拿不到结果就说"没拿到"，不编造成功 |
-
-所以这个仓库里没有"AI 记忆宫殿"这类说法。
-只有三个 JSON 文件、两个半衰期参数，和一条随时可以 `soul_world { breathe: true }` 看一眼的曲线。
-
----
-
-## 能力
-
-| | |
-|---|---|
-| **听** | WASAPI 环回采集会议音频，只采会议客户端所在设备 |
-| **转** | 阿里云百炼实时 ASR：中间结果、标点、ITN、顺滑、VAD 断句、时间戳 |
-| **校** | 每句用大模型纠同音错字（"大峰/杨峰" → 正确人名），人名取自 `userName` + 唤醒词 |
-| **懂** | 判定"是不是在叫我"，支持点名、提问、被交代事项 |
-| **说** | 切虚拟麦 → 长按空格 → 流式 TTS → 松开 → 切回 |
-| **干** | 被交代任务时自动起 DSH 任务，跑完把结果总结成一句话汇报 |
-| **记** | 会后自动写知识库、沉淀人格（USER.md / STATE.md） |
-
-## 安装
-
-```bash
+```
 dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
 ```
 
-装完重启 `dsh web`，首次运行跑一次：
+装完重启 `dsh web`，再跑一次 `soul_setup { action: "auto" }`。Windows 会用系统自带 `csc`
+把 `tools/mbridge.exe` 编译出来，macOS / Linux 只做依赖检查。
 
-```
-soul_setup { action: "auto" }
-```
+> PowerShell 会把 `#` 当注释，上面那个 ref 的引号不能省。
 
-Windows 会自动用系统 `csc` 编译 `tools/mbridge.exe`；macOS / Linux 只做依赖检测。
+## 一场会议里它做什么
 
-> PowerShell 里 `#` 会被当注释，ref 必须带引号（上面已加）。
+会议开始，插件自己发现窗口，把采集打开。说的每句话先经阿里云实时识别，再过一遍大模型纠正
+同音错字——"大峰""杨峰"这类错听会被改回正确的人名，然后才进判断。
 
-## 依赖
+判断交给模型，不是关键词表。它能分清"这个方案你怎么看"是在问人，还是该自己接话。
+被叫到、被问、被交代事情，它才会出声。
 
-| 平台 | 虚拟声卡 | 自动部署 |
+出声的方式是：把系统默认麦克风临时切到虚拟声卡，按住空格把流式语音送进去，说完松开，
+再把麦克风切回来。中间会确认会议客户端真的跟着切了，没跟上就不播。
+
+被交代了任务，它先说一句"我去查"，然后在后台跑，不占着会议。跑完不急着说——
+等会议安静两秒半，再用两三句话把结论讲完。
+
+会议结束后，纪要存本地，写进知识库，顺手把这一场里关于你的偏好和前情更新到人格文件里。
+
+## 能力一览
+
+| | |
+|---|---|
+| 采集 | WASAPI 环回，只采会议客户端所在设备 |
+| 识别 | 百炼 `paraformer-realtime-v2`，中间结果、标点、ITN、顺滑、VAD 断句、时间戳 |
+| 纠错 | 每句过一遍同音字纠正，词表来自 `userName` + 唤醒词 + 会议背景 |
+| 判断 | 完整上文交给模型，决定要不要接话、要不要干活 |
+| 发言 | 切虚拟麦 → 长按空格 → 流式 TTS → 松开 → 切回 |
+| 干活 | 起 DSH 任务，结果压成一两句汇报 |
+| 沉淀 | 会后写知识库、更新 `USER.md` / `STATE.md` |
+
+## 会议软件
+
+内置这些，进程名可多个候选：
+
+| 软件 | 进程 | 状态 |
 |---|---|---|
-| Windows | VB-CABLE | ❌ 内核驱动，手动装 |
-| macOS | BlackHole | ❌ brew 需要 sudo |
-| Linux | 不用驱动 | ✅ `pactl` 加载 null-sink |
+| 腾讯会议 | `wemeetapp` / `TencentMeeting` | 主用，全链路验证过 |
+| 移动会议（云视讯） | `CloudVideo` / `ydmeeting` | 首页与入会弹窗已适配 |
+| 飞书会议 | `Feishu` / `Lark` | 预设就绪，未实测 |
+| 钉钉会议 | `DingTalk` | 预设就绪，未实测 |
+| Zoom / Teams | `Zoom` / `ms-teams` | 预设就绪 |
 
-其它：阿里云百炼 Key（ASR/TTS）、任意 OpenAI 兼容模型（判定/纠错/回答）。
+识别打分：进程精确 100，进程相似 80，标题命中 60，专用类名 40。`BaseDialog` 这种谁都在用的
+类名不算证据，否则会把 GameViewer 误认成会议软件。
+
+面板「抓取」是个下拉：自动跟随，或者钉死某个客户端。也可以命令行来：
+
+```
+meeting_apps                    # 谁在跑、当前抓谁、还能接哪些
+meeting_app_select { name }     # 钉死；传空串回到自动跟随
+```
+
+接入新软件只需要加一条预设（进程名 + 标题/类名提示），或者直接在 `apps` 里写一行：
+
+```yaml
+autoAppSelect: true
+activeApp: 腾讯会议     # 写了就钉死，自动跟随不再覆盖
+apps:
+  - { name: 腾讯会议, proc: wemeetapp }
+  - { name: 自定义会议, proc: MyMeeting }
+```
+
+## 会话与会议身份
+
+一场会议对应一条 DSH 会话，会话会在界面里出现，端侧能翻每一轮模型输出。
+
+判定"同一场会"的顺序：显式会议号 → 窗口标题里的会议号 → 窗口标题 → 时间戳。
+映射存在 `~/.dsh/soulmirror/sessions.json`，所以中途退出再进、甚至重启 DSH，
+只要身份一样就续上原来那条会话。
+
+```
+soul_session { setMeetingId: "206-275-219" }
+```
+
+腾讯会议把会议号画在画布上，读不到标题里，所以自动识别会扫窗口控件文本、再退回剪贴板；
+实在没有就手填一次，之后记住。
+
+## 活数据
+
+三条曲线，都在 `lib/living.js`，都是带衰减系数的数据结构。
+
+**记忆带活力。** 刚记下是 0.8 左右，按三天半衰期往下掉，低于 0.15 进入沉睡；
+被再次提起就 +0.3，沉下去的会重新醒。所以它不是什么都记，是记得住还活着的那些。
+
+**信念会长。** 一句话是种子，攒到 0.35 发芽、0.6 成小树、0.85 长成大树；
+被反复反驳会枯，强度掉到 0.02 就算死。死掉的留着不删，能回看它怎么死的。
+
+**情绪成地形。** 情绪事件按 1.5 天半衰期聚合，铺到 8×8 网格上，按主导情绪上色：
+喜悦是光原，低落是幽谷，愤怒是火山，担忧是迷雾，平静是静湖。活着的信念立在里面，就是建筑。
+
+```
+soul_world   { breathe? }    # 看形状；breathe 走一次衰减
+soul_belief  { action }      # list / seed / reinforce / weaken / evolve
+soul_goal    { action }      # add / list / run
+```
+
+## 无人值守
+
+半夜在跑任务时，DSH 弹一张确认卡片，人不在，这轮就停在那儿。所以拦一下 `approval/request`：
+卡片照常弹，你在五秒内点了就用你的答案；五秒没人理，就按推荐项自己选一个，agent 接着干。
+没有推荐标记时，审批默认放行一次，问句取第一个选项。
+
+```yaml
+autoAnswer: { enabled: true, timeoutMs: 5000 }
+```
 
 ## 工具
 
 ```
-meeting_*  ×21   采集、转写、纪要、发言、窗口控制
-soul_task        交给 DSH headless 执行，可当场汇报
-soul_say         主动发言
-soul_status      分身状态
+meeting_*  ×21   采集、转写、纪要、发言、窗口与入会控制
+soul_task        交给 DSH 执行，可当场汇报
+soul_say         主动发言，不依赖唤醒词
+soul_status      在线状态、唤醒词、最近任务
 soul_session     本场会议的工作区与会话
 soul_persona     读/写四层人格（soul / identity / user / state）
 soul_memory      长期记忆：查看、补记、蒸馏
-soul_setup       环境自检：check / build / auto / deps / install-deps / links
+soul_setup       环境体检：check / build / auto / deps / install-deps / links
+soul_world       内在宇宙
+soul_belief      信念树
+soul_goal        目标驱动
 ```
 
 ## 配置
@@ -104,318 +136,108 @@ soul_setup       环境自检：check / build / auto / deps / install-deps / lin
 面板里改，或编辑 `~/.dsh/soulmirror/config.json`：
 
 ```yaml
-userName: 你的名字        # 唤醒词自动派生
-activeApp: 腾讯会议
+userName: 你的名字        # 唤醒词自动派生：全名 / 去掉姓 / DSH / 助手
 policy: auto              # observe | suggest | auto
 asr:  { provider: dashscope, llmCorrect: true }
 tts:  { provider: dashscope, model: cosyvoice-v2, voice: longxiaochun_v2 }
 twin: { enabled: true, autoDelegate: true, reportSpeak: true }
 knowledge:
   mode: host              # host 直连宿主知识库 | agent 交给会话 | headless | off
-personaAutoUpdate: true
+brain:
+  gate: llm               # 每句都交给模型判断；rules 退回关键词
 ```
 
-## 插件联动
+## 依赖
 
-- **知识库**：默认 `mode: host`，直接调宿主里 `dsh-knowledge` 的本地 API（`/knowledge-local/v1/entries`）写入纪要，**不需要额外安装**；检测不到就跳过，纪要仍落本地。
-- **computer-use**：两者都会发键盘事件，同时操作桌面可能抢焦点；分身发言前会把会议窗口置前。
-- 体检：`soul_setup { action: "links" }`。
+运行需要三样东西：虚拟声卡（发言通道）、百炼 Key（识别与合成）、一个 OpenAI 兼容模型
+（判断、纠错、总结）。虚拟声卡是唯一需要手动装的：
+
+| 平台 | 方案 | 自动 |
+|---|---|---|
+| Windows | VB-CABLE | 内核驱动，手动装 |
+| macOS | BlackHole | brew 需要 sudo |
+| Linux | 不需要驱动 | `pactl` 加载 null-sink，全自动 |
+
+`soul_setup { action: "deps" }` 会告诉你现在有没有、缺的话去哪装。
+
+## 和别的插件
+
+**知识库**：默认 `mode: host`，直接调宿主里 `dsh-knowledge` 的本地 API 写纪要，
+不需要额外安装；检测不到就跳过，纪要照旧落本地。
+
+**computer-use**：两个都会发键盘事件，同时操作桌面会抢焦点。发言前会把会议窗口置前，
+所以极端情况是你正在用 computer-use 操作别的应用，被它抢一下。
+
+体检：`soul_setup { action: "links" }`。
 
 ## 目录
 
 ```
 ~/.dsh/soulmirror/
 ├── config.json
-├── persona/{SOUL,IDENTITY,USER,STATE}.md   # 改完即时生效
-├── memory.json                             # 长期记忆 + 蒸馏
-└── workspace/<会议时间>/                    # 一场会议一个工作区（含 DSH 会话）
+├── persona/{SOUL,IDENTITY,USER,STATE}.md   改完即时生效
+├── memory.json                             长期记忆 + 蒸馏结果
+├── living/{memory-living,beliefs,emotions}.json
+├── sessions.json                           会议身份 → DSH 会话
+└── workspace/<会议>/                        每场会一个工作区
 ```
 
-## 设计要点
+## 已知限制
 
-- 只在"最终句 + 纠错完成"后才进大脑判定，中间结果只用于显示
-- 播报期间按字数估算静音窗口，窗口内转写丢弃，避免自说自听
-- 发言前轮询 `mic-usage` 确认会议真的切到虚拟麦，否则不播
-- 分身说的每句话带 `role: 'assistant'` 写进转写，面板里高亮
-
-## 自动建会话
-
-会议一开始（检测到进入会议，或手动 `meeting_agent_start`）就会**自动创建一条 DSH 会话**：
-
-```
-ensureMeetingSession()  →  dsh --profile headless --json "会议开始…用一句话确认你已就位"
-                        →  拿到 sessionId，存进当前会议工作区
-```
-
-- 实测约 4.8 秒、一次极短调用，会话立刻出现在 DSH 会话列表里，端侧可查看
-- 之后这场会的所有任务（调研、整理、汇报）都续接这条会话
-- 关掉：`twin.autoSession: false`
-
-`soul_session` 会显示当前会议的会话 id；端侧打开 DSH 会话列表即可翻看模型每一轮输出。
-
-## 会议身份与会话复用
-
-**同一场会议 → 同一条 DSH 会话**。身份判定顺序：
-
-1. 显式会议号（`soul_session { setMeetingId: "206-275-219" }`）
-2. 窗口标题里出现的会议号（`206-275-219` / `206 275 219`）
-3. 窗口标题本身（会议主题）
-4. 时间戳（兜底）
-
-映射持久化在 `~/.dsh/soulmirror/sessions.json`：
-
-```json
-{ "206275219": { "dshSessionId": "session-…", "title": "…", "lastSeen": "…" } }
-```
-
-所以退出会议再进去、甚至重启 DSH，只要会议身份一样，`soul_task` 都续接原来那条会话。
-`soul_session` 会打印「会议身份 + 来源 + 映射表」。
-
-## 支持的会议软件
-
-| 软件 | 进程名 | 状态 |
-|---|---|---|
-| 腾讯会议 | `wemeetapp` | 已验证 |
-| 移动会议（中移动云视讯） | `CloudVideo` | 已验证首页/加入弹窗，支持 `meeting_join` |
-
-配置里 `apps` 可加任意软件：
-
-```yaml
-activeApp: 移动会议
-apps:
-  - { name: 腾讯会议, proc: wemeetapp, title: 腾讯会议,
-      classes: "VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView|BaseDialog",
-      path: "E:/Tencent/Meeting/WeMeet/wemeetapp.exe" }
-  - { name: 移动会议, proc: CloudVideo, title: 移动会议,
-      classes: "FrameWorkWnd|MainWindow|ParticipantWnd|VideoCellWnd",
-      path: "E:/CloudVideo/CloudVideo.exe" }
-```
-
-- 进程名比较**不区分大小写**
-- `proc` 没填或对不上时，用窗口标题包含的软件名兜底，并自动把推断出的进程名写回配置
-- 会议身份会带软件前缀（如 `腾讯会议:206275219`），避免不同软件同名会议撞到同一个会话
-- `activeApp` 决定 `meeting_status` / `meeting_join` / `meeting_leave` 默认操作哪个软件；也可给这些工具传 `app: 移动会议` 临时指定
-
-### 面板里的会议号
-
-SoulMirror 面板顶部「接入」下方新增「会议号」一行：
-
-- 自动识别：从剪贴板/窗口标题提取，来源标记「自动」；
-- 人工修改：直接编辑输入框，点「确认入会」保存为「手动」并调用加入流程；
-- 「识别」按钮强制重新扫描剪贴板/窗口标题；
-- 手动会议号持久化到 `config.json` 的 `meetingCode`，`meetingCodeManual: true`；
-- 接口：`POST /api/soulmirror/meeting`（`{code}` 或 `{detect:true}`）、`POST /api/soulmirror/join`（`{code}`）。
-
-### 自动识别与自动加入
-
-- `meeting_status` 会扫描所有已配置的会议软件，输出 `[会议中] / [运行中] / [未运行]`，并按 `activeApp` 自动选中当前要操作的软件。`app` 参数可显式覆盖。
-- `meeting_auto_join { confirm: true }` 一次完成三件事：
-  1. 识别正在运行的会议软件；
-  2. 从**剪贴板**或**窗口标题**里提取会议号（支持 `375 509 620`、`375-509-620`、会议链接里的 `会议号：xxx`）；
-  3. 调用对应软件的加入流程。
-- 传 `code` 时跳过识别：`meeting_auto_join { code: "375509620", confirm: true }`。
-- 已在会中会直接拒绝，提示先 `meeting_leave`。
-
-### 移动会议（CloudVideo）加入流程
-
-`meeting_join` 对移动会议会走专用控件：
-
-1. 聚焦 `移动会议` 主窗口；
-2. 点首页「加入会议」；
-3. 在弹窗的 `lineEditLeft` 填会议号；
-4. 点弹窗 `MeetJoinClass.widget.pushButton`；
-5. 读取 `TipsDlg`：`会议已结束 / HY20013` 这类会原样返回，不会误报成功。
-
-移动会议的在会界面是自绘窗口，UIA 读不到「离开」按钮；`meeting_leave` 找不到按钮时会用 `Alt+F4` 关闭窗口作为离开。加入前务必确认会议号，界面改版后先用 `meeting_ui dump app=移动会议` 看控件。
-
-
-## 主动式服务
-
-拿到指令后不是"回一句就完事"，而是：
-
-1. **立刻表态**：「收到，我去查，稍后告诉你。」
-2. **后台执行**：任务跑在会议会话里，不阻塞会议
-3. **等安静再汇报**：轮询「上一次有人说话」的时间，安静 2.5 秒后才播报；有人正在说就等他说完（最多等 3 分钟）
-4. **给简要总结**：用模型把结果压成 1-3 句，而不是念全文
-
-## 让它决定要不要说话（不看关键字）
-
-```yaml
-brain:
-  gate: llm    # 默认：每句转写都连同上文交给模型判断；rules = 退回关键词规则
-```
-
-实测同一段对话：
-
-| 说话内容 | 判定 |
-|---|---|
-| 然后第二就是他要变成一个有灵魂的东西 | 不插话 |
-| 你觉得应该先做日程还是先做记忆？ | 插话（给出观点） |
-| 这个模块下周三上线，排期紧 | 不插话 |
-| 亚峰帮我查一下今晚的交通 | 回复 + 派任务 |
-
-## 活数据（Living Data）
-
-数据不是死的：记忆会呼吸、信念会进化、情绪聚成心像地形。
-
-### 记忆会呼吸
-
-每条记忆有 `vitality`（0~1），按半衰期指数衰减（默认 3 天）：
-
-```
-刚记下  → bloom（绽放）
->0.15   → awake（清醒）
-<0.15   → sleep（沉睡）
-被想起  → vitality +0.3，沉睡的会重新绽放
-```
-
-### 信念会进化
-
-```
-seed(0.3) → sprout(0.35) → sapling(0.6) → tree(0.85) → dead(≤0.02)
-```
-
-反复强化会长成参天大树，长期被反驳会枯萎死亡（保留墓碑，不删除）。
-
-### 情绪成地形
-
-情绪事件按 1.5 天半衰期聚合，8×8 网格按主导情绪着色，形成心像地图：
-
-| 情绪 | 地形 |
-|---|---|
-| joy | 光原 |
-| sadness | 幽谷 |
-| anger | 火山 |
-| fear | 迷雾 |
-| calm | 静湖 |
-| surprise | 风原 |
-
-「情绪议会」是最近 24 小时各情绪的加权票数。活的信念在快照里呈现为建筑。
-
-### 工具
-
-```
-soul_world   { breathe? }         # 看内在宇宙；breathe 触发一次衰减/退化
-soul_belief  { action, ... }      # list | seed | reinforce | weaken | evolve
-soul_goal    { action, ... }      # add | list | run（目标驱动任务代理）
-```
-
-数据目录：`~/.dsh/soulmirror/living/`（`memory-living.json` / `beliefs.json` / `emotions.json`），
-`/status` 的 `world` 字段也会带回快照，端侧可看。
-
-## 无人值守（自动应答 / 自动继续）
-
-分身半夜开会、跑任务时，DSH 会弹「需要你确认」的卡片。人不在电脑前，这轮就卡死了。
-
-```yaml
-autoAnswer:
-  enabled: true
-  timeoutMs: 5000      # 5 秒没人答，自动按推荐项回答
-```
-
-行为：
-
-1. 拦截 `approval/request`，先正常弹出卡片
-2. 你在 5 秒内回答 → 用你的答案，插件不插手
-3. 5 秒没人答 → 按「推荐项」自动回答（标签里的 `(Recommended)` / `（推荐）`；没有推荐标记时，审批默认 `allowed-once`、问句取第一个选项）
-4. agent 继续跑，任务不会停
-
-日志会写：`无人应答，自动选择（recommended-label）：继续 (Recommended) tool · 原因 [session-…]`。
+- 飞书、钉钉、Zoom 只有预设，没在真机上跑过。接入前建议先 `meeting_apps` 看一眼，再 `meeting_mic_status` 确认麦克风行为
+- 入会靠 UI 自动化，客户端改版就会失效。找不到控件时它会把可见控件名打出来，照着补规则
+- macOS / Linux 的采集链路（ffmpeg + BlackHole/PulseAudio）只是设计好了，没实机验证
+- 腾讯会议把会议号画在画布上，自动识别有时读不到，需要手填一次
+- 记忆与情绪的衰减参数是拍出来的，用久了该调
 
 ## 测试
 
-```bash
-npm test          # 60 个单元 + 集成用例
+```
+npm test        # 75 个用例
 ```
 
-覆盖：活数据（记忆呼吸/信念进化/情绪地形）、会议身份与会话复用、人格读写与去重、长期记忆与蒸馏、
-大脑触发与 LLM 决策、纠错器、宿主内会话驱动（含旧 turn 不提前结算）、知识库检测与回写、
-环境自检、虚拟声卡方案、自动应答（超时/人工优先/禁用），以及插件整体启动：31 个工具注册、
-配置 API（密钥不回显）、各 soul_* 工具的读写行为。
+覆盖活数据三条曲线、会议身份与复用、人格读写去重、长期记忆与蒸馏、大脑触发与模型决策、
+纠错器、宿主内会话驱动（含"旧轮次不提前结算"）、知识库检测与回写、自动应答三种情形、
+会议软件识别打分，以及插件整体启动：31 个工具注册、配置 API 不回显密钥、各 `soul_*` 工具读写。
 
-## 会议软件：自动识别 / 手动切换 / 可扩展
+## 为什么这样设计
 
-内置预设（`lib/apps.js`）：
+大多数助手把对话存成日志，读得越多堆得越厚，最后没人再打开。这里换个做法：给数据加上时间。
 
-| 软件 | 进程 | 状态 |
-|---|---|---|
-| 腾讯会议 | `wemeetapp` / `TencentMeeting` / `WeMeet` | 已验证 |
-| 移动会议 | `CloudVideo` / `ydmeeting` | 已接入 |
-| 飞书会议 | `Feishu` / `Lark` | 预设就绪，未实测 |
-| 钉钉会议 | `DingTalk` | 预设就绪，未实测 |
-| Zoom | `Zoom` / `CptHost` | 预设就绪 |
-| Teams | `ms-teams` / `Teams` | 预设就绪 |
+记忆会忘、信念会死、情绪会淡，这些不是缺陷，是让"此刻的你"能被算出来的前提。
+过去的话被称重保存，现在被编织成形状，未来由这个形状去试。
 
-识别打分（从强到弱）：进程精确 100 → 进程相似 80 → 标题命中 60 → 专用类名 40。
-`BaseDialog` 这类通用类名**不算证据**（很多客户端都有），避免误报。
+几条自己守着的规矩：
 
-```
-meeting_apps                    # 列出运行状态、当前抓取、可接入预设
-meeting_app_select { name }     # 手动切换；传空串恢复自动跟随
-```
-
-配置：
-
-```yaml
-autoAppSelect: true    # 没手动指定时，哪个会议软件在开会就用哪个
-activeApp: 腾讯会议     # 手动指定后，自动跟随不再覆盖
-apps:
-  - { name: 腾讯会议, proc: wemeetapp }
-  - { name: 自定义会议, proc: MyMeeting }   # 不在预设里也能用
-```
-
-接入新软件只做两件事：在 `lib/apps.js` 补一条预设（进程名 + 标题/类名提示），
-或直接在 `apps` 里加一行配置。能力标注（`followDefaultMic` 等）也在预设里，
-用来提示"这个客户端会不会跟随系统默认麦克风"。
+- 什么都带衰减系数，没有"永久有效"的缓存
+- 说错了就改，纠错器每句都跑，不赌一次准确
+- 分身不假装是人，它是工具，身份写在可以改的 `IDENTITY.md` 里
+- 没人应答不硬等，五秒后自己往下走
+- 拿不到结果就说没拿到，不编造成功
 
 ## 参考与致谢
 
-SoulMirror 站在不少东西上。按"依赖程度"排列：
+宿主是 [DeepSeek Harness](https://github.com/deepseek-ai/dsh)，插件模型来自
+[cordis](https://github.com/deepseek-ai/cordis)。
 
-### 宿主与运行时
+四个直接参考过的插件：
 
-| 项目 | 用在哪 |
+| 项目 | 借了什么 |
 |---|---|
-| [DeepSeek Harness](https://github.com/deepseek-ai/dsh) | 宿主：插件机制、工具注册、会话、模型路由 |
-| [@deepseek-ai/cordis](https://github.com/deepseek-ai/cordis) | 插件与服务模型（`inject` / `Service` / 事件总线） |
+| [sibetlyf/dsh-knowledge](https://github.com/sibetlyf/dsh-knowledge) | 写知识库走它的本地管理 API 与同源身份 |
+| [sibetlyf/dsh-plugin-gateway](https://github.com/sibetlyf/dsh-plugin-gateway) | 宿主内建会话：`sessionController` 的 create/prompt 与 `session/event`。没有它，分会话只能起子进程，界面上看不见 |
+| [yuhui-sama/dsh-agentsoul](https://github.com/yuhui-sama/dsh-agentsoul) | 四层人格文件、记忆蒸馏的三分类、只补种子不覆盖 |
+| [AK-blank/dsh-plugin-auto-answer](https://github.com/AK-blank/dsh-plugin-auto-answer) | 超时按推荐项应答的思路；这里补了人工优先与多种选项形状 |
 
-### 直接参考过的 DSH 插件
+云与本地：[阿里云百炼](https://help.aliyun.com/zh/model-studio/)（识别/合成）、
+[火山 Ark](https://www.volcengine.com/product/ark)（判断/纠错）、
+[VB-CABLE](https://vb-audio.com/Cable/)、[whisper.cpp](https://github.com/ggerganov/whisper.cpp)（可选本地识别）、
+[OpenCC](https://github.com/BYVoid/OpenCC)（繁简字符表）、系统 WASAPI 与 UIAutomation。
 
-| 项目 | 借鉴了什么 |
-|---|---|
-| [sibetlyf/dsh-knowledge](https://github.com/sibetlyf/dsh-knowledge) | 会后写知识库走它的本地管理 API（`/knowledge-local/v1/entries`）与同源身份 |
-| [sibetlyf/dsh-plugin-gateway](https://github.com/sibetlyf/dsh-plugin-gateway) | **宿主内建会话**的做法：`ctx.get("sessionController")` 的 `create/rename/prompt` 与 `session/event` 监听。没有它，分会话只能靠 spawn 子进程，界面上就看不见 |
-| [yuhui-sama/dsh-agentsoul](https://github.com/yuhui-sama/dsh-agentsoul) | SOUL / IDENTITY / USER / STATE 四层人格文件、记忆蒸馏的分类（persona / episodic / instruction）、"只创建不覆盖"的种子策略 |
-| [AK-blank/dsh-plugin-auto-answer](https://github.com/AK-blank/dsh-plugin-auto-answer) | 无人值守时按推荐项自动应答的思路；本仓库的 `lib/auto-answer.js` 在此之上加了"人工优先"与多种选项形状兼容 |
+"记忆会呼吸 / 信念会进化 / 情绪成地形"这套提法来自需求方，这里只是把它落成了可计算的东西。
 
-### 云服务
+腾讯会议、飞书、钉钉、Zoom、Teams 的商标归各自所有者，本项目与这些公司没有关联。
+用于会议录音转录时，请自行确认符合所在组织的合规要求。
 
-| 服务 | 用在哪 |
-|---|---|
-| [阿里云百炼 DashScope](https://help.aliyun.com/zh/model-studio/) | 实时语音识别 `paraformer-realtime-v2`、语音合成 `cosyvoice-v2` |
-| [火山引擎 Ark](https://www.volcengine.com/product/ark) | 意图判定 / 纠错 / 总结（任意 OpenAI 兼容接口都能替换） |
-
-### 本地组件
-
-| 项目 | 用在哪 |
-|---|---|
-| [VB-Audio VB-CABLE](https://vb-audio.com/Cable/) | 虚拟声卡，把分身的声音送进会议麦克风 |
-| [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp) | 可选的本地 ASR（模型不入库，自行准备） |
-| [BYVoid/OpenCC](https://github.com/BYVoid/OpenCC) | 繁→简字符表 `lib/data/ts.txt` |
-| Microsoft WASAPI / UIAutomation | 环回采集、窗口与控件识别（系统自带，无第三方依赖） |
-
-### 概念来源
-
-“记忆会呼吸 / 信念会进化 / 情绪成地形” 这套**活数据**的提法来自本项目需求方，
-本仓库只是把它落成三个带衰减系数的数据结构（见 `lib/living.js`）。
-
-### 商标与免责
-
-腾讯会议、飞书、钉钉、Zoom、Microsoft Teams 等名称与商标归各自所有者。
-本项目与这些公司**没有关联**，也不代表它们；插件只是通过系统级 UI 自动化与音频接口与它们协作。
-使用前请自行确认符合所在组织的合规要求（会议录音、转录与发言的告知义务）。
-
-### 许可
-
-MIT。引用到的第三方项目遵循各自许可：DSH / cordis 为 Apache-2.0 系，whisper.cpp 为 MIT，
-OpenCC 为 Apache-2.0，VB-CABLE 为捐赠版免费（商用需遵守其条款）。
+MIT。第三方各自遵循其许可：DSH / cordis 为 Apache-2.0 系，whisper.cpp 为 MIT，OpenCC 为 Apache-2.0，
+VB-CABLE 为捐赠版免费（商用看其条款）。
