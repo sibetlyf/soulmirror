@@ -367,3 +367,55 @@ apps:
 接入新软件只做两件事：在 `lib/apps.js` 补一条预设（进程名 + 标题/类名提示），
 或直接在 `apps` 里加一行配置。能力标注（`followDefaultMic` 等）也在预设里，
 用来提示"这个客户端会不会跟随系统默认麦克风"。
+
+## 参考与致谢
+
+SoulMirror 站在不少东西上。按"依赖程度"排列：
+
+### 宿主与运行时
+
+| 项目 | 用在哪 |
+|---|---|
+| [DeepSeek Harness](https://github.com/deepseek-ai/dsh) | 宿主：插件机制、工具注册、会话、模型路由 |
+| [@deepseek-ai/cordis](https://github.com/deepseek-ai/cordis) | 插件与服务模型（`inject` / `Service` / 事件总线） |
+
+### 直接参考过的 DSH 插件
+
+| 项目 | 借鉴了什么 |
+|---|---|
+| [sibetlyf/dsh-knowledge](https://github.com/sibetlyf/dsh-knowledge) | 会后写知识库走它的本地管理 API（`/knowledge-local/v1/entries`）与同源身份 |
+| [sibetlyf/dsh-plugin-gateway](https://github.com/sibetlyf/dsh-plugin-gateway) | **宿主内建会话**的做法：`ctx.get("sessionController")` 的 `create/rename/prompt` 与 `session/event` 监听。没有它，分会话只能靠 spawn 子进程，界面上就看不见 |
+| [yuhui-sama/dsh-agentsoul](https://github.com/yuhui-sama/dsh-agentsoul) | SOUL / IDENTITY / USER / STATE 四层人格文件、记忆蒸馏的分类（persona / episodic / instruction）、"只创建不覆盖"的种子策略 |
+| [AK-blank/dsh-plugin-auto-answer](https://github.com/AK-blank/dsh-plugin-auto-answer) | 无人值守时按推荐项自动应答的思路；本仓库的 `lib/auto-answer.js` 在此之上加了"人工优先"与多种选项形状兼容 |
+
+### 云服务
+
+| 服务 | 用在哪 |
+|---|---|
+| [阿里云百炼 DashScope](https://help.aliyun.com/zh/model-studio/) | 实时语音识别 `paraformer-realtime-v2`、语音合成 `cosyvoice-v2` |
+| [火山引擎 Ark](https://www.volcengine.com/product/ark) | 意图判定 / 纠错 / 总结（任意 OpenAI 兼容接口都能替换） |
+
+### 本地组件
+
+| 项目 | 用在哪 |
+|---|---|
+| [VB-Audio VB-CABLE](https://vb-audio.com/Cable/) | 虚拟声卡，把分身的声音送进会议麦克风 |
+| [ggerganov/whisper.cpp](https://github.com/ggerganov/whisper.cpp) | 可选的本地 ASR（模型不入库，自行准备） |
+| [BYVoid/OpenCC](https://github.com/BYVoid/OpenCC) | 繁→简字符表 `lib/data/ts.txt` |
+| Microsoft WASAPI / UIAutomation | 环回采集、窗口与控件识别（系统自带，无第三方依赖） |
+
+### 概念来源
+
+“记忆会呼吸 / 信念会进化 / 情绪成地形” 这套**活数据**的提法来自本项目需求方，
+本仓库只是把它落成三个带衰减系数的数据结构（见 `lib/living.js`）。
+
+### 商标与免责
+
+腾讯会议、飞书、钉钉、Zoom、Microsoft Teams 等名称与商标归各自所有者。
+本项目与这些公司**没有关联**，也不代表它们；插件只是通过系统级 UI 自动化与音频接口与它们协作。
+使用前请自行确认符合所在组织的合规要求（会议录音、转录与发言的告知义务）。
+
+### 许可
+
+MIT。引用到的第三方项目遵循各自许可：DSH / cordis 为 Apache-2.0 系，whisper.cpp 为 MIT，
+OpenCC 为 Apache-2.0，VB-CABLE 为捐赠版免费（商用需遵守其条款）。
