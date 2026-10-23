@@ -502,7 +502,7 @@ export function apply(ctx, config) {
     item.events = (r.events || []).slice(-15)
     item.via = r.via || ''
     item.sessionId = r.sessionId || item.sessionId
-    item.output = String(r.output || r.error || '').slice(0, 800)
+    item.output = String(r.text || r.output || r.error || '').slice(0, 800)
     logger?.info?.('[soulmirror] 任务' + (r.ok ? '完成' : '失败') + '（' + item.ms + 'ms，' + (r.via || '?') + '）' + (r.error ? '：' + String(r.error).slice(0, 120) : ''))
     try {
       const { writeFileSync } = await import('node:fs')
