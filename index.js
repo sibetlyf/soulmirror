@@ -13,8 +13,12 @@ import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { appendFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+
+const execFileAsync = promisify(execFile)
 
 import { bridge, listDevices, toolsDir, micUsage } from './lib/bridge.js'
 import {
@@ -630,6 +634,78 @@ export function apply(ctx, config) {
   function meetingOpts(app) {
     return { cls: app.classes, proc: app.proc }
   }
+
+  /** 自动识别当前正在运行的会议软件：显式 app > activeApp > 配置顺序。 */
+  async function detectMeetingApp(requested = '') {
+    const wins = await listWindows()
+    const all = cfg.apps || []
+    const preferred = String(requested || cfg.activeApp || '').trim()
+    const ordered = []
+    if (preferred) {
+      for (const app of all) {
+        if (app.name === preferred || app.proc === preferred) ordered.push(app)
+      }
+    }
+    for (const app of all) if (!ordered.includes(app)) ordered.push(app)
+    for (const app of ordered) {
+      const proc = String(app.proc || '').toLowerCase()
+      const hit = wins.some((w) => {
+        if (proc && String(w.proc || '').toLowerCase() === proc) return true
+        const title = String(w.title || '')
+        return (app.title && title.includes(app.title)) || (app.name && title.includes(app.name))
+      })
+      if (hit) return meetingApp(app.name)
+    }
+    return meetingApp(requested)
+  }
+
+  async function clipboardText() {
+    if (process.platform !== 'win32') return ''
+    try {
+      const { stdout } = await execFileAsync('powershell.exe', [
+        '-NoProfile',
+        '-Command',
+        '[Console]::OutputEncoding=[Text.Encoding]::UTF8; Get-Clipboard -Raw',
+      ], { timeout: 3000, windowsHide: true })
+      return String(stdout || '')
+    } catch {
+      return ''
+    }
+  }
+
+  function normalizeMeetingCode(text) {
+    const raw = String(text || '')
+    const patterns = [
+      /(?:会议号|会议\s*ID|会议ID|Meeting\s*ID)[：:\s]*([0-9][0-9\s-]{6,}[0-9])/i,
+      /\b(\d{3}[\s-]\d{3}[\s-]\d{3,4})\b/,
+      /\b(\d{9,11})\b/,
+    ]
+    for (const re of patterns) {
+      const m = raw.match(re)
+      if (m) {
+        const code = m[1].replace(/[^0-9]/g, '')
+        if (code.length >= 8 && code.length <= 12) return code
+      }
+    }
+    return ''
+  }
+
+  /** 从窗口标题和剪贴板里找会议号；没有就返回空串。 */
+  async function detectMeetingCode(app) {
+    const wins = await listWindows()
+    const titles = wins
+      .filter((w) => !app.proc || String(w.proc || '').toLowerCase() === String(app.proc).toLowerCase() || String(w.title || '').includes(app.title))
+      .map((w) => w.title)
+      .join(' ')
+    const fromTitle = normalizeMeetingCode(titles)
+    if (fromTitle) return fromTitle
+    return normalizeMeetingCode(await clipboardText())
+  }
+
+  function meetingInProgress(app, wins) {
+    return pickMeetingWindows(wins, app.title, app.proc)
+      .some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls))
+  }
   function detectApp(wins) {
     for (const app of activeApps()) {
       if (!app.proc) continue
@@ -675,12 +751,18 @@ export function apply(ctx, config) {
       inMeeting: { type: 'boolean' },
     }),
     execute: wrap('meeting_status', async () => {
-      const app = meetingApp()
+      const app = await detectMeetingApp()
       const wins = await listWindows()
       const meeting = pickMeetingWindows(wins, app.title, app.proc)
       const inMeeting = meeting.some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls))
       const lines = []
-      lines.push(`会议软件：${app.name}（${app.proc}）`)
+      lines.push(`当前会议软件：${app.name}（${app.proc}）`)
+      lines.push('可用软件：')
+      for (const item of cfg.apps || []) {
+        const ws = pickMeetingWindows(wins, item.title, item.proc)
+        const im = ws.some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls))
+        lines.push(`  ${im ? '[会议中]' : ws.length ? '[运行中]' : '[未运行]'} ${item.name} (${item.proc})`)
+      }
       lines.push(`客户端：${resolveAppPath(app.path) || '未找到 ' + app.proc + '.exe'}`)
       lines.push(`会议窗口：${meeting.length} 个${inMeeting ? '（检测到进行中的会议）' : ''}`)
       for (const w of meeting.slice(0, 5)) lines.push(`  · [${w.cls}] ${w.title}`)
@@ -766,7 +848,7 @@ export function apply(ctx, config) {
     }),
   }))
 
-  ctx.tools.register(defineTool({
+  const joinTool = defineTool({
     name: 'meeting_join',
     description:
       '加入会议（实验性）：聚焦客户端 → 点「加入会议」→ 填会议号/昵称 → 点「加入」。界面改版可能失败；失败时用 meeting_ui dump 看控件后手动组合操作。必须传 confirm=true。',
@@ -782,7 +864,7 @@ export function apply(ctx, config) {
       if (!cfg.enabled) return { ok: false, result: '插件已禁用' }
       if (a.confirm !== true) return { ok: false, result: '拒绝：meeting_join 会操作真实客户端，请传 confirm=true 再执行。' }
       if (!a.code) return { ok: false, result: '缺少会议号' }
-      const app = meetingApp(a.app)
+      const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
       const opts = meetingOpts(app)
       const path = resolveAppPath(app.path)
       if (path) await ensureApp(path, app.title, app.proc)
@@ -858,6 +940,33 @@ export function apply(ctx, config) {
       const joined = pickMeetingWindows(wins, app.title, app.proc).some((w) => /VideoMainWindow|MeetingView|FloatSpeakingWnd|ParticipantWnd|VideoCellWnd/.test(w.cls))
       return { ok: true, result: steps.join('\n') + '\n' + (joined ? '看起来已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
     }),
+  })
+  ctx.tools.register(joinTool)
+
+  ctx.tools.register(defineTool({
+    name: 'meeting_auto_join',
+    description:
+      '自动加入会议：先识别正在运行的腾讯会议/移动会议，再从剪贴板或窗口标题读取会议号，然后调用 meeting_join。会议号也可显式传入。必须传 confirm=true。',
+    parameters: {
+      code: { type: 'string', description: '会议号（可选；不填则从剪贴板/窗口标题识别）' },
+      app: { type: 'string', description: '会议软件名（可选，如 移动会议）；不填则自动识别' },
+      confirm: { type: 'boolean', description: '确认执行，必须为 true。' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_auto_join', async (a) => {
+      if (a.confirm !== true) return { ok: false, result: '拒绝：meeting_auto_join 会操作真实客户端，请传 confirm=true 再执行。' }
+      const app = await detectMeetingApp(a.app)
+      const code = String(a.code || '').trim() || await detectMeetingCode(app)
+      if (!code) {
+        return { ok: false, result: `已识别：${app.name}\n但剪贴板/窗口标题里没有会议号。请复制会议号或会议链接后重试，或显式传 code。` }
+      }
+      const wins = await listWindows()
+      if (meetingInProgress(app, wins)) {
+        return { ok: false, result: `已识别：${app.name}，会议号 ${code}\n但当前已经在会议中，请先 meeting_leave 再自动加入。` }
+      }
+      const r = await joinTool.execute({ code, app: app.name, confirm: true })
+      return { ok: !!r.ok, result: `已识别：${app.name}\n会议号：${code}\n${r.result || ''}` }
+    }),
   }))
 
   ctx.tools.register(defineTool({
@@ -870,7 +979,7 @@ export function apply(ctx, config) {
     output: OUT(),
     execute: wrap('meeting_leave', async (a) => {
       if (a.confirm !== true) return { ok: false, result: '拒绝：请传 confirm=true。' }
-      const app = meetingApp(a.app)
+      const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
       const opts = meetingOpts(app)
       await session.stopCapture().catch(() => undefined)
       const steps = []

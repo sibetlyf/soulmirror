@@ -54,6 +54,7 @@ test('插件元信息与工具注册', () => {
   const names = tools.map((t) => t.name)
   for (const n of [
     'meeting_status', 'meeting_capture_start', 'meeting_agent_start', 'meeting_minutes',
+    'meeting_auto_join',
     'soul_task', 'soul_say', 'soul_status', 'soul_persona', 'soul_memory', 'soul_session',
     'soul_setup', 'soul_world', 'soul_belief', 'soul_goal',
   ]) {

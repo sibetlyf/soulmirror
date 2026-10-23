@@ -150,6 +150,16 @@ apps:
 - 会议身份会带软件前缀（如 `腾讯会议:206275219`），避免不同软件同名会议撞到同一个会话
 - `activeApp` 决定 `meeting_status` / `meeting_join` / `meeting_leave` 默认操作哪个软件；也可给这些工具传 `app: 移动会议` 临时指定
 
+### 自动识别与自动加入
+
+- `meeting_status` 会扫描所有已配置的会议软件，输出 `[会议中] / [运行中] / [未运行]`，并按 `activeApp` 自动选中当前要操作的软件。`app` 参数可显式覆盖。
+- `meeting_auto_join { confirm: true }` 一次完成三件事：
+  1. 识别正在运行的会议软件；
+  2. 从**剪贴板**或**窗口标题**里提取会议号（支持 `375 509 620`、`375-509-620`、会议链接里的 `会议号：xxx`）；
+  3. 调用对应软件的加入流程。
+- 传 `code` 时跳过识别：`meeting_auto_join { code: "375509620", confirm: true }`。
+- 已在会中会直接拒绝，提示先 `meeting_leave`。
+
 ### 移动会议（CloudVideo）加入流程
 
 `meeting_join` 对移动会议会走专用控件：
