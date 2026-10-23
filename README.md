@@ -150,6 +150,16 @@ apps:
 - 会议身份会带软件前缀（如 `腾讯会议:206275219`），避免不同软件同名会议撞到同一个会话
 - `activeApp` 决定 `meeting_status` / `meeting_join` / `meeting_leave` 默认操作哪个软件；也可给这些工具传 `app: 移动会议` 临时指定
 
+### 面板里的会议号
+
+SoulMirror 面板顶部「接入」下方新增「会议号」一行：
+
+- 自动识别：从剪贴板/窗口标题提取，来源标记「自动」；
+- 人工修改：直接编辑输入框，点「确认入会」保存为「手动」并调用加入流程；
+- 「识别」按钮强制重新扫描剪贴板/窗口标题；
+- 手动会议号持久化到 `config.json` 的 `meetingCode`，`meetingCodeManual: true`；
+- 接口：`POST /api/soulmirror/meeting`（`{code}` 或 `{detect:true}`）、`POST /api/soulmirror/join`（`{code}`）。
+
 ### 自动识别与自动加入
 
 - `meeting_status` 会扫描所有已配置的会议软件，输出 `[会议中] / [运行中] / [未运行]`，并按 `activeApp` 自动选中当前要操作的软件。`app` 参数可显式覆盖。

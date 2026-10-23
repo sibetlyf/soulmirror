@@ -137,6 +137,9 @@ export const Config = z.object({
   autoWatch: z.boolean().default(true),
   /** 只盯某个会议软件（填 apps 里的 name 或 proc；空 = 任意支持的软件都盯）。 */
   activeApp: z.string().default(''),
+  /** 页面/工具里人工确认的会议号；manual=true 时优先于自动识别。 */
+  meetingCode: z.string().default(''),
+  meetingCodeManual: z.boolean().default(false),
   /** 数字分身：允许把任务交给 DSH 执行（headless）。 */
   twin: z.object({
     enabled: z.boolean().default(true),
@@ -237,6 +240,8 @@ export function apply(ctx, config) {
     policy: config.policy || 'suggest',
     autoWatch: config.autoWatch !== false,
     activeApp: config.activeApp || '',
+    meetingCode: config.meetingCode || '',
+    meetingCodeManual: config.meetingCodeManual === true,
     userName: config.userName || '',
     wakeWords: Array.isArray(config.wakeWords) ? config.wakeWords : [],
     dataDir: config.dataDir || '',
@@ -309,6 +314,8 @@ export function apply(ctx, config) {
       },
       apps: cfg.apps || [],
       activeApp: cfg.activeApp || '',
+      meetingCode: cfg.meetingCode || '',
+      meetingCodeManual: cfg.meetingCodeManual === true,
       userName: cfg.userName || '',
       wakeWords: cfg.wakeWords || [],
       autoWatch: cfg.autoWatch === true,
@@ -342,7 +349,7 @@ export function apply(ctx, config) {
   }
   function patchToStore(patch) {
     const keep = {}
-    for (const k of ['enabled', 'policy', 'apps', 'activeApp', 'userName', 'wakeWords', 'autoWatch']) if (patch[k] !== undefined) keep[k] = patch[k]
+    for (const k of ['enabled', 'policy', 'apps', 'activeApp', 'meetingCode', 'meetingCodeManual', 'userName', 'wakeWords', 'autoWatch']) if (patch[k] !== undefined) keep[k] = patch[k]
     for (const k of Object.keys(EDITABLE)) if (patch[k] !== undefined) keep[k] = pick(patch[k], EDITABLE[k])
     return keep
   }
@@ -358,6 +365,9 @@ export function apply(ctx, config) {
     try {
       if (req.method === 'GET' && (sub === '' || sub === 'config')) return json(200, publicConfig())
       if (req.method === 'GET' && sub === 'status') {
+        const liveApp = await detectMeetingApp()
+        const codeInfo = await currentMeetingCode(liveApp)
+        const statusWins = await listWindows()
         return json(200, {
           session: session.snapshot(),
           transcript: session.transcript.slice(-60),
@@ -366,9 +376,12 @@ export function apply(ctx, config) {
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
           meeting: {
-            app: (cfg.apps || []).find((x) => x.name === cfg.activeApp)?.name || cfg.activeApp || '全部',
+            app: liveApp.name || cfg.activeApp || '全部',
             title: lifecycle.lastWindowTitle || '',
             since: lifecycle.startedAt,
+            code: codeInfo.code,
+            codeSource: codeInfo.source,
+            inMeeting: meetingInProgress(liveApp, statusWins),
           },
           models: { asr: cfg.asr.provider + ' / ' + (cfg.asr.dashscopeModel || cfg.asr.model), tts: cfg.tts.provider + ' / ' + cfg.tts.model + ' / ' + cfg.tts.voice },
           devices: { capture: cfg.devices.capture || '默认渲染设备', speak: cfg.devices.speak },
@@ -432,6 +445,37 @@ export function apply(ctx, config) {
         const patch = JSON.parse(Buffer.concat(buf2).toString('utf8') || '{}')
         savePersisted(patch)
         return json(200, publicConfig())
+      }
+      if (req.method === 'POST' && sub === 'meeting') {
+        const bufM = []
+        for await (const chunk of req) bufM.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufM).toString('utf8') || '{}')
+        if (body.detect) {
+          const app = await detectMeetingApp()
+          const code = await detectMeetingCode(app)
+          codeCache = { at: Date.now(), app: app.name, code, source: code ? 'auto' : 'none' }
+          return json(200, { ok: !!code, app: app.name, code, source: code ? 'auto' : 'none' })
+        }
+        const code = normalizeMeetingCode(body.code || '')
+        const manual = body.manual !== false
+        cfg.meetingCode = manual ? code : ''
+        cfg.meetingCodeManual = manual && !!code
+        codeCache = { at: Date.now(), app: '', code: cfg.meetingCode, source: cfg.meetingCodeManual ? 'manual' : 'none' }
+        savePersisted({ meetingCode: cfg.meetingCode, meetingCodeManual: cfg.meetingCodeManual })
+        return json(200, { ok: true, code: cfg.meetingCode, source: cfg.meetingCodeManual ? 'manual' : 'none' })
+      }
+      if (req.method === 'POST' && sub === 'join') {
+        const bufJ = []
+        for await (const chunk of req) bufJ.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufJ).toString('utf8') || '{}')
+        const app = await detectMeetingApp(body.app)
+        const code = normalizeMeetingCode(body.code || '') || await detectMeetingCode(app)
+        if (!code) return json(200, { ok: false, result: '没有会议号，请先识别或手动输入' })
+        cfg.meetingCode = code
+        cfg.meetingCodeManual = true
+        savePersisted({ meetingCode: code, meetingCodeManual: true })
+        const r = await joinTool.execute({ code, app: app.name, confirm: true })
+        return json(200, { ...r, code, app: app.name })
       }
       return json(404, { error: 'not found' })
     } catch (e) {
@@ -702,6 +746,15 @@ export function apply(ctx, config) {
     return normalizeMeetingCode(await clipboardText())
   }
 
+  let codeCache = { at: 0, app: '', code: '', source: 'none' }
+  async function currentMeetingCode(app) {
+    if (cfg.meetingCodeManual && cfg.meetingCode) return { code: cfg.meetingCode, source: 'manual' }
+    if (Date.now() - codeCache.at < 4000 && codeCache.app === app.name) return codeCache
+    const code = await detectMeetingCode(app)
+    codeCache = { at: Date.now(), app: app.name, code, source: code ? 'auto' : 'none' }
+    return codeCache
+  }
+
   function meetingInProgress(app, wins) {
     return pickMeetingWindows(wins, app.title, app.proc)
       .some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls))
@@ -753,10 +806,12 @@ export function apply(ctx, config) {
     execute: wrap('meeting_status', async () => {
       const app = await detectMeetingApp()
       const wins = await listWindows()
+      const codeInfo = await currentMeetingCode(app)
       const meeting = pickMeetingWindows(wins, app.title, app.proc)
       const inMeeting = meeting.some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls))
       const lines = []
       lines.push(`当前会议软件：${app.name}（${app.proc}）`)
+      lines.push(`会议号：${codeInfo.code || '未识别'}${codeInfo.code ? '（' + (codeInfo.source === 'manual' ? '手动' : '自动') + '）' : ''}`)
       lines.push('可用软件：')
       for (const item of cfg.apps || []) {
         const ws = pickMeetingWindows(wins, item.title, item.proc)
@@ -777,6 +832,8 @@ export function apply(ctx, config) {
         result: lines.join('\n'),
         windows: meeting.map((w) => ({ title: w.title, cls: w.cls, pid: w.pid })),
         inMeeting,
+        code: codeInfo.code,
+        codeSource: codeInfo.source,
       }
     }),
   }))
@@ -956,7 +1013,7 @@ export function apply(ctx, config) {
     execute: wrap('meeting_auto_join', async (a) => {
       if (a.confirm !== true) return { ok: false, result: '拒绝：meeting_auto_join 会操作真实客户端，请传 confirm=true 再执行。' }
       const app = await detectMeetingApp(a.app)
-      const code = String(a.code || '').trim() || await detectMeetingCode(app)
+      const code = String(a.code || '').trim() || (cfg.meetingCodeManual ? cfg.meetingCode : '') || await detectMeetingCode(app)
       if (!code) {
         return { ok: false, result: `已识别：${app.name}\n但剪贴板/窗口标题里没有会议号。请复制会议号或会议链接后重试，或显式传 code。` }
       }
