@@ -822,10 +822,14 @@ export function apply(ctx, config) {
         }
         await new Promise((r) => setTimeout(r, 2500))
         const text = await dump(app.title, 220, opts).catch(() => '')
-        const err = text.split(/\r?\n/).map((l) => l.split('\t')[3] || '').find((x) => /会议已结束|会议不存在|HY\d{4,}/.test(x))
+        const errLine = text.split(/\r?\n/).find((l) => /会议已结束|会议不存在|HY\d{4,}/.test(l))
+        const err = errLine ? (errLine.split('\t')[2] || errLine) : ''
         const wins = await listWindows()
         const joined = wins.some((w) => w.proc === app.proc && /ParticipantWnd|VideoCellWnd/.test(w.cls))
-        if (err) return { ok: false, result: steps.join('\n') + '\n移动会议返回：' + err }
+        if (err) {
+          await click(app.title, 'Close', opts).catch(() => undefined)
+          return { ok: false, result: steps.join('\n') + '\n移动会议返回：' + err }
+        }
         return { ok: true, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
       }
 
