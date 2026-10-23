@@ -376,6 +376,9 @@ export function apply(ctx, config) {
           session: session.snapshot(),
           transcript: session.transcript.slice(-60),
           tasks: (agent.tasks || []).slice(0, 10),
+          apps: (cfg.apps || []).map((a) => ({ name: a.name, proc: a.proc || '', active: (cfg.activeApp || '') === a.name })),
+          autoAppSelect: cfg.autoAppSelect !== false,
+          activeApp: cfg.activeApp || '',
           pendingKnowledge: (agent.pendingKnowledge || []).slice(0, 5),
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
@@ -395,6 +398,31 @@ export function apply(ctx, config) {
           auto: !!(cfg.autoWatch && lifecycle.timer),
           lifecycle: lifecycle.snapshot(),
         })
+      }
+      if (req.method === 'POST' && sub === 'app') {
+        const bufApp = []
+        for await (const chunk of req) bufApp.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufApp).toString('utf8') || '{}')
+        const pickName = String(body.name || '').trim()
+        if (!pickName) {
+          cfg.activeApp = ''
+          cfg.autoAppSelect = true
+          savePersisted({ activeApp: '', autoAppSelect: true })
+          return json(200, { ok: true, activeApp: '', autoAppSelect: true })
+        }
+        let hit = (cfg.apps || []).find((x) => x.name === pickName || x.proc === pickName)
+        if (!hit) {
+          const preset = listPresets().find((x) => x.name === pickName || x.id === pickName || (x.procs || []).includes(pickName))
+          if (!preset) return json(400, { ok: false, error: '未知会议软件：' + pickName })
+          hit = { name: preset.name, proc: (preset.procs || [])[0] || '', title: preset.name, classes: '' }
+          cfg.apps = [...(cfg.apps || []), hit]
+          savePersisted({ apps: cfg.apps })
+        }
+        cfg.activeApp = hit.name
+        cfg.autoAppSelect = false
+        savePersisted({ activeApp: hit.name, autoAppSelect: false })
+        logger?.info?.('[soulmirror] 手动切换会议软件：' + hit.name)
+        return json(200, { ok: true, activeApp: hit.name, apps: (cfg.apps || []).map((a) => ({ name: a.name, proc: a.proc || '' })) })
       }
       if (req.method === 'POST' && sub === 'auto') {
         const bufA = []
