@@ -477,14 +477,34 @@ export function apply(ctx, config) {
     }
   }
 
+  /** 任务去重键：忽略空白、标点和大小写，避免 ASR 把同一句话重复触发。 */
+  function taskKey(text) {
+    return String(text || '')
+      .toLowerCase()
+      .replace(/[\s，。！？、；：,.!?;:'"“”‘’（）()【】\[\]]+/g, '')
+      .slice(0, 240)
+  }
+
   /** 后台跑一个 DSH 任务，完成后（可选）在会议里汇报。 */
   async function startTaskInBackground(prompt) {
     const clean = String(prompt || '').trim()
     if (!clean) return null
-    const running = (agent.tasks || []).filter((x) => x.status === 'running').length
+    const key = taskKey(clean)
+    const tasks = agent.tasks || []
+    const running = tasks.filter((x) => x.status === 'running').length
     if (running >= 2) {
       logger?.warn?.('[soulmirror] 已有 2 个任务在跑，先排队放弃：' + clean.slice(0, 40))
       return null
+    }
+    const duplicate = tasks.find((x) => {
+      if (taskKey(x.prompt || '') !== key) return false
+      if (x.status === 'running') return true
+      const at = Date.parse(x.at || '')
+      return x.status === 'done' && Number.isFinite(at) && Date.now() - at < 120_000
+    })
+    if (duplicate) {
+      logger?.info?.('[soulmirror] 跳过重复任务（' + duplicate.status + '）：' + clean.slice(0, 40))
+      return duplicate
     }
     const ws = ensureMeetingWorkspace()
     const item = {
@@ -1010,6 +1030,9 @@ export function apply(ctx, config) {
    */
   async function runInMeetingSession(prompt, { title, timeoutMs, onEvent } = {}) {
     const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
+    // 会议会话是长期复用的，历史里还留着之前的任务。每轮都明确“只做这一条”，
+    // 否则模型看到旧任务后会重复查资料、重复总结、重复汇报。
+    const guarded = `[本轮任务]\n只执行下面这一条；本会话里之前已经完成或汇报过的任务不要重做、不要重复汇报。历史消息只作上下文参考。\n\n${prompt}`
     const controller = getController(ctx)
     if (controller) {
       try {
@@ -1021,7 +1044,7 @@ export function apply(ctx, config) {
           sessionMap.set(ws.key || ws.id, { dshSessionId: ws.dshSessionId, dir: ws.dir, title: ws.display })
           logger?.info?.('[soulmirror] 已建会话（宿主内）' + ws.dshSessionId)
         }
-        const r = await promptSession(ctx, ws.dshSessionId, prompt, { timeoutMs, onEvent })
+        const r = await promptSession(ctx, ws.dshSessionId, guarded, { timeoutMs, onEvent })
         return {
           ok: r.ok,
           text: r.text,
@@ -1036,7 +1059,7 @@ export function apply(ctx, config) {
         logger?.warn?.('[soulmirror] 宿主内会话失败，回退 headless：' + e.message)
       }
     }
-    const r = await runDshTask(prompt, { profile: cfg.twin.profile, cwd: ws.dir, sessionId: ws.dshSessionId || undefined, timeoutMs })
+    const r = await runDshTask(guarded, { profile: cfg.twin.profile, cwd: ws.dir, sessionId: ws.dshSessionId || undefined, timeoutMs })
     if (r.sessionId) {
       ws.dshSessionId = r.sessionId
       sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display })
