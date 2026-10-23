@@ -158,8 +158,6 @@ export const Config = z.object({
   autoCalibrate: z.boolean().default(true),
   /** 连续失败几次就重新标定。 */
   recalibrateThreshold: z.number().default(2),
-  /** 检测到会议就自动开始采集转写（只听，不操作桌面；不受 armed 限制）。 */
-  autoCapture: z.boolean().default(true),
   /** 自动跟随：哪个会议软件在开会就用哪个（activeApp 为空时生效）。 */
   autoAppSelect: z.boolean().default(true),
   /** 只盯某个会议软件（填 apps 里的 name 或 proc；空 = 任意支持的软件都盯）。 */
@@ -269,7 +267,6 @@ export function apply(ctx, config) {
     autoWatch: config.autoWatch !== false,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
     autoJoin: { enabled: true, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
-    autoCapture: config.autoCapture !== false,
     autoCalibrate: config.autoCalibrate !== false,
     recalibrateThreshold: Number(config.recalibrateThreshold || 2),
     autoAppSelect: config.autoAppSelect !== false,
@@ -399,7 +396,8 @@ export function apply(ctx, config) {
     try {
       if (req.method === 'GET' && (sub === '' || sub === 'config')) return json(200, publicConfig())
       if (req.method === 'GET' && sub === 'status') {
-        const liveApp = await detectMeetingApp()
+        // 未开启时不做实时探测：少一次 PowerShell 调用，也完全不碰桌面
+        const liveApp = cfg.enabled ? await detectMeetingApp() : meetingApp(cfg.activeApp || '')
         const codeInfo = await currentMeetingCode(liveApp)
         const statusWins = await listWindows()
         const liveWin = pickMeetingWindows(statusWins, liveApp.title, liveApp.proc)
@@ -2240,21 +2238,15 @@ export function apply(ctx, config) {
       meters: metersMax,
       logger,
       onEnter: async ({ reason }) => {
-        // 分两级权限：
-        //   采集转写 = 只读音频，安全 → 默认自动开始
-        //   建会话 / 标定 / 入会 / 发言 = 会碰桌面或产生副作用 → 需要 armed
-        if (cfg.enabled && cfg.autoCapture && !session.capturing) {
-          await session.startCapture('auto').catch((e) => logger?.warn?.('[soulmirror] 自动采集失败: ' + e.message))
-          logger?.info?.('[soulmirror] 检测到会议（' + reason + '），已开始采集转写')
-        }
-        if (!isArmed()) {
-          logger?.info?.('[soulmirror] 会议功能未开启：只转写，不建会话、不发言、不操作桌面')
+        // 只有一个总开关：没开就什么都不做（连听都不听，省 token）
+        if (!cfg.enabled) {
+          logger?.info?.('[soulmirror] 检测到会议（' + reason + '），但插件未开启，不做任何事')
           return
         }
-        try { await autoPickApp() } catch { /* ignore */ }
+        if (!session.capturing) await session.startCapture('auto').catch((e) => logger?.warn?.('[soulmirror] 自动采集失败: ' + e.message))
         agent.running = true
         ensureMeetingSession(reason).catch(() => {})
-        logger?.info?.('[soulmirror] 已开启状态：建会话并准备发言')
+        logger?.info?.('[soulmirror] 已开启：开始采集转写并建会话（' + reason + '）')
       },
       onExit: async () => {
         const wasCapturing = !!session.capturing
@@ -2263,7 +2255,7 @@ export function apply(ctx, config) {
         await session.stopCapture().catch(() => {})
         try {
           // 纪要写本地；知识库回写与发言属于"对外动作"，未开启时不做
-          const r = await finalizeMeeting({ speak: false, writeKnowledge: isArmed() })
+          const r = await finalizeMeeting({ speak: false, writeKnowledge: true })
           logger?.info?.('[soulmirror] 会议结束：' + JSON.stringify(r).slice(0, 200))
         } catch (e) {
           logger?.warn?.('[soulmirror] 会议收尾失败: ' + e.message)
@@ -2273,7 +2265,8 @@ export function apply(ctx, config) {
   )
   // 恢复上次的开关状态：上次开着就继续开，上次关着就保持待命
   if (cfg.enabled === true) armed = true
-  if (cfg.autoWatch && process.env.SOULMIRROR_TEST !== '1') lifecycle.start()
+  // 只在总开关打开时才轮询窗口，关闭时完全不碰桌面
+  if (cfg.enabled && cfg.autoWatch && process.env.SOULMIRROR_TEST !== '1') lifecycle.start()
 
   // 启动时做一次环境自检（只打日志，不阻塞）
   if (process.env.SOULMIRROR_TEST !== '1') {
