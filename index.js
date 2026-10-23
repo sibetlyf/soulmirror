@@ -38,6 +38,7 @@ import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, w
 import { MemoryStore } from './lib/memory.js'
 import { LivingWorld } from './lib/living.js'
 import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
+import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
 import { getController, createSession, promptSession } from './lib/dsh-session.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
@@ -135,6 +136,8 @@ export const Config = z.object({
   })),
   /** 自动监听：检测到会议开始就自动采集+托管，结束后自动出纪要。 */
   autoWatch: z.boolean().default(true),
+  /** 自动跟随：哪个会议软件在开会就用哪个（activeApp 为空时生效）。 */
+  autoAppSelect: z.boolean().default(true),
   /** 只盯某个会议软件（填 apps 里的 name 或 proc；空 = 任意支持的软件都盯）。 */
   activeApp: z.string().default(''),
   /** 页面/工具里人工确认的会议号；manual=true 时优先于自动识别。 */
@@ -239,6 +242,7 @@ export function apply(ctx, config) {
     },
     policy: config.policy || 'suggest',
     autoWatch: config.autoWatch !== false,
+    autoAppSelect: config.autoAppSelect !== false,
     activeApp: config.activeApp || '',
     meetingCode: config.meetingCode || '',
     meetingCodeManual: config.meetingCodeManual === true,
@@ -655,9 +659,26 @@ export function apply(ctx, config) {
   function activeApps() {
     const all = cfg.apps || []
     const pick = (cfg.activeApp || '').trim()
-    if (!pick) return all
-    const hit = all.filter((a) => a.name === pick || a.proc === pick)
-    return hit.length ? hit : all
+    if (pick) {
+      const hit = all.filter((a) => a.name === pick || a.proc === pick)
+      if (hit.length) return hit
+    }
+    return all
+  }
+
+  /** 自动识别当前该盯哪个会议软件（只在没手动指定时生效） */
+  async function autoPickApp() {
+    if (!cfg.autoAppSelect) return null
+    if ((cfg.activeApp || '').trim()) return null
+    try {
+      const wins = await listWindows()
+      const hit = pickAutoApp(wins, cfg.apps || [])
+      if (!hit) return null
+      cfg.activeApp = hit.app.name
+      logger?.info?.('[soulmirror] 自动跟随会议软件：' + hit.app.name + '（' + hit.confidence + '，proc=' + hit.proc + '）')
+      try { savePersisted({ activeApp: cfg.activeApp }) } catch { /* ignore */ }
+      return hit
+    } catch { return null }
   }
   /** 选中一个会议软件（可显式指定），并统一出 title/proc/classes/path 供 UIA 使用。 */
   function meetingApp(requested = '') {
@@ -1530,6 +1551,41 @@ export function apply(ctx, config) {
     }),
   }))
 
+  // ── 手动切换会议软件 ────────────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_app_select',
+    description: '手动指定盯哪个会议软件（腾讯会议 / 移动会议 / 飞书会议 / 钉钉会议 …），传空字符串表示恢复自动跟随。',
+    parameters: {
+      name: { type: 'string', required: true, description: 'apps 里的 name 或 proc；空串 = 自动跟随' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_app_select', async (a) => {
+      const pick = String(a.name || '').trim()
+      if (!pick) {
+        cfg.activeApp = ''
+        cfg.autoAppSelect = true
+        savePersisted({ activeApp: '', autoAppSelect: true })
+        return { ok: true, result: '已恢复自动跟随：哪个会议软件在开会就用哪个' }
+      }
+      const all = cfg.apps || []
+      let hit = all.find((x) => x.name === pick || x.proc === pick)
+      if (!hit) {
+        // 不在配置里但属于内置预设：按预设补一条
+        const preset = listPresets().find((x) => x.name === pick || x.id === pick || x.procs.includes(pick))
+        if (!preset) {
+          return { ok: false, result: '没找到会议软件：' + pick + '\n可选：' + all.map((x) => x.name).join('、') + '\n或内置：' + listPresets().map((x) => x.name).join('、') }
+        }
+        hit = { name: preset.name, proc: preset.procs[0], title: preset.name, classes: (preset.capabilities && '') || '' }
+        cfg.apps = [...all, hit]
+        savePersisted({ apps: cfg.apps })
+      }
+      cfg.activeApp = hit.name
+      savePersisted({ activeApp: hit.name })
+      const wins = await listWindows().catch(() => [])
+      const running = wins.some((w) => (w.proc || '').toLowerCase() === (hit.proc || '').toLowerCase())
+      return { ok: true, result: '当前抓取：' + hit.name + '（proc=' + (hit.proc || '未配置') + '）' + (running ? ' · 已在运行' : ' · 未检测到进程') }
+    }),
+  }))
   // ── 会议软件列表 ────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_apps',
@@ -1538,11 +1594,31 @@ export function apply(ctx, config) {
     output: OUT(),
     execute: wrap('meeting_apps', async () => {
       const wins = await listWindows()
+      const detected = detectRunningApps(wins, cfg.apps || [])
+      const detectedMap = new Map(detected.map((d) => [d.app.name, d]))
       const rows = (cfg.apps || []).map((a) => {
-        const on = a.proc && wins.some((w) => w.proc === a.proc)
-        return `${on ? '[运行中]' : '[未运行]'} ${a.name}  proc=${a.proc || '(未配置)'}`
+        const d = detectedMap.get(a.name)
+        const strong = d && d.score >= 60
+        const weak = d && d.score < 60
+        const mark = strong ? '[运行中]' : weak ? '[疑似]' : '[未运行]'
+        const tail = d ? '（' + d.confidence + '，proc=' + d.proc + '）' : '  proc=' + (a.proc || '(未配置)')
+        const active = (cfg.activeApp || '') === a.name ? ' ★当前' : ''
+        return mark + ' ' + a.name + tail + active
       })
-      return { ok: true, result: rows.join('\n') || '未配置会议软件' }
+      const lines = []
+      lines.push('当前抓取：' + (cfg.activeApp || '自动跟随（哪个在开会用哪个）'))
+      lines.push('自动跟随：' + (cfg.autoAppSelect ? '开' : '关') + ' · 手动指定优先')
+      lines.push('')
+      lines.push(...(rows.length ? rows : ['（还没配置会议软件）']))
+      const presets = listPresets()
+      const known = new Set((cfg.apps || []).map((a) => a.name))
+      const optional = presets.filter((p) => !known.has(p.name))
+      if (optional.length) {
+        lines.push('')
+        lines.push('可接入（未配置，加进 apps 即可）：')
+        for (const p of optional) lines.push('  · ' + p.name + '  proc=' + p.procs[0] + '  ' + p.caption)
+      }
+      return { ok: true, result: lines.join('\n') }
     }),
   }))
 
@@ -1709,6 +1785,7 @@ export function apply(ctx, config) {
       meters: metersMax,
       logger,
       onEnter: async ({ reason }) => {
+        try { await autoPickApp() } catch { /* ignore */ }
         if (!cfg.autoWatch) return
         if (!session.capturing) await session.startCapture('auto').catch(() => {})
         agent.running = true

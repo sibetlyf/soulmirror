@@ -286,3 +286,38 @@ npm test          # 60 个单元 + 集成用例
 大脑触发与 LLM 决策、纠错器、宿主内会话驱动（含旧 turn 不提前结算）、知识库检测与回写、
 环境自检、虚拟声卡方案、自动应答（超时/人工优先/禁用），以及插件整体启动：31 个工具注册、
 配置 API（密钥不回显）、各 soul_* 工具的读写行为。
+
+## 会议软件：自动识别 / 手动切换 / 可扩展
+
+内置预设（`lib/apps.js`）：
+
+| 软件 | 进程 | 状态 |
+|---|---|---|
+| 腾讯会议 | `wemeetapp` / `TencentMeeting` / `WeMeet` | 已验证 |
+| 移动会议 | `CloudVideo` / `ydmeeting` | 已接入 |
+| 飞书会议 | `Feishu` / `Lark` | 预设就绪，未实测 |
+| 钉钉会议 | `DingTalk` | 预设就绪，未实测 |
+| Zoom | `Zoom` / `CptHost` | 预设就绪 |
+| Teams | `ms-teams` / `Teams` | 预设就绪 |
+
+识别打分（从强到弱）：进程精确 100 → 进程相似 80 → 标题命中 60 → 专用类名 40。
+`BaseDialog` 这类通用类名**不算证据**（很多客户端都有），避免误报。
+
+```
+meeting_apps                    # 列出运行状态、当前抓取、可接入预设
+meeting_app_select { name }     # 手动切换；传空串恢复自动跟随
+```
+
+配置：
+
+```yaml
+autoAppSelect: true    # 没手动指定时，哪个会议软件在开会就用哪个
+activeApp: 腾讯会议     # 手动指定后，自动跟随不再覆盖
+apps:
+  - { name: 腾讯会议, proc: wemeetapp }
+  - { name: 自定义会议, proc: MyMeeting }   # 不在预设里也能用
+```
+
+接入新软件只做两件事：在 `lib/apps.js` 补一条预设（进程名 + 标题/类名提示），
+或直接在 `apps` 里加一行配置。能力标注（`followDefaultMic` 等）也在预设里，
+用来提示"这个客户端会不会跟随系统默认麦克风"。
