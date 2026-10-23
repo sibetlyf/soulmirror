@@ -40,6 +40,8 @@ import { LivingWorld } from './lib/living.js'
 import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
 import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio } from './lib/uimap.js'
 import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib/join-url.js'
+import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
+import { findMeeting, findMeetingInEvent, AutoJoinGate } from './lib/auto-join.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
 import { getController, createSession, promptSession } from './lib/dsh-session.js'
@@ -143,6 +145,18 @@ export const Config = z.object({
     x: z.number().default(0.18),
     y: z.number().default(0.28),
   }).default({ x: 0.18, y: 0.28 }),
+  /** 会话里出现会议链接/会议号就自动入会。 */
+  autoJoin: z.object({
+    enabled: z.boolean().default(true),
+    /** 只在会话里出现链接时自动入（true）还是连会议号也自动入（false=都要）。 */
+    urlOnly: z.boolean().default(false),
+    /** 同一个会议多久内不重复自动入（毫秒）。 */
+    cooldownMs: z.number().default(300000),
+  }),
+  /** 自动标定：首次安装 / 入会连续失败时，交给 computer-use 去试出按钮位置。 */
+  autoCalibrate: z.boolean().default(true),
+  /** 连续失败几次就重新标定。 */
+  recalibrateThreshold: z.number().default(2),
   /** 自动跟随：哪个会议软件在开会就用哪个（activeApp 为空时生效）。 */
   autoAppSelect: z.boolean().default(true),
   /** 只盯某个会议软件（填 apps 里的 name 或 proc；空 = 任意支持的软件都盯）。 */
@@ -250,6 +264,9 @@ export function apply(ctx, config) {
     policy: config.policy || 'suggest',
     autoWatch: config.autoWatch !== false,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
+    autoJoin: { enabled: true, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
+    autoCalibrate: config.autoCalibrate !== false,
+    recalibrateThreshold: Number(config.recalibrateThreshold || 2),
     autoAppSelect: config.autoAppSelect !== false,
     activeApp: config.activeApp || '',
     meetingCode: config.meetingCode || '',
@@ -1141,7 +1158,12 @@ export function apply(ctx, config) {
         try {
           await click(app.title, cand, opts)
           await new Promise((r) => setTimeout(r, 600))
-          if (await dialogOpen()) { opened = true; steps.push('已点「' + cand + '」'); break }
+          if (await dialogOpen()) {
+            uiMap.markSuccess(app.name, 'join')
+            opened = true
+            steps.push('已点「' + cand + '」')
+            break
+          }
         } catch { /* next */ }
       }
     }
@@ -1169,6 +1191,7 @@ export function apply(ctx, config) {
               uiMap.set(app.name, 'join', { x: rx, y: ry }, { via: 'probe' })
               steps.push('标定位置有偏移，已修正到 ' + rx.toFixed(3) + ', ' + ry.toFixed(3))
             }
+            uiMap.markSuccess(app.name, 'join')
             steps.push('已按标定坐标打开入会对话框（' + rx.toFixed(3) + ', ' + ry.toFixed(3) + ' → ' + hit.x + ',' + hit.y + '）')
             break
           }
@@ -1181,6 +1204,9 @@ export function apply(ctx, config) {
 
     if (!opened) {
       const names = await listClickableNames(app)
+      uiMap.markFailure(app.name, 'join', '打不开入会对话框')
+      const calib = maybeCalibrate(app, 'join', '打不开入会对话框')
+      steps.push(calib.started ? '已在后台用 computer-use 重新标定按钮位置，稍后重试' : '（标定未触发：' + (calib.skipped || calib.why || '') + '）')
       steps.push('没能打开入会对话框。首页可见控件：' + (names.slice(0, 10).join(' / ') || '（读不到）'))
       steps.push('排查：确认会议客户端停在首页（不是已入会状态），或调 config.joinClickRatio')
       return { ok: false, result: steps.join('\n') }
@@ -1598,6 +1624,43 @@ export function apply(ctx, config) {
   const memory = new MemoryStore(join(CONFIG_DIR, 'memory.json'), { maxEntries: 2000 })
   const uiMap = new UiMap(join(CONFIG_DIR, 'uimap.json'))
   const calibDir = join(CONFIG_DIR, 'calib')
+
+  // ── 界面标定：需要时开一个会话，让 computer-use 亲手试出按钮位置 ──────
+  let calibSessionId = ""
+  async function runCalibrationSession(prompt) {
+    const controller = getController(ctx)
+    if (!controller) return { ok: false, error: "宿主没有会话服务" }
+    try {
+      if (!calibSessionId) {
+        calibSessionId = await createSession(ctx, {
+          cwd: join(CONFIG_DIR, "workspace", "calibrate"),
+          title: "SoulMirror · 界面标定",
+        })
+      }
+      const r = await promptSession(ctx, calibSessionId, prompt, { timeoutMs: 180000 })
+      return { ok: r.ok, text: r.text, error: r.error, sessionId: calibSessionId }
+    } catch (e) {
+      calibSessionId = ""
+      return { ok: false, error: e.message }
+    }
+  }
+
+  const calibrator = new CalibrationRunner({
+    run: (prompt) => runCalibrationSession(prompt),
+    logger,
+  })
+
+  /** 需要就触发一次标定（后台跑，不挡主流程） */
+  function maybeCalibrate(app, action = "join", reason = "") {
+    if (!cfg.autoCalibrate) return { started: false, skipped: "disabled" }
+    const need = uiMap.needsRecalibration(app && app.name, action, cfg.recalibrateThreshold)
+    if (!need.needed) return { started: false, skipped: "not-needed" }
+    const meta = uiMap.meta(app && app.name, action)
+    calibrator
+      .trigger({ app: app.name, action, reason: reason || meta.lastReason || "", failures: meta.failures || 0 })
+      .catch(() => {})
+    return { started: true, why: need.why, failures: need.failures }
+  }
   const living = new LivingWorld(join(CONFIG_DIR, 'living'))
   let personaAt = 0
   let personaCache = ''
@@ -1761,6 +1824,37 @@ export function apply(ctx, config) {
     }),
   }))
 
+  ctx.tools.register(defineTool({
+    name: 'meeting_recalibrate',
+    description:
+      '重新标定会议软件按钮位置：开一个带 computer-use 的会话，让它自己试出「加入会议」按钮位置并存进坐标表。入会反复失败时用它。',
+    parameters: {
+      app: { type: 'string', description: '会议软件名（可选，默认当前）' },
+      action: { type: 'string', description: 'join / quick / schedule / share（默认 join）' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_recalibrate', async (a) => {
+      const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
+      const action = String(a.action || 'join')
+      if (!app || !app.name) return { ok: false, result: '没检测到会议软件，先把客户端打开' }
+      if (!cfg.autoCalibrate) return { ok: false, result: '自动标定已在配置里关闭（autoCalibrate: false）' }
+      const meta = uiMap.meta(app.name, action)
+      const need = uiMap.needsRecalibration(app.name, action, cfg.recalibrateThreshold)
+      const r = calibrator.trigger({ app: app.name, action, reason: meta.lastReason || '', failures: meta.failures || 0 })
+      if (!r.started) {
+        return { ok: false, result: '没启动：' + (r.skipped === 'running' ? '已经在标定了，等它跑完' : r.skipped === 'cooldown' ? '刚标定过，几分钟后再试' : String(r.skipped)) }
+      }
+      const entry = await r.job
+      const saved = uiMap.get(app.name, action)
+      const lines = []
+      lines.push('标定' + (entry.ok ? '完成' : '未确认') + '（' + entry.ms + 'ms）')
+      lines.push('当前坐标：' + (saved ? saved.x + ', ' + saved.y : '仍未标定'))
+      if (entry.text) lines.push('会话回报：' + entry.text)
+      if (!entry.ok && entry.error) lines.push('错误：' + entry.error)
+      if (need.failures) lines.push('（此前连续失败 ' + need.failures + ' 次）')
+      return { ok: !!saved, result: lines.join('\n') }
+    }),
+  }))
   // ── 界面标定：首用截一张图，交给会看图的一方确定按钮位置 ──────────────
   ctx.tools.register(defineTool({
     name: 'meeting_calibrate',
@@ -2587,6 +2681,73 @@ export function apply(ctx, config) {
     logger?.warn?.('[soulmirror] 自动应答安装失败: ' + e.message)
   }
   ctx.effect?.(() => () => { try { autoAnswer?.dispose?.() } catch { /* ignore */ } }, 'soulmirror: auto answer')
+
+  // ── 会话里收到会议链接/会议号 → 自动入会 ────────────────────────────
+  const autoJoinGate = new AutoJoinGate({ cooldownMs: (cfg.autoJoin && cfg.autoJoin.cooldownMs) || 300000 })
+  const autoJoinBusy = { at: 0 }
+  async function autoJoinFromSession(text, source) {
+    if (!cfg.autoJoin || cfg.autoJoin.enabled === false) return null
+    const hit = findMeeting(text)
+    if (!hit) return null
+    if (cfg.autoJoin.urlOnly && hit.kind !== "url") return null
+    const gate = autoJoinGate.allow(hit)
+    if (!gate.ok) return null
+    if (Date.now() - autoJoinBusy.at < 20000) return null
+    autoJoinBusy.at = Date.now()
+    autoJoinGate.mark(hit)
+    const app = await detectMeetingApp().catch(() => null)
+    const label = hit.kind === "url" ? hit.url : hit.value
+    logger?.info?.("[soulmirror] 会话里发现会议（" + source + "），自动入会：" + label)
+    try {
+      const r = await joinTool.execute({
+        url: hit.kind === "url" ? hit.url : undefined,
+        code: hit.kind === "code" ? hit.value : undefined,
+        app: app && app.name,
+        displayName: cfg.userName || "",
+        confirm: true,
+      })
+      logger?.info?.("[soulmirror] 自动入会结果：" + (r && r.ok ? "成功" : "未成功"))
+      return r
+    } catch (e) {
+      logger?.warn?.("[soulmirror] 自动入会失败：" + e.message)
+      return null
+    }
+  }
+
+  // 监听宿主会话事件：任何一条消息里出现会议信息就试一次（内部有去重与冷却）
+  try {
+    const offAutoJoin = ctx.on("session/event", (session, event) => {
+      if (!cfg.autoJoin || cfg.autoJoin.enabled === false) return
+      if (!event || !event.type) return
+      // 只关心"进来的内容"，跳过我们自己发出去的助手消息
+      if (/^assistant\//.test(event.type)) return
+      const hit = findMeetingInEvent(event)
+      if (!hit) return
+      const sid = String((session && session.id) || "")
+      autoJoinFromSession(hit.kind === "url" ? hit.url : hit.value, event.type + (sid ? " " + sid.slice(0, 12) : "")).catch(() => {})
+    }, true)
+    ctx.effect?.(() => () => { try { offAutoJoin?.() } catch { /* ignore */ } }, "soulmirror: auto join watcher")
+    logger?.info?.("[soulmirror] 会话自动入会已开启（" + (cfg.autoJoin.urlOnly ? "仅链接" : "链接与会议号") + "）")
+  } catch (e) {
+    logger?.warn?.("[soulmirror] 会话自动入会监听失败: " + e.message)
+  }
+
+  // 首次安装：蹲一会儿等客户端就绪，再让 computer-use 探一遍按钮位置
+  const firstRunCalibrate = setTimeout(() => {
+    if (!cfg.autoCalibrate || !cfg.enabled) return
+    // 没有真实会话服务（测试/受限环境）就别去探索，否则每个启动都在跑 PowerShell
+    if (!getController(ctx)) return
+    detectMeetingApp()
+      .then((app) => {
+        if (!app || !app.name) return
+        const need = uiMap.needsRecalibration(app.name, 'join', cfg.recalibrateThreshold)
+        if (!need.needed) return
+        logger?.info?.('[soulmirror] 首次使用，交给 computer-use 标定 ' + app.name + ' 的入会按钮')
+        maybeCalibrate(app, 'join', need.why)
+      })
+      .catch(() => {})
+  }, 8000)
+  if (firstRunCalibrate.unref) firstRunCalibrate.unref()
 
   logger?.info?.('soulmirror: 全部工具已注册')
 }
