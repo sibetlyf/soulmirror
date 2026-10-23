@@ -372,6 +372,8 @@ export function apply(ctx, config) {
         const liveApp = await detectMeetingApp()
         const codeInfo = await currentMeetingCode(liveApp)
         const statusWins = await listWindows()
+        const liveWin = pickMeetingWindows(statusWins, liveApp.title, liveApp.proc)
+          .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0]
         return json(200, {
           session: session.snapshot(),
           transcript: session.transcript.slice(-60),
@@ -384,7 +386,7 @@ export function apply(ctx, config) {
           partial: session.partial || '',
           meeting: {
             app: liveApp.name || cfg.activeApp || '全部',
-            title: lifecycle.lastWindowTitle || '',
+            title: (liveWin && liveWin.title) || lifecycle.lastWindowTitle || '',
             since: lifecycle.startedAt,
             code: codeInfo.code,
             codeSource: codeInfo.source,
@@ -784,7 +786,54 @@ export function apply(ctx, config) {
   }
 
   /** 从窗口标题和剪贴板里找会议号；没有就返回空串。 */
+  /** 列出窗口里可点的控件名（诊断 + 模糊匹配） */
+  async function listClickableNames(app) {
+    try {
+      const text = await dump(app.title, 260, meetingOpts(app))
+      const out = []
+      for (const line of String(text).split(/\r?\n/)) {
+        const cols = line.split('\t')
+        if (cols.length < 4) continue
+        const type = cols[1] || ""
+        const name = (cols[2] || "").trim()
+        if (!name) continue
+        if (!/Button|Group|Text|MenuItem|ListItem/i.test(type)) continue
+        if (out.includes(name)) continue
+        out.push(name)
+        if (out.length >= 40) break
+      }
+      return out
+    } catch { return [] }
+  }
+
+  /** 列出可编辑控件（找会议号输入框） */
+  async function listEditableNames(app) {
+    try {
+      const text = await dump(app.title, 260, meetingOpts(app))
+      const out = []
+      for (const line of String(text).split(/\r?\n/)) {
+        const cols = line.split('\t')
+        if (cols.length < 4) continue
+        const type = cols[1] || ""
+        const name = (cols[2] || "").trim()
+        const aid = (cols[3] || "").trim()
+        if (!/Edit|Document/i.test(type)) continue
+        const label = name || aid
+        if (!label || out.includes(label)) continue
+        out.push(label)
+        if (out.length >= 12) break
+      }
+      return out
+    } catch { return [] }
+  }
+
   async function detectMeetingCode(app) {
+    // 1) 先看窗口标题，2) 再看界面控件文本，3) 最后看剪贴板
+    try {
+      const text = await dump(app.title, 320, meetingOpts(app))
+      const fromUi = normalizeMeetingCode(String(text || '').replace(/\t/g, ' '))
+      if (fromUi) return fromUi
+    } catch { /* ignore */ }
     const wins = await listWindows()
     const titles = wins
       .filter((w) => !app.proc || String(w.proc || '').toLowerCase() === String(app.proc).toLowerCase() || String(w.title || '').includes(app.title))
@@ -805,8 +854,17 @@ export function apply(ctx, config) {
   }
 
   function meetingInProgress(app, wins) {
-    return pickMeetingWindows(wins, app.title, app.proc)
-      .some((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls))
+    const list = pickMeetingWindows(wins, app.title, app.proc)
+    return list.some((w) => {
+      // 1) 专用类名（悬浮窗、视频窗、会议视图）
+      if (/FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd/.test(w.cls)) return true
+      // 2) 标题不再是软件名 —— 腾讯会议会把它换成会议主题
+      const title = String(w.title || '').trim()
+      if (!title) return false
+      const appNames = [app.name, app.title].filter(Boolean)
+      const isHome = appNames.some((n) => title === n || title === n + ' ')
+      return !isHome && !/^wemeetapp$/i.test(title)
+    })
   }
   function detectApp(wins) {
     for (const app of activeApps()) {
@@ -1021,13 +1079,41 @@ export function apply(ctx, config) {
         return { ok: true, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
       }
 
-      try { steps.push(await click(app.title, '加入会议', opts)) } catch (e) { steps.push('点击「加入会议」失败: ' + e.message) }
-      await new Promise((r) => setTimeout(r, 800))
-      let filled = false
-      for (const cand of ['会议号', '请输入会议号', 'meeting_code', 'code']) {
-        try { await setText(app.title, cand, a.code, opts); filled = true; steps.push('已填会议号(' + cand + ')'); break } catch { /* next */ }
+    // 加入入口：先用候选名点，失败就扫一遍控件按名字模糊匹配
+    let opened = false
+    for (const cand of ['加入会议', '加入', 'Join', 'join', '进入会议']) {
+      try {
+        await click(app.title, cand, opts)
+        opened = true
+        steps.push('已点「' + cand + '」')
+        break
+      } catch { /* next */ }
+    }
+    if (!opened) {
+      const names = await listClickableNames(app)
+      const hit = names.find((n) => /加入|join|进入会议|参会/i.test(n))
+      if (hit) {
+        try { await click(app.title, hit, opts); opened = true; steps.push('按模糊匹配点「' + hit + '」') } catch { /* ignore */ }
       }
-      if (!filled) steps.push('未找到会议号输入框')
+      if (!opened) {
+        steps.push('没找到「加入会议」入口。当前可见控件：' + (names.slice(0, 12).join(' / ') || '（读不到，可能窗口被遮挡或已最小化）'))
+        steps.push('建议：先把腾讯会议主窗口显示出来，或直接在客户端手动入会')
+        return { ok: false, result: steps.join('\n') }
+      }
+    }
+    await new Promise((r) => setTimeout(r, 800))
+    let filled = false
+    const editNames = await listEditableNames(app).catch(() => [])
+    const cands = ['会议号', '请输入会议号', 'meeting_code', 'code', ...editNames]
+    for (const cand of cands) {
+      try {
+        await setText(app.title, cand, a.code, opts)
+        filled = true
+        steps.push('已填会议号(' + cand + ')')
+        break
+      } catch { /* next */ }
+    }
+    if (!filled) steps.push('未找到会议号输入框（可见编辑框：' + (editNames.slice(0, 6).join(' / ') || '无') + '）')
       if (a.password) {
         for (const cand of ['密码', '入会密码', 'password']) {
           try { await setText(app.title, cand, a.password, opts); steps.push('已填密码'); break } catch { /* next */ }
@@ -1038,13 +1124,20 @@ export function apply(ctx, config) {
           try { await setText(app.title, cand, a.displayName, opts); steps.push('已填昵称'); break } catch { /* next */ }
         }
       }
-      for (const cand of ['加入', '加入会议', '进入会议']) {
-        try { await click(app.title, cand, opts); steps.push('已点「' + cand + '」'); break } catch { /* next */ }
-      }
-      await new Promise((r) => setTimeout(r, 2000))
-      const wins = await listWindows()
-      const joined = pickMeetingWindows(wins, app.title, app.proc).some((w) => /VideoMainWindow|MeetingView|FloatSpeakingWnd|ParticipantWnd|VideoCellWnd/.test(w.cls))
-      return { ok: true, result: steps.join('\n') + '\n' + (joined ? '看起来已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
+    let confirmed = false
+    for (const cand of ['加入', '加入会议', '进入会议']) {
+      try { await click(app.title, cand, opts); steps.push('已点「' + cand + '」'); confirmed = true; break } catch { /* next */ }
+    }
+    if (!confirmed) {
+      try { await pressKey(app.title, 'Return', opts); steps.push('已回车提交（兜底）') } catch { /* ignore */ }
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+    const wins = await listWindows()
+    const joined = meetingInProgress(app, wins)
+    if (!joined) {
+      try { await pressKey(app.title, 'escape', opts); steps.push('已按 Esc 关闭残留对话框') } catch { /* ignore */ }
+    }
+    return { ok: joined, result: steps.join('\n') + '\n' + (joined ? '看起来已进入会议' : '尚未确认进入会议，可用 meeting_status 复查；若界面已改版，用 meeting_ui dump 看控件名') }
     }),
   })
   ctx.tools.register(joinTool)
