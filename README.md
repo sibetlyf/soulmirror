@@ -218,3 +218,33 @@ soul_goal    { action, ... }      # add | list | run（目标驱动任务代理�
 
 数据目录：`~/.dsh/soulmirror/living/`（`memory-living.json` / `beliefs.json` / `emotions.json`），
 `/status` 的 `world` 字段也会带回快照，端侧可看。
+
+## 无人值守（自动应答 / 自动继续）
+
+分身半夜开会、跑任务时，DSH 会弹「需要你确认」的卡片。人不在电脑前，这轮就卡死了。
+
+```yaml
+autoAnswer:
+  enabled: true
+  timeoutMs: 5000      # 5 秒没人答，自动按推荐项回答
+```
+
+行为：
+
+1. 拦截 `approval/request`，先正常弹出卡片
+2. 你在 5 秒内回答 → 用你的答案，插件不插手
+3. 5 秒没人答 → 按「推荐项」自动回答（标签里的 `(Recommended)` / `（推荐）`；没有推荐标记时，审批默认 `allowed-once`、问句取第一个选项）
+4. agent 继续跑，任务不会停
+
+日志会写：`无人应答，自动选择（recommended-label）：继续 (Recommended) tool · 原因 [session-…]`。
+
+## 测试
+
+```bash
+npm test          # 60 个单元 + 集成用例
+```
+
+覆盖：活数据（记忆呼吸/信念进化/情绪地形）、会议身份与会话复用、人格读写与去重、长期记忆与蒸馏、
+大脑触发与 LLM 决策、纠错器、宿主内会话驱动（含旧 turn 不提前结算）、知识库检测与回写、
+环境自检、虚拟声卡方案、自动应答（超时/人工优先/禁用），以及插件整体启动：31 个工具注册、
+配置 API（密钥不回显）、各 soul_* 工具的读写行为。

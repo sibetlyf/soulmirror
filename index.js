@@ -33,6 +33,7 @@ import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPer
 import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi } from './lib/knowledge.js'
 import { MemoryStore } from './lib/memory.js'
 import { LivingWorld } from './lib/living.js'
+import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
 import { getController, createSession, promptSession } from './lib/dsh-session.js'
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
@@ -149,6 +150,12 @@ export const Config = z.object({
     /** 允许执行的本机 shell 白名单命令前缀（空 = 禁用 shell）。 */
     allowShell: z.array(z.string()).default([]),
   }),
+  /** 无人值守：DSH 弹确认卡片时，超时按推荐项自动应答，避免整轮卡死。 */
+  autoAnswer: z.object({
+    enabled: z.boolean().default(true),
+    /** 等多久没人答就自动选（毫秒）。 */
+    timeoutMs: z.number().default(5000),
+  }),
   /** 会后写回知识库（通过 DSH 的 knowledge 工具完成）。 */
   knowledge: z.object({
     enabled: z.boolean().default(true),
@@ -206,6 +213,7 @@ export function apply(ctx, config) {
     },
     brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, gate: 'llm', ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, autoSession: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
+    autoAnswer: { enabled: true, timeoutMs: 5000, ...(config.autoAnswer || {}) },
     knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
     apps: Array.isArray(config.apps) && config.apps.length
@@ -1612,6 +1620,8 @@ export function apply(ctx, config) {
       lines.push('分身：' + (agent.running ? '在线' : '待机') + ' · 采集：' + (session.capturing ? '是' : '否'))
       lines.push('唤醒词：' + resolveWakeWords().join(' / '))
       lines.push('DSH 任务：' + (cfg.twin.enabled ? '已启用（profile=' + cfg.twin.profile + '）' : '未启用'))
+      const aaCfg = cfg.autoAnswer || {}
+      lines.push('自动应答：' + (aaCfg.enabled !== false ? '开（' + (aaCfg.timeoutMs || 5000) + 'ms，已自动答 ' + (autoAnswer?.count || 0) + ' 次）' : '关'))
       lines.push('累计：听 ' + brain.stats.seen + ' · 触发 ' + brain.stats.triggered + ' · 发言 ' + agent.spoken)
       const tasks = agent.tasks || []
       if (tasks.length) {
@@ -1896,6 +1906,16 @@ export function apply(ctx, config) {
   }))
 
   ctx.effect?.(() => () => { session.running = false }, 'meeting-agent: stop capture')
+
+  // ── 无人值守：自动应答，避免确认卡片卡死整轮 ──────────────────────
+  let autoAnswer = null
+  try {
+    autoAnswer = installAutoAnswer(ctx, cfg.autoAnswer, logger)
+    if (autoAnswer.enabled) logger?.info?.('[soulmirror] 自动应答已启用（' + ((cfg.autoAnswer && cfg.autoAnswer.timeoutMs) || 5000) + 'ms 后选推荐项）')
+  } catch (e) {
+    logger?.warn?.('[soulmirror] 自动应答安装失败: ' + e.message)
+  }
+  ctx.effect?.(() => () => { try { autoAnswer?.dispose?.() } catch { /* ignore */ } }, 'soulmirror: auto answer')
 
   logger?.info?.('soulmirror: 全部工具已注册')
 }
