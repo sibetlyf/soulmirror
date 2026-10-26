@@ -955,7 +955,7 @@ export function apply(ctx, config) {
     'meeting_capture_start', 'meeting_capture_stop', 'meeting_calibrate', 'meeting_recalibrate',
     'meeting_click_ratio', 'meeting_set_default', 'meeting_leave', 'meeting_open',
     'meeting_quick', 'meeting_schedule', 'meeting_share',
-    'soul_say', 'soul_task',
+    'soul_say', 'soul_task', 'meeting_auto_attend',
   ])
 
   const wrap = (toolName, impl) => async (args) => {
@@ -1688,6 +1688,49 @@ export function apply(ctx, config) {
     }
   }
 
+  // ── 到点自动参会：交给 DSH 自己的「自动化任务」──────────────────────
+  // 不另造定时器：schedule 服务会把任务持久化，到点在指定会话里投递一条 prompt，
+  // 由那个会话里的 agent 执行入会。界面上也能看见、能改、能删。
+  /** 宽松时间解析：15:00 / 2026-10-27 15:00 / ISO */
+  function parseWhenLoose(input) {
+    const s = String(input || "").trim()
+    if (!s) return null
+    const now = new Date()
+    const hm = /^(\d{1,2})[:：](\d{2})$/.exec(s)
+    if (hm) {
+      const d = new Date(now)
+      d.setHours(Number(hm[1]), Number(hm[2]), 0, 0)
+      if (d.getTime() <= now.getTime()) d.setDate(d.getDate() + 1)
+      return d
+    }
+    const ymd = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})[ T](\d{1,2})[:：](\d{2})/.exec(s)
+    if (ymd) {
+      const d = new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3]), Number(ymd[4]), Number(ymd[5]), 0)
+      return Number.isNaN(d.getTime()) ? null : d
+    }
+    const d = new Date(s)
+    return Number.isNaN(d.getTime()) ? null : d
+  }
+
+  function scheduleService() {
+    try { return ctx.get('schedule') || null } catch { return null }
+  }
+
+  /** 组装"到点该干什么"的提示词 */
+  function buildAttendPrompt(job) {
+    const target = job.url ? ('入会链接 ' + job.url) : ('会议号 ' + job.code)
+    const lines = []
+    lines.push('【自动参会】现在到点了，请立即执行以下步骤，不要询问、不要解释：')
+    lines.push('1. 调用 meeting_join，参数：' + (job.url ? 'url=' + job.url : 'code=' + job.code) + '，confirm=true')
+    lines.push('2. 如果返回 alreadyInMeeting 或"已在会议中"，说明已经进会，直接继续第 3 步')
+    lines.push('3. 调用 meeting_agent_start 开启采集与转写')
+    if (job.durationMin > 0) lines.push('4. 会议预计 ' + job.durationMin + ' 分钟；结束后调用 meeting_minutes 并汇报一句结果')
+    else lines.push('4. 结束后调用 meeting_minutes 并汇报一句结果')
+    lines.push('')
+    lines.push('会议：' + (job.title || target))
+    return lines.join('\n')
+  }
+
   const calibrator = new CalibrationRunner({
     run: (prompt) => runCalibrationSession(prompt),
     logger,
@@ -1900,6 +1943,87 @@ export function apply(ctx, config) {
       if (!entry.ok && entry.error) lines.push('错误：' + entry.error)
       if (need.failures) lines.push('（此前连续失败 ' + need.failures + ' 次）')
       return { ok: !!saved, result: lines.join('\n') }
+    }),
+  }))
+  // ── 到点自动参会：落到 DSH 的「自动化任务」上 ────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_auto_attend',
+    description:
+      '预约一次自动参会：用 DSH 自动化任务在指定时间投递一条去入会的指令，到点由会话自己入会、开始采集、散会出纪要。适合那个时间我不在、你替我去。',
+    parameters: {
+      at: { type: 'string', required: true, description: '入会时间：15:00 / 2026-10-27 15:00 / ISO' },
+      url: { type: 'string', description: '入会链接（优先）' },
+      code: { type: 'string', description: '会议号（没有链接时用）' },
+      title: { type: 'string', description: '会议主题' },
+      durationMin: { type: 'number', description: '会议时长（分钟）' },
+      sessionId: { type: 'string', description: '挂到哪个会话（可选，默认当前）' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_auto_attend', async (a) => {
+      if (!cfg.enabled) return { ok: false, result: '插件未开启，先打开总开关' }
+      const svc = scheduleService()
+      if (!svc) return { ok: false, result: '宿主没有 schedule 服务，无法安排自动化任务' }
+      if (!a.url && !a.code) return { ok: false, result: '需要会议号或入会链接' }
+      const when = parseWhenLoose(a.at)
+      if (!when) return { ok: false, result: '时间解析失败：' + a.at }
+      const sid = String(a.sessionId || (a._session && a._session.id) || '').trim()
+      if (!sid) return { ok: false, result: '拿不到会话 id，请在会话里调用' }
+      const job = { url: a.url || '', code: a.code || '', title: a.title || '', durationMin: Number(a.durationMin) || 0 }
+      try {
+        const rec = await svc.create(sid, {
+          title: '替你去开会：' + (job.title || job.code || '会议'),
+          prompt: buildAttendPrompt(job),
+          at: when.toISOString(),
+        })
+        return {
+          ok: true,
+          result: [
+            '已排进 DSH 自动化任务：' + when.toLocaleString(),
+            '任务 id：' + (rec && rec.id ? rec.id : '(已创建)'),
+            '到点会在该会话投递指令 → 入会 → 采集 → 散会出纪要',
+            '前提：DSH 保持运行、插件开关保持开启',
+          ].join('\n'),
+        }
+      } catch (e) {
+        return { ok: false, result: '创建自动化任务失败：' + e.message }
+      }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'meeting_schedule_list',
+    description: '列出已安排的自动参会任务（读 DSH 自动化任务）。',
+    parameters: { sessionId: { type: 'string', description: '会话 id（可选）' } },
+    output: OUT(),
+    execute: wrap('meeting_schedule_list', async (a) => {
+      const svc = scheduleService()
+      if (!svc) return { ok: false, result: '宿主没有 schedule 服务' }
+      const sid = String(a.sessionId || (a._session && a._session.id) || '').trim()
+      try {
+        const rows = sid && svc.list ? await svc.list({ sessionId: sid }) : (svc.catalog ? await svc.catalog() : [])
+        const mine = (rows || []).filter((r) => /替你去开会/.test(String(r.title || '')))
+        if (!mine.length) return { ok: true, result: '没有待执行的自动参会任务' }
+        return { ok: true, result: mine.map((r) => '- ' + (r.scheduledAt || r.at || '') + ' ' + (r.title || '') + ' [id=' + (r.id || '') + ']').join('\n') }
+      } catch (e) {
+        return { ok: false, result: '读取失败：' + e.message }
+      }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'meeting_schedule_cancel',
+    description: '取消一个自动参会任务（删除对应的 DSH 自动化任务）。',
+    parameters: { id: { type: 'string', required: true, description: '任务 id' } },
+    output: OUT(),
+    execute: wrap('meeting_schedule_cancel', async (a) => {
+      const svc = scheduleService()
+      if (!svc) return { ok: false, result: '宿主没有 schedule 服务' }
+      try {
+        if (svc.delete) await svc.delete({ id: String(a.id || "") })
+        return { ok: true, result: '已取消：' + a.id }
+      } catch (e) {
+        return { ok: false, result: '取消失败：' + e.message }
+      }
     }),
   }))
   // ── 界面标定：首用截一张图，交给会看图的一方确定按钮位置 ──────────────
