@@ -1106,7 +1106,7 @@ export function apply(ctx, config) {
     execute: wrap('meeting_join', async (a) => {
       if (!cfg.enabled) return { ok: false, result: '插件已禁用' }
       if (a.confirm !== true) return { ok: false, result: '拒绝：meeting_join 会操作真实客户端，请传 confirm=true 再执行。' }
-      // ── 首选：入会链接（不依赖屏幕）──────────────────────────────
+    // ── 首选：入会链接（不依赖屏幕）──────────────────────────────
     const rawUrl = String(a.url || '').trim() || extractJoinUrl(a.code || '')
     if (rawUrl && isJoinUrl(rawUrl)) {
       if (a.confirm !== true) return { ok: false, result: '拒绝：打开会议链接会真的入会，请传 confirm=true。' }
@@ -1126,6 +1126,13 @@ export function apply(ctx, config) {
     }
     if (!a.code) return { ok: false, result: '缺少会议号（也可以直接给入会链接 url）' }
       const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
+      // 已经在会里：不要再"启动会议"或点加入，否则会弹对话框打断当前会议
+      try {
+        const winsNow = await listWindows()
+        if (meetingInProgress(app, winsNow)) {
+          return { ok: true, result: '已在会议中（检测到会中窗口），不再重复入会', alreadyInMeeting: true }
+        }
+      } catch { /* 忽略探测失败 */ }
       const opts = meetingOpts(app)
       const path = resolveAppPath(app.path)
       if (path) await ensureApp(path, app.title, app.proc)
@@ -2740,6 +2747,15 @@ export function apply(ctx, config) {
   const autoJoinBusy = { at: 0 }
   async function autoJoinFromSession(text, source) {
     if (!isArmed()) return null
+    // 已经在会里（能读到会议号/会中窗口）就没必要再入会，否则会弹出加入对话框打断当前会议
+    try {
+      const wins0 = await listWindows()
+      const appNow = await detectMeetingApp().catch(() => null)
+      if (appNow && meetingInProgress(appNow, wins0)) {
+        logger?.info?.('[soulmirror] 已在会中，跳过自动入会：' + String(text).slice(0, 60))
+        return { ok: true, skipped: 'already-in-meeting' }
+      }
+    } catch { /* 探测失败就按未入会处理 */ }
     if (!cfg.autoJoin || cfg.autoJoin.enabled === false) return null
     const hit = findMeeting(text)
     if (!hit) return null
