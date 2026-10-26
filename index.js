@@ -432,6 +432,36 @@ export function apply(ctx, config) {
     if (!res.ok || data?.code) throw new Error(data?.message || data?.code || `HTTP ${res.status}`)
     return data
   }
+
+  function captureWorkspace(data) {
+    let ws = data?.workspace_id || data?.output?.workspace_id || data?.workspaceId || ''
+    if (!ws) {
+      const m = String(voiceCloneUrl()).match(/^https:\/\/([^.]+)\.(?:cn-beijing|ap-southeast-1)\.maas\.aliyuncs\.com/i)
+      if (m) ws = m[1]
+    }
+    if (ws && ws !== cfg.tts.workspaceId) {
+      cfg.tts.workspaceId = ws
+      savePersisted({ tts: { workspaceId: ws } })
+    }
+    return ws
+  }
+
+  function voiceListOf(data) {
+    const arr = data?.output?.voices || data?.output?.voice_list || data?.output?.data || []
+    if (!Array.isArray(arr)) return []
+    return arr.map((v) => (typeof v === 'string' ? v : (v.voice_id || v.voiceId || v.id || v.name || ''))).filter(Boolean)
+  }
+
+  async function ttsVoiceIds() {
+    if (!voiceCloneKey() || !cfg.tts.workspaceId) return []
+    try {
+      const data = await voiceEnrollment('list_voice', { prefix: cfg.tts.clonePrefix || undefined, page_index: 0, page_size: 20 })
+      return voiceListOf(data)
+    } catch {
+      return []
+    }
+  }
+
   const apiHandler = async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://local')
     const sub = url.pathname.replace(/^\/api\/soulmirror\/?/, '')
@@ -451,6 +481,10 @@ export function apply(ctx, config) {
           const sp = ctx.get('speechController')
           if (sp?.catalog) out.speech = await sp.catalog()
         } catch (e) { out.speechError = e.message }
+        try {
+          const voices = await ttsVoiceIds()
+          if (voices.length) out.tts.voices = Array.from(new Set([...out.tts.voices, ...voices]))
+        } catch (e) { out.tts.error = e.message }
         return json(200, out)
       }
       if (req.method === 'GET' && sub === 'status') {
@@ -610,10 +644,11 @@ export function apply(ctx, config) {
           })
           const voiceId = data?.output?.voice_id || data?.output?.voice || ''
           if (!voiceId) return json(200, { ok: false, error: '服务端未返回 voice_id', raw: data })
+          const workspaceId = captureWorkspace(data)
           cfg.tts.cloneVoiceId = voiceId
           cfg.tts.voice = voiceId
           savePersisted({ tts: { cloneVoiceId: voiceId, voice: voiceId } })
-          return json(200, { ok: true, voiceId, targetModel: target, endpoint: voiceCloneUrl() })
+          return json(200, { ok: true, voiceId, workspaceId, targetModel: target, endpoint: voiceCloneUrl() })
         } catch (e) { return json(200, { ok: false, error: e.message }) }
       }
       if (req.method === 'POST' && sub === 'voice/list') {
@@ -626,7 +661,8 @@ export function apply(ctx, config) {
             page_index: 0,
             page_size: 20,
           })
-          return json(200, { ok: true, data })
+          const workspaceId = captureWorkspace(data)
+          return json(200, { ok: true, data, voices: voiceListOf(data), workspaceId })
         } catch (e) { return json(200, { ok: false, error: e.message }) }
       }
       if (req.method === 'POST' && sub === 'join') {
