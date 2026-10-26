@@ -91,6 +91,11 @@ export const Config = z.object({
     speed: z.number().default(1),
     /** 云端 pcm 采样率（OpenAI 返回 24000） */
     sampleRate: z.number().default(24000),
+    /** 声音复刻：DashScope 业务空间 ID / 自定义端点 / 音色前缀。 */
+    workspaceId: z.string().default(''),
+    cloneBaseUrl: z.string().default(''),
+    clonePrefix: z.string().default('soulmirror'),
+    cloneVoiceId: z.string().default(''),
   }),
   /** 语音识别。local = 插件自带的 whisper.cpp 离线模型；openai = OpenAI 兼容云端；none = 关闭。 */
   asr: z.object({
@@ -123,6 +128,7 @@ export const Config = z.object({
   /** 后台大脑：转写流 → 判定是否插话（LLM 走 OpenAI 兼容接口，不配则用规则+模板）。 */
   brain: z.object({
     baseUrl: z.string().default(''),
+    provider: z.string().default(''),
     model: z.string().default(''),
     apiKeyEnv: z.string().default('BRAIN_API_KEY'),
     apiKey: z.string().default(''),
@@ -243,9 +249,10 @@ export function apply(ctx, config) {
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
       baseUrl: '', model: 'cosyvoice-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '', speed: 1, sampleRate: 16000,
+      workspaceId: '', cloneBaseUrl: '', clonePrefix: 'soulmirror', cloneVoiceId: '',
       ...(config.tts || {}),
     },
-    brain: { baseUrl: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, gate: 'llm', ...(config.brain || {}) },
+    brain: { baseUrl: '', provider: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, gate: 'llm', ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, autoSession: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
     autoAnswer: { enabled: true, timeoutMs: 5000, ...(config.autoAnswer || {}) },
     knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
@@ -332,9 +339,14 @@ export function apply(ctx, config) {
         apiKey: '',
         keySet: !!(cfg.tts.apiKey || process.env[cfg.tts.apiKeyEnv || 'DASHSCOPE_API_KEY']),
         keySource: cfg.tts.apiKey ? 'config' : (process.env[cfg.tts.apiKeyEnv || 'DASHSCOPE_API_KEY'] ? 'env' : 'none'),
+        workspaceId: cfg.tts.workspaceId || '',
+        cloneBaseUrl: cfg.tts.cloneBaseUrl || '',
+        clonePrefix: cfg.tts.clonePrefix || 'soulmirror',
+        cloneVoiceId: cfg.tts.cloneVoiceId || '',
       },
       brain: {
         baseUrl: cfg.brain.baseUrl,
+        provider: cfg.brain.provider || '',
         model: cfg.brain.model,
         apiKeyEnv: cfg.brain.apiKeyEnv,
         apiKey: '',
@@ -369,8 +381,8 @@ export function apply(ctx, config) {
 
   const EDITABLE = {
     asr: ['provider', 'model', 'dashscopeModel', 'baseUrl', 'apiKeyEnv', 'apiKey', 'chunkSeconds', 'lang'],
-    tts: ['provider', 'model', 'voice', 'sampleRate', 'apiKeyEnv', 'apiKey', 'speed'],
-    brain: ['baseUrl', 'model', 'apiKeyEnv', 'apiKey', 'profile', 'minGapMs'],
+    tts: ['provider', 'model', 'voice', 'sampleRate', 'apiKeyEnv', 'apiKey', 'speed', 'workspaceId', 'cloneBaseUrl', 'clonePrefix', 'cloneVoiceId'],
+    brain: ['baseUrl', 'provider', 'model', 'apiKeyEnv', 'apiKey', 'profile', 'minGapMs'],
     devices: ['capture', 'captureMode', 'speak', 'micName', 'micRestore', 'micInitiallyMuted'],
   }
   function pick(obj, keys) {
@@ -385,7 +397,41 @@ export function apply(ctx, config) {
     return keep
   }
 
-  // webServer 可能在 apply 之后才挂载，轮询拿服务再注册
+  function voiceCloneUrl() {
+    if (cfg.tts.cloneBaseUrl) return cfg.tts.cloneBaseUrl
+    if (cfg.tts.workspaceId) return `https://${cfg.tts.workspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/audio/tts/customization`
+    return 'https://dashscope.aliyuncs.com/api/v1/services/audio/tts/customization'
+  }
+
+  function audioDataUri(input) {
+    const text = String(input || '').trim()
+    if (!text) throw new Error('缺少参考音频')
+    if (/^https?:\/\//i.test(text) || /^data:/i.test(text)) return text
+    if (!existsSync(text)) throw new Error('音频文件不存在: ' + text)
+    const lower = text.toLowerCase()
+    const mime = lower.endsWith('.mp3') ? 'audio/mpeg' : lower.endsWith('.m4a') ? 'audio/mp4' : 'audio/wav'
+    return `data:${mime};base64,` + readFileSync(text).toString('base64')
+  }
+
+  function voiceCloneKey() {
+    return cfg.tts.apiKey || process.env[cfg.tts.apiKeyEnv || 'DASHSCOPE_API_KEY'] || process.env.DASHSCOPE_API_KEY || ''
+  }
+
+  async function voiceEnrollment(action, input) {
+    const key = voiceCloneKey()
+    if (!key) throw new Error('未配置 DashScope Key（tts.apiKey 或 DASHSCOPE_API_KEY）')
+    const res = await fetch(voiceCloneUrl(), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'voice-enrollment', input: { action, ...input } }),
+      signal: AbortSignal.timeout(120000),
+    })
+    const text = await res.text()
+    let data
+    try { data = JSON.parse(text) } catch { data = { raw: text } }
+    if (!res.ok || data?.code) throw new Error(data?.message || data?.code || `HTTP ${res.status}`)
+    return data
+  }
   const apiHandler = async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://local')
     const sub = url.pathname.replace(/^\/api\/soulmirror\/?/, '')
@@ -395,6 +441,18 @@ export function apply(ctx, config) {
     }
     try {
       if (req.method === 'GET' && (sub === '' || sub === 'config')) return json(200, publicConfig())
+      if (req.method === 'GET' && sub === 'models') {
+        const out = { llm: null, speech: null, tts: { models: ['cosyvoice-v2', 'cosyvoice-v1'], voices: [cfg.tts.voice, cfg.tts.cloneVoiceId].filter(Boolean) } }
+        try {
+          const sc = ctx.get('sessionController')
+          if (sc?.modelCatalog) out.llm = await sc.modelCatalog()
+        } catch (e) { out.llmError = e.message }
+        try {
+          const sp = ctx.get('speechController')
+          if (sp?.catalog) out.speech = await sp.catalog()
+        } catch (e) { out.speechError = e.message }
+        return json(200, out)
+      }
       if (req.method === 'GET' && sub === 'status') {
         // 未开启时不做实时探测：少一次 PowerShell 调用，也完全不碰桌面
         const liveApp = cfg.enabled ? await detectMeetingApp() : meetingApp(cfg.activeApp || '')
@@ -536,6 +594,40 @@ export function apply(ctx, config) {
         codeCache = { at: Date.now(), app: '', code: cfg.meetingCode, source: cfg.meetingCodeManual ? 'manual' : 'none' }
         savePersisted({ meetingCode: cfg.meetingCode, meetingCodeManual: cfg.meetingCodeManual })
         return json(200, { ok: true, code: cfg.meetingCode, source: cfg.meetingCodeManual ? 'manual' : 'none' })
+      }
+      if (req.method === 'POST' && sub === 'voice/clone') {
+        const bufV = []
+        for await (const chunk of req) bufV.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufV).toString('utf8') || '{}')
+        const prefix = String(body.prefix || cfg.tts.clonePrefix || 'soulmirror').replace(/[^0-9A-Za-z]/g, '').slice(0, 10) || 'soulmirror'
+        const target = String(body.targetModel || cfg.tts.model || 'cosyvoice-v2')
+        try {
+          const data = await voiceEnrollment('create_voice', {
+            target_model: target,
+            prefix,
+            audio: audioDataUri(body.audio),
+            language_hints: ['zh'],
+          })
+          const voiceId = data?.output?.voice_id || data?.output?.voice || ''
+          if (!voiceId) return json(200, { ok: false, error: '服务端未返回 voice_id', raw: data })
+          cfg.tts.cloneVoiceId = voiceId
+          cfg.tts.voice = voiceId
+          savePersisted({ tts: { cloneVoiceId: voiceId, voice: voiceId } })
+          return json(200, { ok: true, voiceId, targetModel: target, endpoint: voiceCloneUrl() })
+        } catch (e) { return json(200, { ok: false, error: e.message }) }
+      }
+      if (req.method === 'POST' && sub === 'voice/list') {
+        const bufL = []
+        for await (const chunk of req) bufL.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufL).toString('utf8') || '{}')
+        try {
+          const data = await voiceEnrollment('list_voice', {
+            prefix: body.prefix || cfg.tts.clonePrefix || undefined,
+            page_index: 0,
+            page_size: 20,
+          })
+          return json(200, { ok: true, data })
+        } catch (e) { return json(200, { ok: false, error: e.message }) }
       }
       if (req.method === 'POST' && sub === 'join') {
         const bufJ = []
@@ -1377,6 +1469,40 @@ export function apply(ctx, config) {
     }),
   }))
 
+  // ── 声音复刻 ────────────────────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_voice_clone',
+    description: '用参考音频克隆 DashScope 音色，并设为会议发言音色。音频支持本地 WAV/MP3 路径或公网 URL。必须传 confirm=true。',
+    parameters: {
+      audio: { type: 'string', required: true, description: '参考音频本地路径或公网 URL。' },
+      prefix: { type: 'string', description: '音色前缀，仅字母数字，≤10 位。' },
+      targetModel: { type: 'string', description: '目标 TTS 模型，默认取 tts.model。' },
+      confirm: { type: 'boolean', description: '确认执行，必须为 true。' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_voice_clone', async (a) => {
+      if (a.confirm !== true) return { ok: false, result: '拒绝：声音克隆会创建真实音色并产生费用，请传 confirm=true。' }
+      try {
+        const prefix = String(a.prefix || cfg.tts.clonePrefix || 'soulmirror').replace(/[^0-9A-Za-z]/g, '').slice(0, 10) || 'soulmirror'
+        const target = String(a.targetModel || cfg.tts.model || 'cosyvoice-v2')
+        const data = await voiceEnrollment('create_voice', {
+          target_model: target,
+          prefix,
+          audio: audioDataUri(a.audio),
+          language_hints: ['zh'],
+        })
+        const voiceId = data?.output?.voice_id || data?.output?.voice || ''
+        if (!voiceId) return { ok: false, result: '服务端未返回 voice_id: ' + JSON.stringify(data).slice(0, 300) }
+        cfg.tts.voice = voiceId
+        cfg.tts.cloneVoiceId = voiceId
+        savePersisted({ tts: { voice: voiceId, cloneVoiceId: voiceId } })
+        return { ok: true, result: `已创建音色 ${voiceId}，并设为会议发言音色（target_model=${target}）` }
+      } catch (e) {
+        return { ok: false, result: '声音克隆失败：' + e.message }
+      }
+    }),
+  }))
+
   // ── 采集与转写 ──────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_capture_start',
@@ -1764,7 +1890,38 @@ export function apply(ctx, config) {
   // ── ASR 纠错：用大模型把同音错字改回正确人名/术语 ──────────────
   const fixNames = Array.from(new Set([cfg.userName, ...(cfg.wakeWords || []), ...((cfg.apps || []).map((a) => a.name))].filter(Boolean)))
 
-  const completer = createCompleter(cfg.brain)
+  function makeDshCompleter(brainCfg) {
+    const llm = ctx.get('llm')
+    if (!llm?.stream) return null
+    return async (messages) => {
+      let provider = String(brainCfg.provider || '')
+      let model = String(brainCfg.model || '')
+      if (!provider || !model) {
+        const controller = ctx.get('sessionController')
+        const catalog = controller?.modelCatalog ? await controller.modelCatalog() : null
+        if (!catalog?.default) throw new Error('DSH 没有可用的默认模型')
+        provider = provider || catalog.default.provider
+        model = model || catalog.default.model
+      }
+      const system = (messages || []).filter((m) => m.role === 'system').map((m) => String(m.content || '')).join('\n')
+      const user = (messages || []).filter((m) => m.role !== 'system').map((m) => String(m.content || '')).join('\n')
+      const stream = llm.stream({
+        provider,
+        model,
+        system: system || undefined,
+        messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+      })
+      let out = ''
+      for await (const chunk of stream) {
+        if (chunk.type === 'delta' && chunk.text) out += chunk.text
+        else if (chunk.type === 'text-delta' && chunk.text) out += chunk.text
+      }
+      return out
+    }
+  }
+
+  const httpCompleter = createCompleter(cfg.brain)
+  const completer = (cfg.brain.provider ? makeDshCompleter(cfg.brain) : null) || httpCompleter || makeDshCompleter(cfg.brain)
 
   // 注意：必须在 completer 初始化之后再装配纠错器，否则会踩 TDZ
   session.correctText = (cfg.asr.llmCorrect === false || !completer)
