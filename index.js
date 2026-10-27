@@ -387,7 +387,13 @@ export function apply(ctx, config) {
   }
   function pick(obj, keys) {
     const out = {}
-    for (const k of keys) if (obj && obj[k] !== undefined) out[k] = obj[k]
+    for (const k of keys) {
+      if (obj && obj[k] !== undefined) {
+        // 页面拿不到已保存密钥（只显示掩码），空值不能覆盖旧密钥。
+        if (k === 'apiKey' && !obj[k]) continue
+        out[k] = obj[k]
+      }
+    }
     return out
   }
   function patchToStore(patch) {
