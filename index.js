@@ -503,7 +503,15 @@ export function apply(ctx, config) {
         const liveApp = cfg.enabled ? await detectMeetingApp() : meetingApp(cfg.activeApp || '')
         const codeInfo = await currentMeetingCode(liveApp)
         const statusWins = await listWindows()
+        // 挑标题用于展示：排除"标题就是进程名"或空标题的窗口（腾讯会议会留一个 wemeetapp 的后台窗）
+        const procName = String(liveApp.proc || '').toLowerCase()
         const liveWin = pickMeetingWindows(statusWins, liveApp.title, liveApp.proc)
+          .filter((w) => {
+            const title = String(w.title || '').trim()
+            if (!title) return false
+            if (procName && title.toLowerCase() === procName) return false
+            return true
+          })
           .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0]
         return json(200, {
           session: session.snapshot(),
@@ -1015,28 +1023,60 @@ export function apply(ctx, config) {
   }
 
   async function detectMeetingCode(app) {
-    // 1) 先看窗口标题，2) 再看界面控件文本，3) 最后看剪贴板
-    try {
-      const text = await dump(app.title, 320, meetingOpts(app))
-      const fromUi = normalizeMeetingCode(String(text || '').replace(/\t/g, ' '))
-      if (fromUi) return fromUi
-    } catch { /* ignore */ }
-    const wins = await listWindows()
-    const titles = wins
-      .filter((w) => !app.proc || String(w.proc || '').toLowerCase() === String(app.proc).toLowerCase() || String(w.title || '').includes(app.title))
-      .map((w) => w.title)
-      .join(' ')
-    const fromTitle = normalizeMeetingCode(titles)
+    // 会议号可能只在"悬浮小窗"(FloatSpeakingWnd) 或会中窗口里，主窗口反而没有。
+    // 所以按窗口逐个扫：会中窗口优先，最后才看标题和剪贴板。
+    const wins = await listWindows().catch(() => [])
+    const proc = String(app.proc || '').toLowerCase()
+    const mine = wins.filter((w) => {
+      if (proc && String(w.proc || '').toLowerCase() !== proc) return false
+      return true
+    })
+
+    // 会中窗口优先：悬浮窗 / 视频窗 / 会议视图 / 参与者窗
+    const inMeetingCls = /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd|MeetingMainWindow/i
+    const ranked = [...mine].sort((a, b) => {
+      const sa = inMeetingCls.test(a.cls || '') ? 0 : 1
+      const sb = inMeetingCls.test(b.cls || '') ? 0 : 1
+      return sa - sb
+    })
+
+    // 1) 逐个窗口扫控件文本（最多 4 个窗口，避免太慢）
+    for (const w of ranked.slice(0, 4)) {
+      if (!w.cls) continue
+      try {
+        const text = await dump(w.title || app.title, 320, { ...meetingOpts(app), cls: w.cls })
+        const fromUi = normalizeMeetingCode(String(text || '').replace(/\t/g, ' '))
+        if (fromUi) return fromUi
+      } catch { /* 换下一个窗口 */ }
+    }
+
+    // 2) 窗口标题里带会议号
+    const fromTitle = normalizeMeetingCode(ranked.map((w) => w.title || '').join(' '))
     if (fromTitle) return fromTitle
+
+    // 3) 剪贴板（用户刚复制的邀请文案）
     return normalizeMeetingCode(await clipboardText())
   }
 
   let codeCache = { at: 0, app: '', code: '', source: 'none' }
   async function currentMeetingCode(app) {
-    if (cfg.meetingCodeManual && cfg.meetingCode) return { code: cfg.meetingCode, source: 'manual' }
-    if (Date.now() - codeCache.at < 4000 && codeCache.app === app.name) return codeCache
-    const code = await detectMeetingCode(app)
-    codeCache = { at: Date.now(), app: app.name, code, source: code ? 'auto' : 'none' }
+    // 自动优先：会议号能读出来就用读到的（手动填的只在读不到时兜底）
+    if (Date.now() - codeCache.at < 4000 && codeCache.app === app.name && codeCache.code) return codeCache
+    const auto = await detectMeetingCode(app)
+    if (auto) {
+      codeCache = { at: Date.now(), app: app.name, code: auto, source: 'auto' }
+      // 读到新号且和手动值不同：以实际为准，清掉手动标记
+      if (cfg.meetingCodeManual && cfg.meetingCode && cfg.meetingCode !== auto) {
+        cfg.meetingCode = auto
+        cfg.meetingCodeManual = false
+        try { savePersisted({ meetingCode: auto, meetingCodeManual: false }) } catch { /* ignore */ }
+      }
+      return codeCache
+    }
+    if (cfg.meetingCodeManual && cfg.meetingCode) {
+      return { code: cfg.meetingCode, source: 'manual', app: app.name }
+    }
+    codeCache = { at: Date.now(), app: app.name, code: '', source: 'none' }
     return codeCache
   }
 
