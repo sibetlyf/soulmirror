@@ -367,6 +367,11 @@ export function apply(ctx, config) {
   }
 
   function savePersisted(patch) {
+    const clearBrainKey = !!(patch && patch.brain && patch.brain.clearKey === true)
+    if (clearBrainKey) {
+      cfg.brain.apiKey = ''
+      if (stored.brain) stored.brain.apiKey = ''
+    }
     const keep = patchToStore(patch)
     // 关键：把历史配置合并进来，别用补丁覆盖整个文件
     stored = deepMerge(stored, keep)
@@ -1962,7 +1967,12 @@ export function apply(ctx, config) {
     }
   }
 
-  const httpCompleter = createCompleter(cfg.brain)
+  const brainKey = cfg.brain.apiKey
+    || process.env[cfg.brain.apiKeyEnv || 'BRAIN_API_KEY']
+    || process.env.ARK_API_KEY
+    || process.env.OPENAI_API_KEY
+  // 留空 = 用 DSH 当前模型；只有真的配置了 Key 才走自定义 endpoint。
+  const httpCompleter = brainKey ? createCompleter(cfg.brain) : null
   const completer = (cfg.brain.provider ? makeDshCompleter(cfg.brain) : null) || httpCompleter || makeDshCompleter(cfg.brain)
 
   // 注意：必须在 completer 初始化之后再装配纠错器，否则会踩 TDZ
