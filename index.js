@@ -966,20 +966,31 @@ export function apply(ctx, config) {
   }
 
   function normalizeMeetingCode(text) {
-    const raw = String(text || '')
-    const patterns = [
-      /(?:会议号|会议\s*ID|会议ID|Meeting\s*ID)[：:\s]*([0-9][0-9\s-]{6,}[0-9])/i,
-      /\b(\d{3}[\s-]\d{3}[\s-]\d{3,4})\b/,
-      /\b(\d{9,11})\b/,
-    ]
-    for (const re of patterns) {
-      const m = raw.match(re)
-      if (m) {
-        const code = m[1].replace(/[^0-9]/g, '')
-        if (code.length >= 8 && code.length <= 12) return code
-      }
+    const raw = String(text || "")
+    if (!raw) return ""
+  
+    // 1) 带标签的最可信：移动会议写"移动会议：379422987"，腾讯会议写"会议号 206 275 219"
+    const labeled = /(?:会议号|移动会议|会议\s*ID|会议ID|Meeting\s*ID|meeting_code)[：:\s]*([0-9][0-9\s-]{6,}[0-9])/gi
+    for (const m of raw.matchAll(labeled)) {
+      const code = m[1].replace(/[^0-9]/g, "")
+      if (code.length >= 8 && code.length <= 12) return code
     }
-    return ''
+  
+    // 2) 邀请链接里的号：…/share/379422987 或 …/dm/xxx
+    const fromLink = raw.match(/\/(?:share|j)\/(\d{8,12})/)
+    if (fromLink) return fromLink[1]
+  
+    // 3) 裸号：三位一组的写法，或 9~11 位连写
+    for (const re of [/\b(\d{3}[\s-]\d{3}[\s-]\d{3,4})\b/, /\b(\d{9,11})\b/]) {
+      const m = raw.match(re)
+      if (!m) continue
+      const code = m[1].replace(/[^0-9]/g, "")
+      if (code.length < 8 || code.length > 12) continue
+      // 排除日期拼出来的假号（2026-11-02 → 2026110216）
+      if (/^(19|20)\d{2}/.test(code)) continue
+      return code
+    }
+    return ""
   }
 
   /** 从窗口标题和剪贴板里找会议号；没有就返回空串。 */
