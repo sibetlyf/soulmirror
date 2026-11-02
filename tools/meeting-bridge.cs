@@ -31,6 +31,7 @@ namespace MeetingBridge
                 switch (cmd)
                 {
                     case "devices": CmdDevices(); return 0;
+                case "default": CmdDefault(opt); return 0;
                     case "capture": CmdCapture(opt); return 0;
                     case "capture-process": CmdCaptureProcess(opt); return 0;
                     case "mic-usage": CmdMicUsage(opt); return 0;
@@ -350,6 +351,17 @@ namespace MeetingBridge
             Console.WriteLine("OK pid=" + pid + " frames=" + mono.Length + " srcRate=" + srcRate + " ch=" + srcCh + " out=" + outFile);
         }
         // ---------------- devices ----------------
+
+        /// <summary>报告系统默认播放/采集设备名。应用默认往默认播放设备送声音。</summary>
+        static void CmdDefault(Dictionary<string, string> o)
+        {
+            string flow = Get(o, "flow", "render").ToLowerInvariant();
+            var en = CreateEnumerator();
+            IMMDevice d;
+            en.GetDefaultAudioEndpoint(flow == "capture" ? 1 : 0, 0, out d);
+            Console.OutputEncoding = Encoding.UTF8;
+            Console.WriteLine(FriendlyName(d));
+        }
 
         static void CmdDevices()
         {
