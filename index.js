@@ -218,7 +218,9 @@ export const Config = z.object({
   /** 额外唤醒词（覆盖默认推导；留空则用 用户名+称呼+通用词）。 */
   wakeWords: z.array(z.string()).default([]),
   /** 发言策略：observe 只记不说 / suggest 草稿待确认 / auto 自动播报。 */
-  policy: z.union(['observe', 'suggest', 'auto']).default('suggest'),
+  /** 工作模式：transcribe=只转录（不判定不发言不建会话）；agent=开启自动回复 */
+  mode: z.union(['transcribe', 'agent']).default('transcribe'),
+  policy: z.union(['observe', 'suggest', 'auto']).default('auto'),
   /** 数据目录（空 = ~/.dsh/soulmirror）。 */
   dataDir: z.string().default(''),
   /** 保留音频切片（默认删）。 */
@@ -272,7 +274,8 @@ export function apply(ctx, config) {
       punctuation: true, itn: true, disfluencyRemoval: true, speakerDiarization: false,
       languageHints: ['zh', 'en'], llmCorrect: true, ...(config.asr || {}),
     },
-    policy: config.policy || 'suggest',
+    mode: config.mode === 'agent' ? 'agent' : 'transcribe',
+    policy: config.policy || 'auto',
     autoWatch: config.autoWatch !== false,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
     autoJoin: { enabled: true, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
@@ -539,6 +542,7 @@ export function apply(ctx, config) {
           agent,
           mic: mic.state,
           enabled: cfg.enabled === true,
+          mode: cfg.mode || 'transcribe',
           armed: isArmed(),
           auto: !!(cfg.autoWatch && lifecycle.timer),
           lifecycle: lifecycle.snapshot(),
@@ -569,6 +573,17 @@ export function apply(ctx, config) {
         logger?.info?.('[soulmirror] 手动切换会议软件：' + hit.name)
         return json(200, { ok: true, activeApp: hit.name, apps: (cfg.apps || []).map((a) => ({ name: a.name, proc: a.proc || '' })) })
       }
+      if (req.method === 'POST' && sub === 'mode') {
+        const bufM = []
+        for await (const chunk of req) bufM.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufM).toString('utf8') || '{}')
+        const mode = body.mode === 'agent' ? 'agent' : 'transcribe'
+        cfg.mode = mode
+        try { savePersisted({ mode }) } catch { /* ignore */ }
+        logger?.info?.('[soulmirror] 模式切到 ' + mode + (mode === 'agent' ? '（自动回复）' : '（只转录）'))
+        return json(200, { ok: true, mode })
+      }
+
       if (req.method === 'POST' && sub === 'auto') {
         const bufA = []
         for await (const chunk of req) bufA.push(chunk)
@@ -2134,6 +2149,8 @@ export function apply(ctx, config) {
     if (!agent.running) return
     try { memory.add({ role: 'user', text: item.text, session: session.dir }) } catch { /* ignore */ }
     try { living.absorb(item.text, { speaker: item.speaker || '', source: 'meeting' }) } catch { /* ignore */ }
+    // 只转录模式：到此为止——不判定要不要接话、不发言、不建任务会话
+    if (cfg.mode !== 'agent') return
     const trig = brain.push(item)
     if (!trig && cfg.brain.gate !== 'llm') return
     // gate=llm：不靠关键字，整句+上下文交给模型判断要不要接
@@ -2671,7 +2688,8 @@ export function apply(ctx, config) {
         }
         if (!session.capturing) await session.startCapture('auto').catch((e) => logger?.warn?.('[soulmirror] 自动采集失败: ' + e.message))
         agent.running = true
-        ensureMeetingSession(reason).catch(() => {})
+        // 只转录模式不建会话：会消耗模型、也会刷会话列表
+        if (cfg.mode === 'agent') ensureMeetingSession(reason).catch(() => {})
         logger?.info?.('[soulmirror] 已开启：开始采集转写并建会话（' + reason + '）')
       },
       onExit: async () => {
