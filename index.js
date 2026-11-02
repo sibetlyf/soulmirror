@@ -70,6 +70,8 @@ export const Config = z.object({
     capture: z.string().default(''),
     /** 采集模式：loopback（采系统声音）或 device（采某个采集端点）。 */
     captureMode: z.union(['loopback', 'device']).default('loopback'),
+    /** 采到静音时自动把默认播放切到该设备（通常填 CABLE Input）。留空则只报警不切换。 */
+    forceCaptureDevice: z.string().default(''),
     /** 发言播放到的虚拟声卡输入端点（渲染设备）。 */
     speak: z.string().default('CABLE Input'),
     /** 会议客户端里应选的麦克风名字（仅用于状态提示）。 */
@@ -245,7 +247,7 @@ export function apply(ctx, config) {
     windowTitle: config.windowTitle || '腾讯会议',
     windowClass: config.windowClass || 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView',
     processName: config.processName || 'wemeetapp',
-    devices: { capture: '', captureMode: 'loopback', speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
+    devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
       baseUrl: '', model: 'cosyvoice-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '', speed: 1, sampleRate: 16000,

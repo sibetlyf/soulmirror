@@ -255,8 +255,9 @@ namespace MeetingBridge
         }
         static void CmdCaptureProcess(Dictionary<string, string> o)
         {
+            bool stream = Get(o, "stream", "0") == "1";
             string outFile = Get(o, "out", null);
-            if (string.IsNullOrEmpty(outFile)) throw new Exception("--out required");
+            if (!stream && string.IsNullOrEmpty(outFile)) throw new Exception("--out required");
             int seconds = GetInt(o, "seconds", 5);
             string proc = Get(o, "process", "wemeetapp");
             int pid = ResolvePid(proc);
@@ -298,6 +299,34 @@ namespace MeetingBridge
             var pcm = new List<short>();
 
             client.Start();
+            Console.Error.WriteLine("PROCSTREAM OK pid=" + pid + " rate=" + srcRate + " ch=" + srcCh + " float=" + isFloat + " stream=" + stream);
+
+            if (stream)
+            {
+                // 进程环回流式输出：边采边把 16k 单声道 PCM16 写到 stdout（与 capture-stream 一致）
+                var stdout = Console.OpenStandardOutput();
+                while (true)
+                {
+                    int packet; cap.GetNextPacketSize(out packet);
+                    if (packet == 0) { Thread.Sleep(5); continue; }
+                    IntPtr data; int nFrames; int flags; long pos; long qpc;
+                    cap.GetBuffer(out data, out nFrames, out flags, out pos, out qpc);
+                    if (nFrames > 0 && flags == 0)
+                    {
+                        int bytes = nFrames * srcCh * (fmt.wBitsPerSample / 8);
+                        byte[] buf = new byte[bytes];
+                        Marshal.Copy(data, buf, 0, bytes);
+                        var chunk = new List<short>();
+                        AppendMono(buf, nFrames, srcCh, isFloat, chunk, gain);
+                        short[] mono16 = Resample(chunk, srcRate, 16000);
+                        var outBuf = new byte[mono16.Length * 2];
+                        Buffer.BlockCopy(mono16, 0, outBuf, 0, outBuf.Length);
+                        stdout.Write(outBuf, 0, outBuf.Length);
+                        stdout.Flush();
+                    }
+                    cap.ReleaseBuffer(nFrames);
+                }
+            }
             var sw = System.Diagnostics.Stopwatch.StartNew();
             while (sw.Elapsed.TotalSeconds < seconds)
             {
