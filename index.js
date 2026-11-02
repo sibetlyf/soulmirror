@@ -2253,6 +2253,33 @@ export function apply(ctx, config) {
       return { ok: !!saved, result: lines.join('\n') }
     }),
   }))
+  // ── 工作模式：只转录 / Agent 自动回复 ────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_mode',
+    description: '查看或切换会议助手的工作模式：transcribe=只转录（不判定不发言不建会话）；agent=开启自动回复。',
+    parameters: {
+      mode: { type: 'string', description: 'transcribe | agent；不传则只查看当前模式' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_mode', async (a) => {
+      const want = String(a.mode || '').trim().toLowerCase()
+      if (!want) {
+        return { ok: true, result: '当前模式：' + (cfg.mode === 'agent' ? 'agent（自动回复）' : 'transcribe（只转录）') }
+      }
+      if (want !== 'transcribe' && want !== 'agent') {
+        return { ok: false, result: '只支持 transcribe 或 agent' }
+      }
+      cfg.mode = want
+      try { savePersisted({ mode: want }) } catch { /* ignore */ }
+      logger?.info?.('[soulmirror] 模式切换为 ' + want)
+      return {
+        ok: true,
+        result: want === 'agent'
+          ? '已切到 Agent 模式：会判断要不要接话、需要时发言、并把活交给 DSH'
+          : '已切到只转录模式：只采集和转写，不判定、不发言、不建会话（省 token）',
+      }
+    }),
+  }))
   // ── 到点自动参会：落到 DSH 的「自动化任务」上 ────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_auto_attend',
