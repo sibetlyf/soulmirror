@@ -531,7 +531,7 @@ export function apply(ctx, config) {
             since: lifecycle.startedAt,
             code: codeInfo.code,
             codeSource: codeInfo.source,
-            inMeeting: meetingInProgress(liveApp, statusWins),
+            inMeeting: await meetingActive(liveApp, statusWins),
           },
           models: { asr: cfg.asr.provider + ' / ' + (cfg.asr.dashscopeModel || cfg.asr.model), tts: cfg.tts.provider + ' / ' + cfg.tts.model + ' / ' + cfg.tts.voice },
           devices: { capture: cfg.devices.capture || '默认渲染设备', speak: cfg.devices.speak },
@@ -1082,6 +1082,35 @@ export function apply(ctx, config) {
     return codeCache
   }
 
+  /** 该会议软件是否正占着麦克风（最强的"在会中"信号，尤其对移动会议） */
+  async function micHeldByApp(app) {
+    try {
+      const rows = await micUsage()
+      const proc = String((app && app.proc) || "").toLowerCase()
+      for (const r of rows || []) {
+        const name = String(r.proc || r.process || "").toLowerCase()
+        const state = Number(r.state != null ? r.state : r.State)
+        if (state !== 1) continue
+        if (proc && name === proc) return name
+      }
+      // proc 对不上时，按名字兜底（移动会议可能是别的进程名）
+      const appName = String((app && app.name) || "")
+      for (const r of rows || []) {
+        const state = Number(r.state != null ? r.state : r.State)
+        if (state !== 1) continue
+        const label = String((r.proc || r.process || "") + " " + (r.device || ""))
+        if (appName && label.includes(appName)) return label
+      }
+    } catch { /* ignore */ }
+    return ""
+  }
+
+  /** 综合判断：窗口像会议，或者软件占着麦克风 */
+  async function meetingActive(app, wins) {
+    if (meetingInProgress(app, wins)) return true
+    return !!(await micHeldByApp(app))
+  }
+
   function meetingInProgress(app, wins) {
     const list = pickMeetingWindows(wins, app.title, app.proc)
     return list.some((w) => {
@@ -1310,7 +1339,7 @@ export function apply(ctx, config) {
       // 已经在会里：不要再"启动会议"或点加入，否则会弹对话框打断当前会议
       try {
         const winsNow = await listWindows()
-        if (meetingInProgress(app, winsNow)) {
+        if (await meetingActive(app, winsNow)) {
           return { ok: true, result: '已在会议中（检测到会中窗口），不再重复入会', alreadyInMeeting: true }
         }
       } catch { /* 忽略探测失败 */ }
@@ -2618,6 +2647,10 @@ export function apply(ctx, config) {
     {
       listWindows,
       meters: metersMax,
+      micHeldByApp: async () => {
+        const app = await detectMeetingApp().catch(() => null)
+        return await micHeldByApp(app)
+      },
       logger,
       onEnter: async ({ reason }) => {
         // 只有一个总开关：没开就什么都不做（连听都不听，省 token）
@@ -3126,7 +3159,7 @@ export function apply(ctx, config) {
     try {
       const wins0 = await listWindows()
       const appNow = await detectMeetingApp().catch(() => null)
-      if (appNow && meetingInProgress(appNow, wins0)) {
+      if (appNow && await meetingActive(appNow, wins0)) {
         logger?.info?.('[soulmirror] 已在会中，跳过自动入会：' + String(text).slice(0, 60))
         return { ok: true, skipped: 'already-in-meeting' }
       }
