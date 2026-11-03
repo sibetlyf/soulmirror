@@ -80,6 +80,24 @@ test('380px 侧栏 CompactPanel 能渲染（能抓出未声明变量）', () => 
   assert.doesNotThrow(() => panels.CompactPanel({}), '侧栏渲染抛错')
 })
 
+test('apply 注册了侧栏图标 / 会话字幕条 / 设置页 三处原生入口', () => {
+  const { exp, registered } = loadClient()
+  exp.apply({ slots: { inject(n, fn) { fn() }, register(m, c) { registered.push({ meta: m, comp: c }) }, get: () => null } })
+  const names = registered.map((r) => r.meta.name)
+  assert.ok(names.includes('sidebar.panellist'), '缺少侧栏图标：' + names.join(','))
+  assert.ok(names.includes('conversation.input.dock'), '缺少会话字幕条')
+  assert.ok(names.includes('settings.section'), '缺少设置页')
+})
+
+test('这三处组件渲染都不抛错（防白屏）', () => {
+  const { exp } = loadClient()
+  const panels = exp.__test
+  for (const key of ['PanelIcon', 'LiveDock', 'SettingsSection']) {
+    assert.equal(typeof panels[key], 'function', '缺少 __test.' + key)
+    assert.doesNotThrow(() => panels[key]({}), key + ' 渲染抛错')
+  }
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test
