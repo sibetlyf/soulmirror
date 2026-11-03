@@ -1,4 +1,4 @@
-/**
+﻿/**
  * soulmirror —— 数字分身插件（桌面会议/音频 + DSH 任务执行）。
  *
  * 能力：
@@ -12,7 +12,7 @@
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { appendFile } from 'node:fs/promises'
+import { appendFile, mkdir } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
