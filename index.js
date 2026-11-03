@@ -35,6 +35,7 @@ import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
 import { saveMinutes } from './lib/minutes-file.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
+import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
@@ -327,6 +328,13 @@ export function apply(ctx, config) {
     } catch { /* 没有就用默认 */ }
   }
   loadPersisted()
+  // 首次安装自动落一份配置文件（带默认值）；已存在则只补新键，绝不覆盖用户设置
+  try {
+    const r = ensureConfigFile(CONFIG_FILE, cfg)
+    if (r.created) logger?.info?.('[soulmirror] 已生成默认配置 ' + CONFIG_FILE)
+    else if (r.merged) logger?.info?.('[soulmirror] 配置已补齐缺失项 ' + CONFIG_FILE)
+    if (r.error) logger?.warn?.('[soulmirror] 配置自动生成失败：' + r.error)
+  } catch { /* 不影响运行 */ }
 
   function publicConfig() {
     return {
@@ -3232,7 +3240,7 @@ export function apply(ctx, config) {
     name: 'soul_setup',
     description: '检查并自动配置运行环境（Windows 编译 mbridge；macOS/Linux 提示 ffmpeg 等依赖）。装完先跑一次这个。',
     parameters: {
-      action: { type: 'string', enum: ['check', 'build', 'auto', 'deps', 'install-deps', 'links'], required: true, description: 'check 看环境 / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡' },
+      action: { type: 'string', enum: ['check', 'report', 'build', 'auto', 'deps', 'install-deps', 'links'], required: true, description: 'check 看环境 / report 安装体检清单（缺什么、怎么补） / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡' },
     },
     output: OUT(),
     execute: wrap('soul_setup', async (a) => {
@@ -3274,6 +3282,18 @@ export function apply(ctx, config) {
         }
         const after = await detectVirtualAudio()
         return { ok: r.ok, result: (r.results || []).map((x) => (x.ok ? '✓ ' : '✗ ') + x.cmd + (x.err ? '  ' + x.err : '')).join('\n') + '\n\n' + formatVirtualAudio(after) }
+      }
+      if (a.action === 'report') {
+        const env = detectEnv()
+        const cfgFile = ensureConfigFile(CONFIG_FILE, cfg)
+        const rows = installChecklist({
+          configFile: !cfgFile.error,
+          bridge: !!(env.tools && env.tools.mbridge),
+          key: !!resolveApiKey(cfg.asr).key,
+          captureDevice: cfg.devices.capture,
+          virtualMic: !!(cfg.devices.speak && (cfg.devices.speak || '').toUpperCase().includes('CABLE')),
+        })
+        return { ok: rows.every((r) => r.ok), result: formatChecklist(rows) }
       }
       if (a.action === 'auto') {
         const r = await autoSetup({ logger })

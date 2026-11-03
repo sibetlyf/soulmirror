@@ -1,11 +1,4 @@
-/**
- * scripts/postinstall.mjs
- * dsh 安装（dsh plugin add github:...#main）后自动执行：
- *  - Windows：若缺 tools/mbridge.exe，用系统 csc 现场编译
- *  - 其他平台：只做检测与提示，不做破坏性操作
- * 任何失败都只告警，不阻断安装。
- */
-import { existsSync } from 'node:fs'
+﻿import { existsSync, readFileSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -14,28 +7,41 @@ const root = join(here, '..')
 
 async function main() {
   const setupPath = join(root, 'lib', 'setup.js')
-  if (!existsSync(setupPath)) {
-    console.log('[soulmirror] 跳过：找不到 lib/setup.js')
-    return
-  }
-  let mod
-  try {
-    mod = await import(new URL('../lib/setup.js', import.meta.url))
-  } catch (e) {
-    console.log('[soulmirror] 跳过自检：' + e.message)
-    return
-  }
+  if (!existsSync(setupPath)) return
+  const mod = await import(new URL('../lib/setup.js', import.meta.url)).catch(() => null)
+  if (!mod) return
   try {
     if (process.platform === 'win32') {
       const r = mod.buildBridge()
-      if (r.ok) console.log('[soulmirror] mbridge ' + (r.skipped ? '已存在' : '编译完成') + '：' + (r.path || ''))
-      else console.log('[soulmirror] mbridge 未就绪：' + (r.error || r.reason || '未知原因'))
+      console.log('[soulmirror] mbridge ' + (r.ok ? (r.skipped ? '已存在' : '编译完成') : '未就绪：' + (r.error || r.reason || '')))
     }
-    const env = mod.detectEnv()
-    console.log('[soulmirror] 环境自检：' + (env.ready ? '就绪' : '缺 ' + env.missing.join('、')))
-    for (const h of env.hints) console.log('[soulmirror] 提示：' + h)
+  } catch (e) { console.log('[soulmirror] 编译跳过：' + e.message) }
+
+  // 生成默认配置（幂等；已存在只补新键）
+  try {
+    const { ensureConfigFile, installChecklist, formatChecklist } = await import(new URL('../lib/bootstrap.js', import.meta.url))
+    const { homedir } = await import('node:os')
+    const file = join(homedir(), '.dsh', 'soulmirror', 'config.json')
+    const r = ensureConfigFile(file, {
+      enabled: false,
+      asr: { provider: 'dashscope', dashscopeModel: 'paraformer-realtime-v2', sentenceSilenceMs: 400, hourlyBudgetMinutes: 0 },
+      devices: { capture: '', speak: 'CABLE Input' },
+      twin: { enabled: true, useActiveWorkspace: true, workspaceCwd: '' },
+      mode: 'transcribe',
+    })
+    console.log('[soulmirror] 配置文件 ' + (r.created ? '已生成：' : '已存在：') + r.path)
+
+    const envKey = process.env.DASHSCOPE_API_KEY || ''
+    const rows = installChecklist({
+      configFile: !r.error,
+      bridge: !!(mod.detectEnv && mod.detectEnv().tools && mod.detectEnv().tools.mbridge),
+      key: !!envKey,
+      captureDevice: '',
+      virtualMic: false,
+    })
+    console.log(formatChecklist(rows))
   } catch (e) {
-    console.log('[soulmirror] 自检失败（不影响安装）：' + e.message)
+    console.log('[soulmirror] 配置自检跳过：' + e.message)
   }
 }
 
