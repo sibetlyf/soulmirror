@@ -577,6 +577,40 @@ export function apply(ctx, config) {
         logger?.info?.('[soulmirror] 手动切换会议软件：' + hit.name)
         return json(200, { ok: true, activeApp: hit.name, apps: (cfg.apps || []).map((a) => ({ name: a.name, proc: a.proc || '' })) })
       }
+      if (req.method === 'GET' && sub === 'health') {
+        const snap = session.snapshot()
+        const last = session.transcript[session.transcript.length - 1]
+        const lastAgeMs = last && last.t ? Math.max(0, Date.now() - Date.parse(last.t)) : null
+        const asr = snap.asr || {}
+        const problems = []
+        if (cfg.enabled && session.capturing && !(asr.online)) problems.push('语音识别未连接')
+        if (cfg.enabled && session.capturing && (asr.failed)) problems.push('语音识别重连失败次数用尽')
+        if (lastAgeMs !== null && lastAgeMs > 120000 && session.capturing) problems.push('超过 2 分钟没有新转写')
+        if ((asr.droppedMs || 0) > 5000) problems.push('断线累计丢失 ' + Math.round(asr.droppedMs / 1000) + ' 秒音频')
+        if (budget.overBudget()) problems.push('已超出本次会议识别预算 ' + budget.limitMinutes + ' 分钟')
+        return json(200, {
+          ok: problems.length === 0,
+          enabled: cfg.enabled === true,
+          mode: cfg.mode || 'transcribe',
+          problems,
+          capture: {
+            capturing: !!session.capturing,
+            device: snap.captureDevice || "",
+            bytes: session.chunks || 0,
+          },
+          asr: {
+            phase: asr.phase || 'idle',
+            online: !!asr.online,
+            reconnects: asr.reconnects || 0,
+            droppedMs: asr.droppedMs || 0,
+            bufferedMs: asr.bufferedMs || 0,
+          },
+          transcript: { lines: session.transcript.length, lastAgeMs },
+          budget: budget.snapshot(),
+          demo: demo.snapshot().running,
+        })
+      }
+
       if (req.method === 'POST' && sub === 'demo') {
         const bufD = []
         for await (const chunk of req) bufD.push(chunk)
@@ -2730,6 +2764,7 @@ export function apply(ctx, config) {
         }
         if (!session.capturing) await session.startCapture('auto').catch((e) => logger?.warn?.('[soulmirror] 自动采集失败: ' + e.message))
         agent.running = true
+        budget.reset()
         // 只转录模式不建会话：会消耗模型、也会刷会话列表
         if (cfg.mode === 'agent') ensureMeetingSession(reason).catch(() => {})
         logger?.info?.('[soulmirror] 已开启：开始采集转写并建会话（' + reason + '）')
@@ -2762,6 +2797,49 @@ export function apply(ctx, config) {
       else logger?.info?.('[soulmirror] 环境自检：就绪（' + env.platform + '）')
     } catch { /* ignore */ }
   }
+  // 预算守护：超限就停采集并明确告知（不偷偷继续花钱）
+  const budgetGuard = setInterval(() => {
+    if (!session.capturing) return
+    if (budget.overBudget()) {
+      logger?.warn?.('[soulmirror] 已达识别预算 ' + budget.limitMinutes + ' 分钟，自动停止采集')
+      session.lastError = '已超出本次会议的识别预算（' + budget.limitMinutes + ' 分钟），已停止。可在设置里调整。'
+      session.stopCapture?.().catch?.(() => {})
+    }
+  }, 30000)
+  budgetGuard.unref?.()
+  ctx.effect(() => () => clearInterval(budgetGuard))
+
+  // 混沌注入：SOULMIRROR_FAULT=kill-capture 时，开会 5 秒后杀掉采集进程，
+  // 用于验证"采集死了能自己恢复、且不抖动"这条不变量
+  const fault = String(process.env.SOULMIRROR_FAULT || '')
+  if (fault.includes('kill-capture')) {
+    const t0 = setInterval(() => {
+      if (session.capturing && session.child) {
+        logger?.warn?.('[soulmirror] 混沌注入：杀掉采集进程')
+        try { session.child.kill() } catch { /* ignore */ }
+        clearInterval(t0)
+      }
+    }, 5000)
+    t0.unref?.()
+    ctx.effect(() => () => clearInterval(t0))
+  }
+
+  // ── 识别预算：开会一小时也在花钱，得有个上限 ────────────────────────
+  const budget = {
+    startedAt: 0,
+    limitMinutes: Number(cfg.asr.hourlyBudgetMinutes) || 0,
+    reset() { this.startedAt = Date.now() },
+    minutes() { return this.startedAt ? (Date.now() - this.startedAt) / 60000 : 0 },
+    overBudget() { return this.limitMinutes > 0 && this.minutes() > this.limitMinutes },
+    snapshot() {
+      return {
+        limitMinutes: this.limitMinutes,
+        usedMinutes: Math.round(this.minutes() * 10) / 10,
+        over: this.overBudget(),
+      }
+    },
+  }
+
   // ── 演练模式（不需要会议软件、不需要网络） ────────────────────────────
   const demo = new DemoController({
     root: join(homedir(), '.dsh', 'soulmirror', 'demo'),
