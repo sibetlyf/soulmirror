@@ -647,7 +647,7 @@ export function apply(ctx, config) {
       if (req.method === 'GET' && sub === 'setup') {
         const state = await collectSetupState()
         const rows = buildSetupRows(state)
-        return json(200, { ok: summarizeSetup(rows).ok, rows, hint: setupHint(rows), state })
+        return json(200, { ok: summarizeSetup(rows).ok, rows, hint: setupHint(rows), state, probe: probeJob })
       }
       if (req.method === 'POST' && sub === 'setup') {
         const bufS = []
@@ -682,13 +682,38 @@ export function apply(ctx, config) {
         }
 
         if (action === 'probe') {
-          const r = await probeRenderDevices(body.seconds || 3)
-          if (!r.ok) return json(200, { ok: false, error: r.result })
-          if (r.bestRms >= 0.004) {
-            savePersisted({ devices: { capture: r.best } })
-            return reply({ message: '已选中：' + r.best, probe: r.rows })
+          if (probeJob.running) {
+            return json(200, {
+              ok: false, started: false,
+              message: '正在试听中：' + probeJob.done + '/' + probeJob.total,
+              probe: probeJob,
+            })
           }
-          return reply({ message: '所有设备都静音：先让会议出声，再点一次', probe: r.rows })
+          const secs = Math.max(2, Math.min(10, Number(body.seconds) || 3))
+          probeJob = { running: true, total: 0, done: 0, last: '', rows: [], best: '', error: '', at: Date.now(), seconds: secs }
+          // 不 await：一次要测 N 个设备 × N 秒，等完再返回界面会像"没反应"
+          runProbe(secs, (p) => {
+            if (p.phase === 'start') { probeJob.total = p.total; probeJob.done = 0 }
+            else { probeJob.done = p.done; probeJob.last = p.last || '' }
+          }).then((r) => {
+            probeJob.running = false
+            probeJob.rows = r.rows || []
+            probeJob.best = r.best || ''
+            probeJob.bestRms = r.bestRms || 0
+            probeJob.error = r.ok ? '' : (r.result || '')
+            if (r.ok && r.bestRms >= 0.004) {
+              savePersisted({ devices: { capture: r.best } })
+              probeJob.picked = r.best
+            }
+          }).catch((e) => {
+            probeJob.running = false
+            probeJob.error = e.message
+          })
+          return json(200, {
+            ok: true, started: true,
+            message: '开始试听 ' + (probeJob.total || '若干') + ' 个设备，每台 ' + secs + ' 秒，稍等十几秒…',
+            probe: probeJob,
+          })
         }
 
         if (action === 'vb-cable') {
@@ -2150,10 +2175,11 @@ export function apply(ctx, config) {
   }
 
   /** 逐个渲染设备环回采一小段并算 RMS，返回"哪个设备真的有声音" */
-  async function probeRenderDevices(seconds = 3) {
+  async function probeRenderDevices(seconds = 3, onProgress = null) {
     const secs = Math.max(2, Math.min(10, Number(seconds) || 3))
     const devs = (await listDevices()).filter((d) => d.flow === 'RENDER')
     if (devs.length === 0) return { ok: false, rows: [], best: '', result: '没有可用的渲染设备' }
+    try { onProgress?.({ phase: 'start', total: devs.length, done: 0 }) } catch { /* ignore */ }
     const tmp = join(session.dataRoot() || '.', '_probe')
     await mkdir(tmp, { recursive: true })
     const rows = []
@@ -2172,9 +2198,30 @@ export function apply(ctx, config) {
       } catch (e) { err = e.message }
       if (rms > bestRms) { bestRms = rms; best = d.name }
       rows.push({ name: d.name, rms, err })
+      try { onProgress?.({ phase: 'device', total: devs.length, done: rows.length, last: d.name, rms }) } catch { /* ignore */ }
     }
     return { ok: true, rows, best, bestRms }
   }
+
+  // 测试环境用桩，避免真的去开音频设备（SOULMIRROR_TEST=1 时生效）
+  const runProbe = process.env.SOULMIRROR_TEST === '1'
+    ? async (secs, onProgress) => {
+      onProgress?.({ phase: 'start', total: 2, done: 0 })
+      await new Promise((r) => setTimeout(r, 5))
+      onProgress?.({ phase: 'device', total: 2, done: 1, last: 'Fake A', rms: 0.02 })
+      await new Promise((r) => setTimeout(r, 5))
+      onProgress?.({ phase: 'device', total: 2, done: 2, last: 'Fake B', rms: 0 })
+      return {
+        ok: true,
+        rows: [{ name: 'Fake A', rms: 0.02, err: '' }, { name: 'Fake B', rms: 0, err: '' }],
+        best: 'Fake A',
+        bestRms: 0.02,
+      }
+    }
+    : probeRenderDevices
+
+  // 设备试听要十几秒，不能同步等：立即返回 + 这里记进度，面板轮询
+  let probeJob = { running: false, total: 0, done: 0, last: '', rows: [], best: '', error: '', at: 0 }
 
   /** 当前安装状态：给面板体检用，也可被 soul_setup report 复用 */
   async function collectSetupState() {
