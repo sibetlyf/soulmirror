@@ -30,6 +30,7 @@ import { pickLocalModel } from './lib/asr.js'
 import { speak, sayToMeeting } from './lib/tts.js'
 import { synthesizeStream } from './lib/dashscope-tts.js'
 import { startDashScopeAsr } from './lib/dashscope.js'
+import { DemoController } from './lib/demo.js'
 import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
@@ -519,7 +520,9 @@ export function apply(ctx, config) {
             return true
           })
           .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0]
+        const demoSnap = demo.snapshot()
         return json(200, {
+          demo: demoSnap,
           session: session.snapshot(),
           transcript: session.transcript.slice(-60),
           tasks: (agent.tasks || []).slice(0, 10),
@@ -574,6 +577,17 @@ export function apply(ctx, config) {
         logger?.info?.('[soulmirror] 手动切换会议软件：' + hit.name)
         return json(200, { ok: true, activeApp: hit.name, apps: (cfg.apps || []).map((a) => ({ name: a.name, proc: a.proc || '' })) })
       }
+      if (req.method === 'POST' && sub === 'demo') {
+        const bufD = []
+        for await (const chunk of req) bufD.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufD).toString('utf8') || '{}')
+        const action = String(body.action || 'start')
+        if (action === 'stop') { await demo.stop(); return json(200, { ok: true, demo: demo.snapshot() }) }
+        if (action === 'status') return json(200, { ok: true, demo: demo.snapshot() })
+        const snap = await demo.start({ speed: body.speed, real: body.real })
+        return json(200, { ok: !snap.error, demo: snap, error: snap.error || undefined })
+      }
+
       if (req.method === 'POST' && sub === 'mode') {
         const bufM = []
         for await (const chunk of req) bufM.push(chunk)
@@ -2748,6 +2762,63 @@ export function apply(ctx, config) {
       else logger?.info?.('[soulmirror] 环境自检：就绪（' + env.platform + '）')
     } catch { /* ignore */ }
   }
+  // ── 演练模式（不需要会议软件、不需要网络） ────────────────────────────
+  const demo = new DemoController({
+    root: join(homedir(), '.dsh', 'soulmirror', 'demo'),
+    makeTranscriber: async ({ onEvent }) => {
+      const key = resolveApiKey({ apiKeyEnv: 'DASHSCOPE_API_KEY' }).key
+      if (!key) throw new Error('没有 DASHSCOPE_API_KEY')
+      const asr = startDashScopeAsr({
+        apiKey: key,
+        model: cfg.asr.dashscopeModel || 'paraformer-realtime-v2',
+        sampleRate: 16000,
+        asr: cfg.asr,
+        onSentence: (s) => onEvent({ text: s.text, sentenceEnd: s.sentenceEnd }),
+        onError: (e) => onEvent({ error: e.message }),
+      })
+      return {
+        start: () => asr.open(),
+        feed: (pcm) => asr.send(pcm),
+        stop: () => asr.finish(),
+      }
+    },
+    logger,
+  })
+
+  // ── 演练：不需要任何会议软件就能验证整条链路 ──────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_demo',
+    description: '演练模式：用内置样例音频和模拟会议信号跑一遍「检测→转写→条目→归档」，不连接真实会议、不需要会议软件、默认不联网。用于自检、演示和排障。',
+    parameters: {
+      action: { type: 'string', description: 'start | stop | status，默认 start' },
+      speed: { type: 'number', description: '播放倍速，默认 1；调试可用 4–8' },
+      real: { type: 'boolean', description: '是否用真实云端识别（需要 key）；默认 false 用离线模拟' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_demo', async (a) => {
+      const action = String(a.action || 'start')
+      if (action === 'stop') {
+        await demo.stop()
+        return { ok: true, result: '演练已停止，共 ' + demo.transcript.length + ' 句' }
+      }
+      if (action === 'status') {
+        const s = demo.snapshot()
+        return {
+          ok: true,
+          result: s.running ? '演练进行中：' + s.lines + ' 句' : (s.finished ? '演练已结束：' + s.lines + ' 句（目录 ' + s.dir + '）' : '当前没有演练'),
+          data: s,
+        }
+      }
+      const s = await demo.start({ speed: a.speed, real: a.real })
+      if (s.error) return { ok: false, result: s.error, data: s }
+      return {
+        ok: true,
+        result: '演练已开始（' + s.audioSeconds + ' 秒样例，' + (s.real ? '真实识别' : '离线模拟') + '）。面板会显示「演练中」，不会连接真实会议，也不会发言。',
+        data: s,
+      }
+    }),
+  }))
+
   // ── 实时纪要 ────────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_minutes',
