@@ -116,6 +116,17 @@ test('这三处组件渲染都不抛错（防白屏）', () => {
   }
 })
 
+test('所有在 onClick 里调用的函数都必须有定义（防"点了没反应"）', () => {
+  const src = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
+  // 收集形如 xxx(...) 的调用，只盯我们自己的这几个已知动作函数
+  const names = new Set()
+  for (const m of src.matchAll(/\b(switchMode|callAuto|switchApp|runDemo)\s*\(/g)) names.add(m[1])
+  for (const name of names) {
+    assert.match(src, new RegExp('function ' + name + '\\s*\\('), name + ' 被调用但未定义 —— 点击会抛 ReferenceError，表现为"没反应"')
+  }
+  assert.ok(names.has('switchMode'), '至少要有 switchMode 的调用（否则这个守护无效）')
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test

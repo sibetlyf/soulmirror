@@ -45,10 +45,11 @@ function makeSession({ spawns, backoffMs = [5, 5, 5], exitAfterMs = 5, emitData 
         return c
       },
       createAsr: () => ({
-        open: async () => {},
-        send: () => {},
-        finish: async () => {},
+        start: async () => {},
+        feed: () => {},
+        stop: async () => {},
         online: true,
+        closed: false,
         snapshot: () => ({ phase: 'online' }),
       }),
     },
