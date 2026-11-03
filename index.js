@@ -36,6 +36,7 @@ import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js
 import { saveMinutes } from './lib/minutes-file.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
+import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
@@ -641,6 +642,76 @@ export function apply(ctx, config) {
           budget: budget.snapshot(),
           demo: demo.snapshot().running,
         })
+      }
+
+      if (req.method === 'GET' && sub === 'setup') {
+        const state = await collectSetupState()
+        const rows = buildSetupRows(state)
+        return json(200, { ok: summarizeSetup(rows).ok, rows, hint: setupHint(rows), state })
+      }
+      if (req.method === 'POST' && sub === 'setup') {
+        const bufS = []
+        for await (const chunk of req) bufS.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufS).toString('utf8') || '{}')
+        const action = String(body.action || '')
+        const reply = (extra = {}) => {
+          const stateP = collectSetupState()
+          return stateP.then((state) => {
+            const rows = buildSetupRows(state)
+            return json(200, { ok: summarizeSetup(rows).ok, rows, hint: setupHint(rows), state, action, ...extra })
+          })
+        }
+
+        if (action === 'config') {
+          const r = ensureConfigFile(CONFIG_FILE, cfg)
+          if (r.error) return json(200, { ok: false, error: r.error })
+          return reply({ message: r.created ? '已生成默认配置' : '配置已是最新' })
+        }
+
+        if (action === 'build') {
+          const r = buildBridge({ logger })
+          return reply({ message: r.ok ? (r.skipped ? '桥接已存在' : '桥接编译完成') : '编译失败：' + (r.error || r.reason || '') })
+        }
+
+        if (action === 'key') {
+          // 允许留空：空字符串就是"清空密钥"，不写就不动
+          if (body.value === undefined) return reply({ message: '没有提供 value，未改动' })
+          const value = String(body.value || '').trim()
+          savePersisted({ asr: { apiKey: value } })
+          return reply({ message: value ? '密钥已保存' : '密钥已清空（转写不可用，其它功能照常）' })
+        }
+
+        if (action === 'probe') {
+          const r = await probeRenderDevices(body.seconds || 3)
+          if (!r.ok) return json(200, { ok: false, error: r.result })
+          if (r.bestRms >= 0.004) {
+            savePersisted({ devices: { capture: r.best } })
+            return reply({ message: '已选中：' + r.best, probe: r.rows })
+          }
+          return reply({ message: '所有设备都静音：先让会议出声，再点一次', probe: r.rows })
+        }
+
+        if (action === 'vb-cable') {
+          // 装驱动必须 UAC，这里只负责把"去哪装"和"装完怎么填"说清楚
+          const zip = join(homedir(), 'Downloads', 'VBCABLE_Driver_Pack43.zip')
+          return reply({
+            message: existsSync(zip)
+              ? '驱动包已在 ' + zip + '：右键以管理员运行解压后的 VBCABLE_Setup_x64.exe，装完回来点"检测"'
+              : '需要你手动安装 VB-CABLE（免费）：下载后以管理员运行安装，装完点"检测"',
+            manual: true,
+            download: 'https://vb-audio.com/Cable/',
+          })
+        }
+
+        if (action === 'calibrate') {
+          const app = meetingApp(cfg.activeApp || '') || (await detectMeetingApp())
+          const r = calibrator.trigger({ app: app.name, action: 'join', reason: '用户从面板手动触发' })
+            .then(() => reply({ message: '已启动 computer-use 标定，稍后重试入会' }))
+            .catch((e) => reply({ message: '标定启动失败：' + e.message }))
+          return r
+        }
+
+        return json(400, { ok: false, error: '未知动作：' + action })
       }
 
       if (req.method === 'POST' && sub === 'demo') {
@@ -1615,6 +1686,14 @@ export function apply(ctx, config) {
     if (!joined) {
       try { await pressKey(JOIN_DIALOG, 'escape', opts); steps.push('已按 Esc 关闭对话框') } catch { /* ignore */ }
     }
+    if (!joined) {
+      // 入会没成功：把这次算作一次坐标失败，并在需要时让 computer-use 重新学一遍
+      try { uiMap.markFailure(app.name, 'join', errLine ? '客户端提示：' + errLine.slice(0, 40) : '点了加入但没进会') } catch { /* ignore */ }
+      const calib = maybeCalibrate(app, 'join', errLine || '点了加入但没进会')
+      steps.push(calib.started
+        ? '已在后台启动 computer-use 标定；稍后再说一次「加入会议」即可重试'
+        : '（标定未触发：' + (calib.skipped || calib.why || '') + '；可以直接说「用 computer-use 帮我点」）')
+    }
     return { ok: joined, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议' + (errLine ? '\n客户端提示：' + errLine.split('\t').slice(1, 3).join(' ') : '；可用 meeting_status 复查')) }
     }),
   })
@@ -1830,30 +1909,11 @@ export function apply(ctx, config) {
     parameters: { seconds: { type: 'integer', description: '每个设备采多久，默认 3 秒。' } },
     output: OUT(),
     execute: wrap('meeting_probe_audio', async (a) => {
-      const seconds = Math.max(2, Math.min(10, a.seconds || 3))
-      const devs = (await listDevices()).filter((d) => d.flow === 'RENDER')
-      if (devs.length === 0) return { ok: false, result: '没有可用的渲染设备' }
-      const tmp = join(session.dataRoot() || '.', '_probe')
-      await mkdir(tmp, { recursive: true })
-      const rows = []
-      let best = ''
-      let bestRms = 0
-      for (const d of devs) {
-        const wav = join(tmp, 'probe-' + d.index + '.wav')
-        let rms = -1
-        let err = ''
-        try {
-          await bridge(['capture', '--out', wav, '--seconds', String(seconds), '--mode', 'loopback', '--device', d.name],
-            { timeoutMs: (seconds + 12) * 1000 })
-          const out = await bridge(['rms', '--file', wav], { timeoutMs: 15000 })
-          const m = /RMS\s+([0-9.]+)/.exec(out)
-          if (m) rms = Number(m[1])
-        } catch (e) { err = e.message }
-        if (rms > bestRms) { bestRms = rms; best = d.name }
-        rows.push((rms >= 0.004 ? '[有声] ' : '[静音] ') + d.name + '  RMS=' + (rms >= 0 ? rms.toFixed(4) : 'n/a') + (err ? '  错误:' + err.slice(0, 60) : ''))
-      }
-      const tail = bestRms >= 0.004
-        ? '\n建议：devices.capture = ' + best
+      const r = await probeRenderDevices(a.seconds || 3)
+      if (!r.ok) return { ok: false, result: r.result }
+      const rows = r.rows.map((x) => (x.rms >= 0.004 ? '[有声] ' : '[静音] ') + x.name + '  RMS=' + (x.rms >= 0 ? x.rms.toFixed(4) : 'n/a') + (x.err ? '  错误:' + x.err.slice(0, 60) : ''))
+      const tail = r.bestRms >= 0.004
+        ? '\n建议：devices.capture = ' + r.best
         : '\n所有设备都静音：确认会议正在出声（未静音、有人在说话），或检查会议客户端的扬声器设备。'
       return { ok: true, result: rows.join('\n') + tail }
     }),
@@ -2087,6 +2147,63 @@ export function apply(ctx, config) {
     lines.push('')
     lines.push('会议：' + (job.title || target))
     return lines.join('\n')
+  }
+
+  /** 逐个渲染设备环回采一小段并算 RMS，返回"哪个设备真的有声音" */
+  async function probeRenderDevices(seconds = 3) {
+    const secs = Math.max(2, Math.min(10, Number(seconds) || 3))
+    const devs = (await listDevices()).filter((d) => d.flow === 'RENDER')
+    if (devs.length === 0) return { ok: false, rows: [], best: '', result: '没有可用的渲染设备' }
+    const tmp = join(session.dataRoot() || '.', '_probe')
+    await mkdir(tmp, { recursive: true })
+    const rows = []
+    let best = ''
+    let bestRms = 0
+    for (const d of devs) {
+      const wav = join(tmp, 'probe-' + d.index + '.wav')
+      let rms = -1
+      let err = ''
+      try {
+        await bridge(['capture', '--out', wav, '--seconds', String(secs), '--mode', 'loopback', '--device', d.name],
+          { timeoutMs: (secs + 12) * 1000 })
+        const out = await bridge(['rms', '--file', wav], { timeoutMs: 15000 })
+        const m = /RMS\s+([0-9.]+)/.exec(out)
+        if (m) rms = Number(m[1])
+      } catch (e) { err = e.message }
+      if (rms > bestRms) { bestRms = rms; best = d.name }
+      rows.push({ name: d.name, rms, err })
+    }
+    return { ok: true, rows, best, bestRms }
+  }
+
+  /** 当前安装状态：给面板体检用，也可被 soul_setup report 复用 */
+  async function collectSetupState() {
+    let bridge = false
+    try { bridge = !!(detectEnv().tools || {}).mbridge } catch { /* ignore */ }
+    let key = ''
+    let keySource = ''
+    try {
+      const r = resolveApiKey(cfg.asr)
+      key = r.key || ''
+      // config / env / env:registry —— 面板要能说清"这个 key 从哪来的"
+      keySource = r.source || ''
+    } catch { /* ignore */ }
+    let calibrated = true
+    try {
+      const app = meetingApp(cfg.activeApp || '') || { name: '' }
+      const meta = uiMap.meta(app.name, 'join')
+      calibrated = !uiMap.needsRecalibration(app.name, 'join', cfg.recalibrateThreshold).needed
+      if (!meta || meta.failures === 0) calibrated = true
+    } catch { /* ignore */ }
+    return {
+      config: true,
+      bridge,
+      key: !!key,
+      keySource,
+      captureDevice: cfg.devices.capture || '',
+      virtualMic: /cable/i.test(String(cfg.devices.speak || '')),
+      calibrated,
+    }
   }
 
   const calibrator = new CalibrationRunner({
