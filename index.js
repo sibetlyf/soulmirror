@@ -119,7 +119,8 @@ export const Config = z.object({
     hotwords: z.array(z.string()).default([]),
     vocabularyId: z.string().default(''),
     context: z.string().default(''),
-    sentenceSilenceMs: z.number().default(800),
+    /** VAD 断句静音阈值（毫秒）。阿里文档建议快速断句场景用 400；实测 800→400 首句约快 0.5–0.7s。 */
+    sentenceSilenceMs: z.number().default(400),
     punctuation: z.boolean().default(true),
     itn: z.boolean().default(true),
     disfluencyRemoval: z.boolean().default(true),
@@ -270,7 +271,7 @@ export function apply(ctx, config) {
     asr: {
       provider: 'dashscope', baseUrl: '', model: 'whisper-1', dashscopeModel: 'paraformer-realtime-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '',
       chunkSeconds: 6, lang: 'zh', whisperBin: '', whisperModel: '', silenceRms: 0.004,
-      hotwords: [], vocabularyId: '', context: '', sentenceSilenceMs: 800,
+      hotwords: [], vocabularyId: '', context: '', sentenceSilenceMs: 400,
       punctuation: true, itn: true, disfluencyRemoval: true, speakerDiarization: false,
       languageHints: ['zh', 'en'], llmCorrect: true, ...(config.asr || {}),
     },
