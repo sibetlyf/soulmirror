@@ -483,6 +483,9 @@ export function apply(ctx, config) {
   const apiHandler = async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://local')
     const sub = url.pathname.replace(/^\/api\/soulmirror\/?/, '')
+    // 任何写操作都会改变状态，先让状态探测缓存失效：
+    // 否则"刚启用/刚切软件"之后会读到旧快照（表现为 armed=false、apps 里没有新软件）
+    if (req.method === 'POST') { probeCache.at = 0; probeCache.value = null; probeCache.slow = false }
     const json = (code, data) => {
       res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       res.end(JSON.stringify(data))
@@ -506,6 +509,12 @@ export function apply(ctx, config) {
         return json(200, out)
       }
       if (req.method === 'GET' && sub === 'status') {
+        // 面板每秒轮询：探测结果缓存 15 秒，避免把 UI 拖到超时
+        const nowMs = Date.now()
+        const statusStartedAt = nowMs
+        if (probeCache.slow && probeCache.at && nowMs - probeCache.at < 15000 && probeCache.value) {
+          return json(200, probeCache.value)
+        }
         // 未开启时不做实时探测：少一次 PowerShell 调用，也完全不碰桌面
         const liveApp = cfg.enabled ? await detectMeetingApp() : meetingApp(cfg.activeApp || '')
         const codeInfo = await currentMeetingCode(liveApp)
@@ -521,10 +530,13 @@ export function apply(ctx, config) {
           })
           .sort((a, b) => (b.w * b.h) - (a.w * a.h))[0]
         const demoSnap = demo.snapshot()
-        return json(200, {
+        const __payload = {
           demo: demoSnap,
+          partial: (demoSnap && demoSnap.running) ? (demoSnap.partial || '') : (session.partial || ''),
           session: session.snapshot(),
-          transcript: session.transcript.slice(-60),
+          transcript: (demoSnap && (demoSnap.running || demoSnap.lines > 0))
+            ? demoSnap.transcript.slice(-60)
+            : session.transcript.slice(-60),
           tasks: (agent.tasks || []).slice(0, 10),
           apps: (cfg.apps || []).map((a) => ({ name: a.name, proc: a.proc || '', active: (cfg.activeApp || '') === a.name })),
           autoAppSelect: cfg.autoAppSelect !== false,
@@ -550,7 +562,11 @@ export function apply(ctx, config) {
           armed: isArmed(),
           auto: !!(cfg.autoWatch && lifecycle.timer),
           lifecycle: lifecycle.snapshot(),
-        })
+        }
+        probeCache.value = __payload
+        probeCache.at = Date.now()
+        probeCache.slow = (Date.now() - statusStartedAt) > 3000
+        return json(200, __payload)
       }
       if (req.method === 'POST' && sub === 'app') {
         const bufApp = []
@@ -2823,6 +2839,9 @@ export function apply(ctx, config) {
     t0.unref?.()
     ctx.effect(() => () => clearInterval(t0))
   }
+
+  // 状态接口的探测结果缓存（见 GET /status）
+  const probeCache = { at: 0, value: null, slow: false }
 
   // ── 识别预算：开会一小时也在花钱，得有个上限 ────────────────────────
   const budget = {

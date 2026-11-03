@@ -103,6 +103,20 @@ test('演练跑完后有转写内容（离线模拟，不需要网络）', async
   await call('POST', '/api/soulmirror/demo', { action: 'stop' })
 })
 
+test('演练的句子要能到面板（/status.transcript 不能只读 session）', async () => {
+  await call('POST', '/api/soulmirror/demo', { action: 'start', speed: 30 })
+  for (let i = 0; i < 60; i++) {
+    const st = await call('POST', '/api/soulmirror/demo', { action: 'status' })
+    if (st.body.demo.lines >= 1) break
+    await new Promise((r) => setTimeout(r, 100))
+  }
+  const s = await call('GET', '/api/soulmirror/status')
+  assert.ok(Array.isArray(s.body.transcript))
+  assert.ok(s.body.transcript.length >= 1, '演练期间 /status.transcript 应有内容，实际 ' + s.body.transcript.length)
+  assert.match(s.body.transcript.map((x) => x.text).join(''), /周会|字幕|评审/)
+  await call('POST', '/api/soulmirror/demo', { action: 'stop' })
+})
+
 test('模式切换在 /status 里可见', async () => {
   await call('POST', '/api/soulmirror/mode', { mode: 'agent' })
   let s = await call('GET', '/api/soulmirror/status')

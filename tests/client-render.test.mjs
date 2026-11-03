@@ -89,6 +89,24 @@ test('apply 注册了侧栏图标 / 会话字幕条 / 设置页 三处原生入�
   assert.ok(names.includes('settings.section'), '缺少设置页')
 })
 
+test('注册了 main#soulmirror 主面板（否则点侧栏只高亮、右侧仍是首页）', () => {
+  const { exp, registered } = loadClient()
+  exp.apply({ slots: { inject(n, fn) { fn() }, register(m, c) { registered.push({ meta: m, comp: c }) }, get: () => null } })
+  const main = registered.find((r) => r.meta.name === 'main')
+  assert.ok(main, '缺少 main 注册：' + registered.map((r) => r.meta.name).join(','))
+  assert.equal(main.meta.key, 'soulmirror', 'key 必须与侧栏 panellist 的 id 一致')
+  const panel = registered.find((r) => r.meta.name === 'sidebar.panellist')
+  assert.equal(panel.meta.id, main.meta.key, 'panellist.id 必须等于 main.key')
+})
+
+test('侧栏图标只画图形，不嵌套 button（DSH 外层已有 button）', () => {
+  const { exp } = loadClient()
+  const el = exp.__test.PanelIcon({ size: 16, active: false })
+  assert.ok(el, 'PanelIcon 应返回元素')
+  assert.notEqual(el.t, 'button', '不要在 slot 里再套一个 button：会多一层内边距且点击冲突')
+  assert.equal(el.t, 'span')
+})
+
 test('这三处组件渲染都不抛错（防白屏）', () => {
   const { exp } = loadClient()
   const panels = exp.__test
