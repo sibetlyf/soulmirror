@@ -127,6 +127,19 @@ test('所有在 onClick 里调用的函数都必须有定义（防"点了没反�
   assert.ok(names.has('switchMode'), '至少要有 switchMode 的调用（否则这个守护无效）')
 })
 
+test('live 状态必须能承载 mode（否则模式按钮切换后界面读不到 → "没反应"）', () => {
+  const { exp } = loadClient()
+  const { live } = exp.__test
+  assert.equal(live.mode, 'transcribe', '默认模式应是 transcribe')
+  live.set({ mode: 'agent' })
+  assert.equal(live.mode, 'agent', 'live.set 应更新 mode')
+  live.set({ mode: 'transcribe' })
+  assert.equal(live.mode, 'transcribe')
+  live.set({ enabled: true })
+  assert.equal(live.enabled, true, '对照：enabled 仍应正常')
+  live.set({ enabled: false })
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test
