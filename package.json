@@ -1,7 +1,7 @@
 {
   "name": "soulmirror",
-  "version": "0.1.0",
-  "description": "SoulMirror 数字分身：接入会议/桌面音频，实时转写与纠错，用大模型理解意图，可在会上主动发言，也能把任务交给 DSH 执行并回来汇报",
+  "version": "0.2.0",
+  "description": "SoulMirror 会议助手：实时转写、会议识别、对话开会、可选的 Agent 自动回复、会后归档；内置演练模式，不装会议软件也能验证",
   "type": "module",
   "main": "index.js",
   "license": "MIT",
@@ -13,7 +13,10 @@
     "asr",
     "tts",
     "wemeet",
-    "automation"
+    "automation",
+    "realtime-asr",
+    "demo-mode",
+    "health-check"
   ],
   "exports": {
     ".": {
@@ -49,7 +52,9 @@
     "tools/",
     "scripts/",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "assets/",
+    "docs/"
   ],
   "peerDependencies": {
     "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <1.0.0",
