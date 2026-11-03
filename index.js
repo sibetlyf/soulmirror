@@ -32,6 +32,9 @@ import { synthesizeStream } from './lib/dashscope-tts.js'
 import { startDashScopeAsr } from './lib/dashscope.js'
 import { DemoController } from './lib/demo.js'
 import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
+import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
+import { saveMinutes } from './lib/minutes-file.js'
+import { pickWorkspaceCwd } from './lib/workspace.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES } from './lib/persona.js'
@@ -186,6 +189,10 @@ export const Config = z.object({
     summarize: z.boolean().default(true),
     /** 会议一开始就建一个 DSH 会话，方便端侧立刻看到。 */
     autoSession: z.boolean().default(true),
+    /** 会议会话的工作目录。留空 = 继承你当前会话的目录。 */
+    workspaceCwd: z.string().default(''),
+    /** 是否继承当前活动会话的目录（默认是）。关掉后只用 workspaceCwd 或插件私有目录。 */
+    useActiveWorkspace: z.boolean().default(true),
     /** dsh 的 profile 名。 */
     profile: z.string().default('headless'),
     /** 单次任务超时（毫秒）。 */
@@ -622,6 +629,7 @@ export function apply(ctx, config) {
             bufferedMs: asr.bufferedMs || 0,
           },
           transcript: { lines: session.transcript.length, lastAgeMs },
+          workspace: meeting ? { cwd: meeting.agentCwd || '', source: meeting.cwdSource || '' } : null,
           budget: budget.snapshot(),
           demo: demo.snapshot().running,
         })
@@ -839,10 +847,7 @@ export function apply(ctx, config) {
 
   /** 任务去重键：忽略空白、标点和大小写，避免 ASR 把同一句话重复触发。 */
   function taskKey(text) {
-    return String(text || '')
-      .toLowerCase()
-      .replace(/[\s，。！？、；：,.!?;:'"“”‘’（）()【】\[\]]+/g, '')
-      .slice(0, 240)
+    return normalizeText(text).slice(0, 240)
   }
 
   /** 后台跑一个 DSH 任务，完成后（可选）在会议里汇报。 */
@@ -852,15 +857,17 @@ export function apply(ctx, config) {
     const key = taskKey(clean)
     const tasks = agent.tasks || []
     const running = tasks.filter((x) => x.status === 'running').length
-    if (running >= 2) {
-      logger?.warn?.('[soulmirror] 已有 2 个任务在跑，先排队放弃：' + clean.slice(0, 40))
+    // 单飞：同时只跑一个任务。之前允许 2 个，两次触发会并行跑、各自汇报一次，
+    // 听起来就是"同一件事说了两遍"。
+    if (running >= 1) {
+      logger?.warn?.('[soulmirror] 已有任务在跑，跳过本次：' + clean.slice(0, 40))
       return null
     }
     const duplicate = tasks.find((x) => {
       if (taskKey(x.prompt || '') !== key) return false
       if (x.status === 'running') return true
       const at = Date.parse(x.at || '')
-      return x.status === 'done' && Number.isFinite(at) && Date.now() - at < 120_000
+      return x.status === 'done' && Number.isFinite(at) && Date.now() - at < 600_000
     })
     if (duplicate) {
       logger?.info?.('[soulmirror] 跳过重复任务（' + duplicate.status + '）：' + clean.slice(0, 40))
@@ -899,6 +906,7 @@ export function apply(ctx, config) {
 
     if (!r.ok && cfg.twin.reportSpeak) {
       const why = '这个任务没跑成：' + String(r.error || '原因未知').slice(0, 60)
+      if (speechGuard.recentlySpoken(why)) return item
       try {
         addAssistantLine(why, '任务失败')
         brain.markSpoken(why)
@@ -914,6 +922,10 @@ export function apply(ctx, config) {
       // 先等会议安静：有人正在说话就等他说完，再给简要总结
       await waitQuiet(2500, 180000)
       const brief = await summarizeTask(clean, item.output)
+      if (speechGuard.recentlySpoken(brief)) {
+        logger?.info?.('[soulmirror] 汇报内容与刚才重复，跳过播报')
+        return item
+      }
       try {
         addAssistantLine(brief, '任务汇报')
         brain.markSpoken(brief)
@@ -935,6 +947,7 @@ export function apply(ctx, config) {
   function addAssistantLine(text, reason = '') {
     const clean = String(text || '').trim()
     if (!clean) return
+    if (lineGuard.isDuplicate(clean)) return
     const item = { t: new Date().toISOString(), text: clean, role: 'assistant', reason }
     session.transcript.push(item)
     session.partial = ''
@@ -1865,6 +1878,8 @@ export function apply(ctx, config) {
   // ── 人格与长期记忆（四层文件 + JSON 记忆库）──────────────────────────
   // ── 会议工作区：一场会议 = 一个目录 + 一个 DSH session ───────────────
   const workspaceRoot = join(CONFIG_DIR, 'workspace')
+  // 从宿主会话事件里记住用户当前在哪个目录工作（会议会话要继承它，否则看不到任何项目文件）
+  let activeSessionCwd = ''
   let meeting = { id: '', dir: '', dshSessionId: '', startedAt: '', key: '', display: '' }
   const sessionMap = new SessionMap(join(CONFIG_DIR, 'sessions.json'))
   let meetingIdOverride = ''
@@ -1925,7 +1940,7 @@ export function apply(ctx, config) {
       try {
         if (!ws.dshSessionId) {
           ws.dshSessionId = await createSession(ctx, {
-            cwd: ws.dir,
+            cwd: ws.agentCwd || ws.dir,
             title: title || (ws.display ? '会议 · ' + ws.display : '会议'),
           })
           sessionMap.set(ws.key || ws.id, { dshSessionId: ws.dshSessionId, dir: ws.dir, title: ws.display })
@@ -1946,7 +1961,7 @@ export function apply(ctx, config) {
         logger?.warn?.('[soulmirror] 宿主内会话失败，回退 headless：' + e.message)
       }
     }
-    const r = await runDshTask(guarded, { profile: cfg.twin.profile, cwd: ws.dir, sessionId: ws.dshSessionId || undefined, timeoutMs })
+    const r = await runDshTask(guarded, { profile: cfg.twin.profile, cwd: ws.agentCwd || ws.dir, sessionId: ws.dshSessionId || undefined, timeoutMs })
     if (r.sessionId) {
       ws.dshSessionId = r.sessionId
       sessionMap.set(ws.key || ws.id, { dshSessionId: r.sessionId, dir: ws.dir, title: ws.display })
@@ -1965,7 +1980,7 @@ export function apply(ctx, config) {
         const controller = getController(ctx)
         if (controller) {
           ws.dshSessionId = await createSession(ctx, {
-            cwd: ws.dir,
+            cwd: ws.agentCwd || ws.dir,
             title: ws.display ? '会议 · ' + ws.display : '会议',
           })
           sessionMap.set(ws.key || ws.id, { dshSessionId: ws.dshSessionId, dir: ws.dir, title: ws.display })
@@ -1982,7 +1997,7 @@ export function apply(ctx, config) {
       try {
         const r = await runDshTask('会议开始。用一句话确认你已就位。', {
           profile: cfg.twin.profile,
-          cwd: ws.dir,
+          cwd: ws.agentCwd || ws.dir,
           timeoutMs: Math.min(cfg.twin.timeoutMs, 60000),
         })
         if (r.sessionId) {
@@ -2142,6 +2157,9 @@ export function apply(ctx, config) {
     ? null
     : makeCorrector({ names: fixNames, context: (cfg.asr.context || '') + (currentPersona() ? '\n' + currentPersona().slice(0, 800) : ''), completer })
   const agent = { running: false, lastDecision: null, spoken: 0, errors: 0 }
+  // 同一段话 5 分钟内不重复播；同样内容的展示行 30 秒内不重复插
+  const speechGuard = new SpeechDeduper({ windowMs: 5 * 60 * 1000 })
+  const lineGuard = new TranscriptDeduper({ windowMs: 30 * 1000 })
 
   // ── 谁在说话：用于「有人说话就等他说完」 ─────────────────────────────
   let lastSpeechAt = 0
@@ -2171,6 +2189,11 @@ export function apply(ctx, config) {
     }
     if (!d.speak || !d.text) return
     if (cfg.policy !== 'auto') return
+    // 说过的话不再说：重复语音最扰人，宁可少说一句
+    if (speechGuard.recentlySpoken(d.text)) {
+      logger?.info?.('[soulmirror] 跳过重复播报：' + String(d.text).slice(0, 30))
+      return
+    }
     await waitQuiet(2500, 120000)
     brain.markSpoken(d.text)
     let unmutedByUs = false
@@ -2217,6 +2240,12 @@ export function apply(ctx, config) {
     // 只转录模式：到此为止——不判定要不要接话、不发言、不建任务会话
     if (cfg.mode !== 'agent') return
     const trig = brain.push(item)
+    // brain.push 返回 null 有两种含义：静音期（自说自听）或规则未命中。
+    // 前者必须无条件退出，否则 LLM 模式会把我们自己的 TTS 当成别人说话，形成回声自答。
+    if (!trig && Date.now() < brain.muteUntil) {
+      logger?.info?.('[soulmirror] 静音期内的转写，忽略')
+      return
+    }
     if (!trig && cfg.brain.gate !== 'llm') return
     // gate=llm：不靠关键字，整句+上下文交给模型判断要不要接
     const trigger = trig || { kind: 'context', reason: '新转写', line: item, confidence: 0.5 }
@@ -2649,13 +2678,13 @@ export function apply(ctx, config) {
     // 1) 落盘（会话目录 + 会议工作区）
     if (md) {
       try {
-        const { writeFile } = await import('node:fs/promises')
         if (session.dir) {
-          results.minutes = join(session.dir, 'minutes.md')
-          await writeFile(results.minutes, md, 'utf8')
+          const r = await saveMinutes(join(session.dir, 'minutes.md'), md)
+          results.minutes = r.path
+          if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
         }
         const ws = ensureMeetingWorkspace()
-        if (ws.dir) await writeFile(join(ws.dir, 'minutes.md'), md, 'utf8')
+        if (ws.dir) await saveMinutes(join(ws.dir, 'minutes.md'), md)
       } catch { /* ignore */ }
     }
 
@@ -2756,9 +2785,9 @@ export function apply(ctx, config) {
     const md = await buildMinutes()
     if (!md || !session.dir) return ''
     try {
-      const { writeFile } = await import('node:fs/promises')
-      await writeFile(join(session.dir, 'minutes.md'), md, 'utf8')
-      return join(session.dir, 'minutes.md')
+      const r = await saveMinutes(join(session.dir, 'minutes.md'), md)
+      if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
+      return r.path
     } catch { return '' }
   }
 
@@ -2944,8 +2973,9 @@ export function apply(ctx, config) {
       }
       if (a.save && session.dir) {
         try {
-          const { writeFile } = await import('node:fs/promises')
-          await writeFile(join(session.dir, 'minutes.md'), out, 'utf8')
+          // 工具产出的是"最近 N 句的摘要"，绝不能覆盖完整纪要，
+          // 所以写到独立的 minutes-live.md
+          await saveMinutes(join(session.dir, 'minutes-live.md'), out, { keepHistory: false })
         } catch { /* ignore */ }
       }
       return { ok: true, result: out }
@@ -3416,6 +3446,15 @@ export function apply(ctx, config) {
       return null
     }
   }
+
+  // 记住用户当前工作目录：会议会话要继承它，否则 agent 看不到任何项目文件
+  try {
+    const offCwd = ctx.on('session/event', (session) => {
+      const cwd = session?.cwd || session?.header?.cwd || session?.meta?.cwd
+      if (typeof cwd === 'string' && cwd) activeSessionCwd = cwd
+    }, true)
+    ctx.effect?.(() => () => { try { offCwd?.() } catch { /* ignore */ } }, 'soulmirror: workspace cwd watcher')
+  } catch { /* ignore */ }
 
   // 监听宿主会话事件：任何一条消息里出现会议信息就试一次（内部有去重与冷却）
   try {
