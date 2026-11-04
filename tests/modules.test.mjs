@@ -56,14 +56,23 @@ test('大脑：LLM 返回坏 JSON 时不崩；被点名时兜底回应而不是�
   assert.match(d.reason, /无法解析/)
 })
 
-test('大脑：坏 JSON 且不是点名时不插话', async () => {
+test('大脑：坏 JSON 时按触发类型兜底回应，不再装死', async () => {
   const b = new MeetingBrain({ names: ['DSH'], minGapMs: 0 })
-  const trig = b.push({ text: '帮我记一下明天十点评审' })
-  assert.ok(trig, '这句应当命中待办类触发')
-  assert.notEqual(trig.kind, 'name')
-  const d = await b.decide(trig, { complete: async () => 'not json', profile: 'x' })
-  assert.equal(d.speak, false, '非点名场景不该硬插话')
-  assert.match(d.reason, /解析失败|无法解析/)
+  // 待办 / 问句 / 点名 都属于"对方在等你反应"，模型挂了也要回一句
+  for (const text of ['帮我记一下明天十点评审', '你在吗？', 'DSH 在不在']) {
+    const trig = b.push({ text })
+    assert.ok(trig, '这句应当命中触发：' + text)
+    const d = await b.decide(trig, { complete: async () => 'not json', profile: 'x' })
+    assert.equal(d.speak, true, '触发类型 ' + trig.kind + ' 不该完全不回应')
+    assert.match(d.reason, /无法解析/)
+  }
+})
+
+test('大脑：没有任何命中触发时（push 返回 null）不插话', async () => {
+  const b = new MeetingBrain({ names: ['DSH'], minGapMs: 0 })
+  const d = await b.decide(null, { complete: async () => '{}', profile: 'x' })
+  assert.equal(d.speak, false)
+  assert.match(d.reason, /没有命中/)
 })
 
 test('大脑：模型输出带代码围栏或前后废话也能解析', async () => {

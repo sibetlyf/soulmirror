@@ -42,6 +42,7 @@ import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-fil
 import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
 import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
 import { buildSnapshot } from './lib/context-snapshot.js'
+import { createDshCompleter } from './lib/dsh-llm.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -969,6 +970,24 @@ export function apply(ctx, config) {
             await a.finish()
             return json(200, { ok: true })
           } catch (e) { return json(200, { ok: false, error: e.message }) }
+        }
+
+        // brain 自检：走和真实会议同一套判定，并把模型原始输出带回来，
+        // 这样"agent 不回复"能当场区分：模型报错 / 返回格式不对 / 判定不该说话
+        if (kind === 'brain') {
+          if (!completer) return json(200, { ok: false, error: '没有可用模型：先配置 brain.provider / brain.model' })
+          const probe = String((JSON.parse(Buffer.concat(buf).toString('utf8') || '{}').text) || '你在吗？')
+          let raw = ''
+          const spy = async (messages) => { raw = await completer(messages); return raw }
+          try {
+            const decision = await brain.decide(
+              { kind: 'question', reason: '手动自检', line: { text: probe, t: new Date().toISOString() } },
+              { complete: spy, profile: cfg.brain.profile },
+            )
+            return json(200, { ok: true, raw, decision })
+          } catch (e) {
+            return json(200, { ok: false, error: e.message, raw })
+          }
         }
         return json(200, { ok: false, error: '未知测试类型' })
       }
@@ -2538,35 +2557,21 @@ export function apply(ctx, config) {
   // ── ASR 纠错：用大模型把同音错字改回正确人名/术语 ──────────────
   const fixNames = Array.from(new Set([cfg.userName, ...(cfg.wakeWords || []), ...((cfg.apps || []).map((a) => a.name))].filter(Boolean)))
 
-  function makeDshCompleter(brainCfg) {
-    const llm = ctx.get('llm')
-    if (!llm?.stream) return null
-    return async (messages) => {
-      let provider = String(brainCfg.provider || '')
-      let model = String(brainCfg.model || '')
-      if (!provider || !model) {
-        const controller = ctx.get('sessionController')
-        const catalog = controller?.modelCatalog ? await controller.modelCatalog() : null
-        if (!catalog?.default) throw new Error('DSH 没有可用的默认模型')
-        provider = provider || catalog.default.provider
-        model = model || catalog.default.model
-      }
-      const system = (messages || []).filter((m) => m.role === 'system').map((m) => String(m.content || '')).join('\n')
-      const user = (messages || []).filter((m) => m.role !== 'system').map((m) => String(m.content || '')).join('\n')
-      const stream = llm.stream({
-        provider,
-        model,
-        system: system || undefined,
-        messages: [{ role: 'user', content: [{ type: 'text', text: user }] }],
+    function makeDshCompleter(brainCfg) {
+      const llm = ctx.get('llm')
+      if (!llm || typeof llm.stream !== 'function') return null
+      const controller = ctx.get('sessionController')
+      return createDshCompleter({
+        llm,
+        provider: String(brainCfg.provider || ''),
+        model: String(brainCfg.model || ''),
+        resolveModel: async () => {
+          const catalog = controller?.modelCatalog ? await controller.modelCatalog() : null
+          if (!catalog || !catalog.default) return null
+          return { provider: catalog.default.provider, model: catalog.default.model }
+        },
       })
-      let out = ''
-      for await (const chunk of stream) {
-        if (chunk.type === 'delta' && chunk.text) out += chunk.text
-        else if (chunk.type === 'text-delta' && chunk.text) out += chunk.text
-      }
-      return out
     }
-  }
 
   const brainKey = cfg.brain.apiKey
     || process.env[cfg.brain.apiKeyEnv || 'BRAIN_API_KEY']
