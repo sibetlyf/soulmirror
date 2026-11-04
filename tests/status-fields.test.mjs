@@ -61,4 +61,11 @@ test('对话内容为空时发言失败要记进 lastSpeakError', async () => {
   assert.match(st.body.lastSpeakError.message, /没有内容/)
 })
 
+
+test('Agent 默认全自动开口：autoSpeak 默认 true', async () => {
+  const cfg = await call('GET', '/api/soulmirror/config')
+  assert.equal(cfg.body.reply.autoSpeak, true, 'Agent 不应该需要手动点才说话')
+  assert.equal(cfg.body.reply.candidates, 1, '直接开口时给一条候选就够')
+  assert.equal(cfg.body.advice.enabled, true, '建议卡片是默认开的（给用户看）')
+})
 test.after(() => { try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ } })

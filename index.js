@@ -99,7 +99,7 @@ export const Config = z.object({
   /** Agent 发言：说给会议里所有人听，与建议卡片互不影响。 */
   reply: z.object({
     enabled: z.boolean().default(false),
-    autoSpeak: z.boolean().default(false),
+    autoSpeak: z.boolean().default(true),
     candidates: z.number().default(2),
     cooldownMs: z.number().default(20000),
   }).default({}),
@@ -315,8 +315,10 @@ export function apply(ctx, config) {
     // Agent 发言：说给"会议里所有人"听的，独立开关
     reply: {
       enabled: config.reply?.enabled === true,
-      autoSpeak: config.reply?.autoSpeak === true,
-      candidates: config.reply?.candidates || 2,
+      // Agent 的定位是"全自动说出来"，所以默认就开口；
+      // 想要先看候选再决定，才把它关掉（previewOnly）
+      autoSpeak: config.reply?.autoSpeak !== false,
+      candidates: config.reply?.candidates || 1,
       cooldownMs: config.reply?.cooldownMs || 20000,
     },
     devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
@@ -2842,13 +2844,16 @@ export function apply(ctx, config) {
       logger?.info?.('[soulmirror] 启动 DSH 任务（' + decision.why + '）：' + r.task.slice(0, 60))
       startTaskInBackground(r.task, { why: decision.why }).catch?.(() => {})
     }
-    // autoSpeak 才真的说；否则只把候选词挂到面板上等用户点
-    if (!cfg.reply.autoSpeak && r.candidates.length) {
-      logger?.info?.('[soulmirror] 已生成候选词，等待确认（未开启自动开口）：' + r.candidates[0].slice(0, 30))
-    }
-    if (cfg.reply.autoSpeak && r.candidates.length) {
-      const said = await speakNow(r.candidates[0])
-      if (said.ok) { replyState.spoken = r.candidates[0]; addAssistantLine(r.candidates[0], 'Agent 发言') }
+    // 要说的内容：优先第一条候选；模型没给候选但有明确触发时，至少应一句
+    const sayText = (r.candidates && r.candidates[0]) || (trig.hit ? '我在，你说。' : '')
+    if (sayText && cfg.reply.autoSpeak) {
+      const said = await speakNow(sayText)
+      if (said.ok) {
+        replyState = { ...replyState, spoken: sayText }
+        addAssistantLine(sayText, 'Agent 发言')
+      }
+    } else if (sayText) {
+      logger?.info?.('[soulmirror] 预览模式：候选已就绪，未自动说 —— ' + sayText.slice(0, 30))
     }
   }
 
