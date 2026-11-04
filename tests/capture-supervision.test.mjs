@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
@@ -104,4 +104,76 @@ test('有音频流过就重置失败计数（长会里偶发中断不会累积�
   session.running = false // 主动停止：否则"恢复即重置"会让监督永远重试下去
   await Promise.race([loop, wait(500)])
   assert.ok(logs.some((l) => /采集已恢复/.test(l)), '应有恢复日志')
+})
+
+// ── 真实事故：采集在会议中途死了，界面却仍显示"已连接"，用户以为在采 ──
+test('采集连续失败后标记 captureFailed，并安排自动恢复（而不是永久躺平）', async () => {
+  const { MeetingSession } = await import('../lib/session.js')
+  const { EventEmitter } = await import('node:events')
+
+  let spawned = 0
+  const spawnFn = () => {
+    spawned++
+    const c = new EventEmitter()
+    c.stdout = new EventEmitter()
+    c.stderr = new EventEmitter()
+    c.kill = () => {}
+    // 每次都立刻退出，模拟设备不可用
+    setTimeout(() => c.emit('exit', 1), 5)
+    return c
+  }
+
+  const cfg = {
+    asr: { provider: 'dashscope', apiKey: 'x', model: 'paraformer-realtime-v2' },
+    devices: { capture: '', captureMode: 'loopback', captureAuto: true },
+    dataDir: process.env.TEMP || '/tmp',
+    meetingProcs: [],
+    processName: 'x',
+  }
+  const s = new MeetingSession(cfg, { info() {}, warn() {} }, {
+    spawnFn,
+    backoffMs: [5, 5],
+    createAsr: () => ({
+      start: async () => {},
+      feed: () => {},
+      stop: async () => {},
+      snapshot: () => ({ phase: 'online', online: true }),
+      get closed() { return false },
+    }),
+  })
+  s.correctText = null
+  // 让设备解析立刻返回，避免依赖真实设备
+  s.deviceInUse = 'fake'
+
+  await s.startCapture('t')
+  // 等它把两次退避用完
+  await new Promise((r) => setTimeout(r, 1200))
+
+  assert.equal(s.captureFailed, true, '应当标记采集失败')
+  assert.match(s.lastError, /自动重试|暂停/)
+  assert.ok(s.recoveries === 0, '此时还没开始恢复')
+  assert.ok(spawned >= 2, '应当尝试过重启')
+
+  const snap = s.snapshot()
+  assert.equal(snap.captureFailed, true, 'snapshot 要暴露 captureFailed 给界面')
+
+  await s.stopCapture()
+  assert.equal(s.wanted, false, '停止后不应再自动恢复')
+})
+
+test('停止采集会取消待执行的自动恢复', async () => {
+  const { MeetingSession } = await import('../lib/session.js')
+  const cfg = {
+    asr: { provider: 'dashscope', apiKey: 'x' },
+    devices: { capture: '', captureMode: 'loopback', captureAuto: true },
+    dataDir: process.env.TEMP || '/tmp',
+    meetingProcs: [], processName: 'x',
+  }
+  const s = new MeetingSession(cfg, { info() {}, warn() {} }, { spawnFn: () => { throw new Error('nope') } })
+  s.wanted = true
+  s.captureFailed = true
+  s._scheduleRecover()
+  assert.ok(s._recoverTimer, '应当安排了恢复定时器')
+  await s.stopCapture()
+  assert.equal(s._recoverTimer, null, '停止后定时器要清掉')
 })

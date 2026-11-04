@@ -649,6 +649,9 @@ export function apply(ctx, config) {
           problems,
           capture: {
             capturing: !!session.capturing,
+      captureFailed: !!snap.captureFailed,
+      silentSec: snap.silentSec || 0,
+      recoveries: snap.recoveries || 0,
             device: snap.captureDevice || "",
             bytes: snap.bytes || 0,
       lastByteAgeMs: snap.lastByteAt ? (Date.now() - snap.lastByteAt) : null,
