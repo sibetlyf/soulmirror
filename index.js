@@ -41,6 +41,7 @@ import { readWavPcm, transcribeOffline, buildOfflineMinutes } from './lib/offlin
 import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
 import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
 import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
+import { buildSnapshot } from './lib/context-snapshot.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -80,6 +81,13 @@ export const Config = z.object({
   processName: z.string().default('wemeetapp'),
   /** 额外的会议进程名（会话枚举用）。内置已含 wemeetapp/CloudVideo/Feishu/DingTalk/Teams/Zoom/WXWork。 */
   meetingProcs: z.array(z.string()).default([]),
+  /** 会议转写上下文：是否自动同步进 Agent 会话。 */
+  context: z.object({
+    autoInject: z.boolean().default(false),
+    everyMs: z.number().default(60000),
+    maxLines: z.number().default(20),
+    maxChars: z.number().default(4000),
+  }).default({}),
   /** 音频设备。 */
   devices: z.object({
     /** 环回采集的目标渲染设备（空 = 系统默认）；会议声音从哪个设备出，就填哪个。 */
@@ -273,6 +281,8 @@ export function apply(ctx, config) {
     windowClass: config.windowClass || 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView',
     processName: config.processName || 'wemeetapp',
     meetingProcs: Array.isArray(config.meetingProcs) ? config.meetingProcs : [],
+    // 转写上下文：默认不自动送进会话（每送一次都是一轮真实对话，会产生费用）
+    context: { autoInject: false, everyMs: 60000, maxLines: 20, maxChars: 4000, ...(config.context || {}) },
     devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
@@ -355,6 +365,7 @@ export function apply(ctx, config) {
       enabled: cfg.enabled,
       policy: cfg.policy,
       devices: cfg.devices,
+      context: cfg.context,
       asr: {
         provider: cfg.asr.provider,
         // 显示真实下发的模型，而不是另一个字段
@@ -699,6 +710,21 @@ export function apply(ctx, config) {
       if (req.method === 'GET' && sub === 'prepare') {
         return json(200, loadPreparation(session.dir || lastSessionDir))
       }
+      if (req.method === 'POST' && sub === 'context') {
+        const bufC = []
+        for await (const chunk of req) bufC.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufC).toString('utf8') || '{}')
+        // auto 用于切换自动同步开关
+        if (body.autoInject !== undefined) {
+          cfg.context.autoInject = !!body.autoInject
+          try { savePersisted({ context: cfg.context }) } catch { /* ignore */ }
+          if (cfg.context.autoInject) startContextPump()
+          return json(200, { ok: true, autoInject: cfg.context.autoInject })
+        }
+        const r = await injectTranscriptContext({ reason: 'manual', force: true })
+        return json(200, r)
+      }
+
       if (req.method === 'POST' && sub === 'prepare') {
         const bufP = []
         for await (const chunk of req) bufP.push(chunk)
@@ -3077,6 +3103,63 @@ export function apply(ctx, config) {
       } catch { /* 退化为抽取式 */ }
     }
     return '## 会议要点（抽取式）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
+  }
+
+  /**
+   * 把最近的会议转写作为一段上下文送进 Agent 会话。
+   *
+   * 为什么要用户可控：每送一次就是一轮真实对话，会产生 token 消耗，
+   * 也可能让 Agent 主动说话。所以默认只在用户点按钮时发生，自动同步要显式开启。
+   */
+  let lastInjectAt = 0
+  let lastInjectCount = 0
+  async function injectTranscriptContext({ reason = 'manual', force = false } = {}) {
+    const sc = ctx.get('sessionController')
+    const sid = meeting.dshSessionId || ''
+    if (!sc || typeof sc.prompt !== 'function') return { ok: false, error: '没有可用的会话服务' }
+    if (!sid) return { ok: false, error: '还没有为这场会议建会话（先开始录音）' }
+
+    const linesAll = session.transcript || []
+    if (linesAll.length === 0) return { ok: false, error: '还没有转写内容' }
+    // 没有新内容就别重复发（自动同步会一直空转）
+    if (!force && linesAll.length === lastInjectCount) return { ok: true, skipped: '没有新转写' }
+
+    const prep = loadPreparation(session.dir || lastSessionDir)
+    const text = buildSnapshot(linesAll, {
+      maxLines: cfg.context.maxLines,
+      maxChars: cfg.context.maxChars,
+      invite: prep.invite,
+      goal: prep.goal,
+    })
+    if (!text) return { ok: false, error: '还没有转写内容' }
+
+    try {
+      await sc.prompt({
+        requestId: 'soulmirror-ctx-' + Date.now(),
+        sessionId: sid,
+        mode: 'queue',
+        content: [{ type: 'text', text }],
+      })
+    } catch (e) {
+      return { ok: false, error: '送入会话失败：' + e.message }
+    }
+    lastInjectAt = Date.now()
+    lastInjectCount = linesAll.length
+    logger?.info?.('[soulmirror] 已把 ' + linesAll.length + ' 句转写送进会话（' + reason + '）')
+    return { ok: true, lines: linesAll.length, chars: text.length, reason }
+  }
+
+  /** 自动同步：只在 agent 模式下、且开关打开时跑 */
+  let ctxTimer = null
+  function startContextPump() {
+    if (ctxTimer) return
+    ctxTimer = setInterval(() => {
+      if (!cfg.context.autoInject) return
+      if (cfg.mode !== 'agent') return
+      if (!session.capturing) return
+      injectTranscriptContext({ reason: 'auto' }).catch(() => {})
+    }, Math.max(15000, Number(cfg.context.everyMs) || 60000))
+    ctxTimer.unref?.()
   }
 
   /**

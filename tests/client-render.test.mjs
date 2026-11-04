@@ -231,6 +231,24 @@ test('小窗必须保留去大页面的入口', () => {
   assert.ok(text.includes('⤢'), '小窗缺少「打开大页面」按钮')
 })
 
+test('流式那一行有打字机效果与光标（不是整句突然出现）', () => {
+  const { exp } = loadClient()
+  const panels = exp.__test
+  assert.ok(panels.TypeLine, '缺少 TypeLine 测试出口')
+
+  // 打字机开启时，可见文本长度不应超过目标
+  const node = panels.TypeLine({ text: '我们现在来测试一下打字机效果' })
+  const text = textOf(node).join('')
+  assert.ok(text.includes('▌'), '缺少光标')
+  assert.ok(text.length <= '我们现在来测试一下打字机效果'.length + 1, '可见长度不应超过目标文本')
+
+  // 组件必须引用打字机 hook（否则就是一次性渲染）
+  const source = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
+  assert.ok(source.includes('useTypewriter'), '缺少打字机 hook')
+  assert.ok(source.includes('正在说'), '大页面缺少"正在说"的流式行')
+  assert.ok(source.includes('@keyframes smCaret'), '缺少光标闪烁动画')
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test
