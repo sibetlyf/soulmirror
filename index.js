@@ -136,7 +136,7 @@ export const Config = z.object({
     rate: z.number().default(0),
     baseUrl: z.string().default(''),
     model: z.string().default('cosyvoice-v2'),
-    apiKeyEnv: z.string().default('OPENAI_API_KEY'),
+    apiKeyEnv: z.string().default('DASHSCOPE_API_KEY'),
     speed: z.number().default(1),
     /** 云端 pcm 采样率（OpenAI 返回 24000） */
     sampleRate: z.number().default(24000),
@@ -427,8 +427,8 @@ export function apply(ctx, config) {
         sampleRate: cfg.tts.sampleRate,
         apiKeyEnv: cfg.tts.apiKeyEnv,
         apiKey: '',
-        keySet: !!(cfg.tts.apiKey || process.env[cfg.tts.apiKeyEnv || 'DASHSCOPE_API_KEY']),
-        keySource: cfg.tts.apiKey ? 'config' : (process.env[cfg.tts.apiKeyEnv || 'DASHSCOPE_API_KEY'] ? 'env' : 'none'),
+        keySet: !!resolveDashScopeKey(cfg.tts).key,
+        keySource: resolveDashScopeKey(cfg.tts).source,
         workspaceId: cfg.tts.workspaceId || '',
         cloneBaseUrl: cfg.tts.cloneBaseUrl || '',
         clonePrefix: cfg.tts.clonePrefix || 'soulmirror',
@@ -515,7 +515,7 @@ export function apply(ctx, config) {
   }
 
   function voiceCloneKey() {
-    return cfg.tts.apiKey || process.env[cfg.tts.apiKeyEnv || 'DASHSCOPE_API_KEY'] || process.env.DASHSCOPE_API_KEY || ''
+    return resolveDashScopeKey(cfg.tts).key
   }
 
   async function voiceEnrollment(action, input) {
@@ -1033,7 +1033,7 @@ export function apply(ctx, config) {
         for await (const chunk of req) buf.push(chunk)
         const kind = (JSON.parse(Buffer.concat(buf).toString('utf8') || '{}').kind || 'tts')
         if (kind === 'tts') {
-          const key = cfg.tts.apiKey || process.env[cfg.tts.apiKeyEnv || 'DASHSCOPE_API_KEY']
+          const key = resolveDashScopeKey(cfg.tts).key
           if (!key) return json(200, { ok: false, error: '未配置 Key' })
           try {
             let bytes = 0
@@ -1046,7 +1046,8 @@ export function apply(ctx, config) {
             })
             s.speak('测试')
             await s.finish()
-            return json(200, { ok: bytes > 0, bytes })
+            const ki = keyInfo(cfg.tts)
+            return json(200, { ok: bytes > 0, bytes, keySource: ki.source, envName: ki.envName, speakDevice: cfg.devices.speak || '', micRestore: cfg.devices.micRestore || '' })
           } catch (e) { return json(200, { ok: false, error: e.message }) }
         }
         if (kind === 'asr') {
@@ -3281,6 +3282,8 @@ export function apply(ctx, config) {
   // ── 会中建议（追问 / 回应）与模型错误 ──────────────────────────
   // 模型失败必须能看见：只写日志等于没写，用户只会觉得"没反应"
   let lastLlmError = null
+  // 发言失败的原因：TTS 没 key、虚拟声卡没配、mic 切换失败都会落在这里
+  let lastSpeakError = null
   let adviceState = { at: 0, questions: [], replies: [], lines: 0, error: '', busy: false }
 
   // ── Agent 发言的候选词 ──────────────────────────────────────
@@ -3301,9 +3304,11 @@ export function apply(ctx, config) {
         await sayToMeeting(t, cfg.tts, { logger })
       }
       agent.spoken = (agent.spoken || 0) + 1
+      lastSpeakError = null
       return { ok: true, text: t }
     } catch (e) {
-      noteLlmError('发言', e)
+      lastSpeakError = { at: new Date().toISOString(), message: String(e.message || e).slice(0, 300) }
+      logger?.warn?.('[soulmirror] 发言失败：' + lastSpeakError.message)
       return { ok: false, error: e.message }
     }
   }
