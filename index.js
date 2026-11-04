@@ -11,7 +11,7 @@
  */
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { appendFile, mkdir, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -49,7 +49,7 @@ import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candi
 import { detectTrigger } from './lib/trigger-rules.js'
 import { resolveDefaultModel } from './lib/model-resolve.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
-import { pickWorkspaceCwd } from './lib/workspace.js'
+import { pickWorkspaceCwd, detectKnowledgeCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
 import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
 import { MeetingLifecycle } from './lib/lifecycle.js'
@@ -303,6 +303,8 @@ export function apply(ctx, config) {
     processName: config.processName || 'wemeetapp',
     meetingProcs: Array.isArray(config.meetingProcs) ? config.meetingProcs : [],
     // 转写上下文：默认不自动送进会话（每送一次都是一轮真实对话，会产生费用）
+    // agent 的工作目录：留空则自动对齐知识库（能直接看文档/制品）
+    workspace: { cwd: String(config.workspace?.cwd || '') },
     context: { autoInject: false, everyMs: 60000, maxLines: 20, maxChars: 4000, ...(config.context || {}) },
     // 建议卡片：给"人"看的，自动生成、可关
     advice: {
@@ -2373,6 +2375,20 @@ export function apply(ctx, config) {
       display: ident.display || label || key,
       dir: join(workspaceRoot, safeName(key)),
       dshSessionId: prev?.dshSessionId || '',
+        // agent 的工作目录：配置 > 知识库目录 > 插件工作区（与知识库对齐才能看到文档/制品）
+        ...(() => {
+          try {
+            const cands = [
+              (cfg.workspace && cfg.workspace.cwd) || "",
+              join('G:', 'dsh-knowledge'),
+              join(homedir(), '.dsh', 'knowledge'),
+            ].filter(Boolean)
+            const kd = detectKnowledgeCwd(cands, { existsSync, statSync, join })
+            const pick = pickWorkspaceCwd({ configured: (cfg.workspace && cfg.workspace.cwd) || "", active: kd, fallback: "" })
+            const source = kd && pick.cwd === kd ? 'knowledge' : pick.source
+            return { agentCwd: pick.cwd, cwdSource: source }
+          } catch { return { agentCwd: '', cwdSource: 'fallback' } }
+        })(),
       startedAt: now,
     }
     try { mkdirSync(meeting.dir, { recursive: true }) } catch { /* ignore */ }
