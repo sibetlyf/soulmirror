@@ -46,6 +46,7 @@ import { createDshCompleter } from './lib/dsh-llm.js'
 import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advice.js'
 import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
+import { detectTrigger } from './lib/trigger-rules.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -1046,6 +1047,16 @@ export function apply(ctx, config) {
             await a.finish()
             return json(200, { ok: true })
           } catch (e) { return json(200, { ok: false, error: e.message }) }
+        }
+
+        // 触发判别自检：输入一句话，直接看会不会被当成"在等我回应"
+        if (kind === 'trigger') {
+          const probe = String((JSON.parse(Buffer.concat(buf).toString('utf8') || '{}').text) || '你现在听到话')
+          const r = detectTrigger(probe, {
+            names: [...(cfg.brain.names || []), ...(cfg.reply.extraNames || [])],
+            extraAddress: cfg.reply.extraAddress || [],
+          })
+          return json(200, { ok: true, text: probe, trigger: r, replyEnabled: cfg.reply.enabled, adviceEnabled: cfg.advice.enabled })
         }
 
         // brain 自检：走和真实会议同一套判定，并把模型原始输出带回来，
@@ -2750,9 +2761,13 @@ export function apply(ctx, config) {
     if (!cfg.reply.enabled) return
     const text = String(item?.text || '').trim()
     if (!text) return
-    // 候选句：被点名 / 问句 / 待办。其余不打扰
-    const trig = brain.push({ text, ...item })
-    if (!trig) return
+    // 候选句判别：称谓（容忍识别错字）+ 口语疑问 + 祈使请求。
+    // 之前只用「名字 + 问号」，现场两样都不可靠，导致叫了也不动。
+    const trig = detectTrigger(text, {
+      names: [...(cfg.brain.names || []), ...(cfg.reply.extraNames || [])],
+      extraAddress: cfg.reply.extraAddress || [],
+    })
+    if (!trig.hit) return
     const now = Date.now()
     if (now - lastReplyAt < Math.max(5000, Number(cfg.reply.cooldownMs) || 20000)) return
     lastReplyAt = now
@@ -3259,6 +3274,7 @@ export function apply(ctx, config) {
       const parsed = parseReply(raw)
       replyState = {
         at: Date.now(),
+        reason: replyState.reason || '',
         line: text,
         candidates: parsed.candidates,
         needsTask: parsed.needsTask,
