@@ -646,7 +646,8 @@ export function apply(ctx, config) {
           capture: {
             capturing: !!session.capturing,
             device: snap.captureDevice || "",
-            bytes: session.chunks || 0,
+            bytes: snap.bytes || 0,
+      lastByteAgeMs: snap.lastByteAt ? (Date.now() - snap.lastByteAt) : null,
           },
           asr: {
             phase: asr.phase || 'idle',

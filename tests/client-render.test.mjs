@@ -165,6 +165,45 @@ test('所有导出的面板组件都能在默认 props 下渲染', () => {
   }
 })
 
+// 把渲染树里的文字收集起来（fake React 下宿主元素是 {t,p,c}）
+function textOf(node, out = []) {
+  if (node == null || node === false) return out
+  if (typeof node === 'string' || typeof node === 'number') { out.push(String(node)); return out }
+  if (Array.isArray(node)) { for (const n of node) textOf(n, out); return out }
+  if (typeof node === 'object') {
+    if (node.c) textOf(node.c, out)
+    if (node.p && typeof node.p === 'object') {
+      for (const v of Object.values(node.p)) {
+        if (typeof v === 'string') out.push(v)
+      }
+    }
+  }
+  return out
+}
+
+test('StatusStrip 能反映连接状态（这是"一点提示都没有"的修复点）', () => {
+  const { exp } = loadClient()
+  const strip = exp.__test.StatusStrip
+  assert.ok(strip, 'StatusStrip 未导出')
+
+  // 1) 连上了、也有音频
+  const okText = textOf(strip({ state: { session: { asr: { online: true, phase: 'online', sentMs: 12500, reconnects: 0 } }, transcript: [{ t: new Date().toISOString() }] } })).join(' ')
+  assert.match(okText, /百炼已连接/)
+  assert.match(okText, /已送 12 秒音频/)
+  assert.match(okText, /最后一句/)
+
+  // 2) 连不上
+  const failText = textOf(strip({ state: { session: { asr: { failed: true, phase: 'failed', sentMs: 0, lastError: '401 Unauthorized' } }, transcript: [] } })).join(' ')
+  assert.match(failText, /连接失败/)
+  assert.match(failText, /401/)
+
+  // 3) 连上了但一个字节都没送进去 —— 这正是之前"看着正常其实没工作"的状态
+  const noAudioText = textOf(strip({ state: { session: { asr: { online: true, phase: 'online', sentMs: 0 } }, transcript: [] } })).join(' ')
+  assert.match(noAudioText, /百炼已连接/)
+  assert.match(noAudioText, /还没收到音频/)
+  assert.match(noAudioText, /还没有转写/)
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test
