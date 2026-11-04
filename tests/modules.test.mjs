@@ -48,12 +48,31 @@ test('大脑：有 LLM 时按 JSON 决策，带 task 字段', async () => {
   assert.equal(d.speak, true)
 })
 
-test('大脑：LLM 返回坏 JSON 时不崩，返回不插话', async () => {
+test('大脑：LLM 返回坏 JSON 时不崩；被点名时兜底回应而不是装死', async () => {
   const b = new MeetingBrain({ names: ['DSH'], minGapMs: 0 })
   const trig = b.push({ text: 'DSH 在吗' })
   const d = await b.decide(trig, { complete: async () => 'not json', profile: 'x' })
-  assert.equal(d.speak, false)
-  assert.match(d.reason, /LLM 失败/)
+  assert.equal(d.speak, true, '被点名却完全不回应，用户只会觉得"没反应"')
+  assert.match(d.reason, /无法解析/)
+})
+
+test('大脑：坏 JSON 且不是点名时不插话', async () => {
+  const b = new MeetingBrain({ names: ['DSH'], minGapMs: 0 })
+  const trig = b.push({ text: '帮我记一下明天十点评审' })
+  assert.ok(trig, '这句应当命中待办类触发')
+  assert.notEqual(trig.kind, 'name')
+  const d = await b.decide(trig, { complete: async () => 'not json', profile: 'x' })
+  assert.equal(d.speak, false, '非点名场景不该硬插话')
+  assert.match(d.reason, /解析失败|无法解析/)
+})
+
+test('大脑：模型输出带代码围栏或前后废话也能解析', async () => {
+  const b = new MeetingBrain({ names: ['DSH'], minGapMs: 0 })
+  const trig = b.push({ text: 'DSH 你怎么看' })
+  const raw = '好的，结果如下：\n\u0060\u0060\u0060json\n{"speak":true,"text":"我看可以","confidence":0.8,"reason":"被点名"}\n\u0060\u0060\u0060\n以上。'
+  const d = await b.decide(trig, { complete: async () => raw, profile: 'x' })
+  assert.equal(d.speak, true)
+  assert.equal(d.text, '我看可以')
 })
 
 test('纠错器：无 completer 原样返回，有则清洗引号', async () => {
@@ -169,4 +188,11 @@ test('dsh 入口可解析', () => {
 
 test('推荐项解析在审批场景下退化为 allowed-once', () => {
   assert.equal(pickRecommended({ toolName: 'pwsh' }).value, 'allowed-once')
+})
+
+test('大脑：decide 收到 null 触发不崩（push 未命中时会返回 null）', async () => {
+  const b = new MeetingBrain({ names: ['DSH'], minGapMs: 0 })
+  const d = await b.decide(null, { complete: async () => '{}', profile: 'x' })
+  assert.equal(d.speak, false)
+  assert.match(d.reason, /没有命中/)
 })
