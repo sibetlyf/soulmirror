@@ -1,4 +1,4 @@
-// meeting-bridge.exe — Windows 音频/语音小工具，供 dsh-meeting-agent 插件调用。
+﻿// meeting-bridge.exe — Windows 音频/语音小工具，供 dsh-meeting-agent 插件调用。
 // 编译：csc /target:exe /out:mbridge.exe meeting-bridge.cs /r:System.Speech.dll
 // 命令：
 //   devices                                   列出渲染/采集端点
@@ -35,6 +35,7 @@ namespace MeetingBridge
                     case "capture": CmdCapture(opt); return 0;
                     case "capture-process": CmdCaptureProcess(opt); return 0;
                     case "mic-usage": CmdMicUsage(opt); return 0;
+                case "session-device": return CmdSessionDevice(opt);
                     case "set-default": CmdSetDefault(opt); return 0;
                     case "stream-play": CmdStreamPlay(opt); return 0;
                     case "capture-stream": CmdCaptureStream(opt); return 0;
@@ -172,6 +173,150 @@ namespace MeetingBridge
             }
             Marshal.ReleaseComObject(col);
         }
+        // ---------------- session-device: 会议进程正在用哪个渲染端点 ----------------
+        //
+        // 为什么需要：设备名会变（插拔耳机 "耳机"→"扬声器"），按名字猜经常采不到声音。
+        // 但"进程 → 端点"是系统事实：枚举渲染端点上挂着的音频会话，
+        // 谁的 PID 属于会议进程，那个端点就是它正在放音的地方。
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern IntPtr OpenProcess(int access, bool inherit, int pid);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        static extern bool CloseHandle(IntPtr h);
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        static extern bool QueryFullProcessImageName(IntPtr h, int flags, StringBuilder name, ref int size);
+
+        /// 取进程映像名（不含扩展名）。
+        /// 注意：Process.GetProcessesByName 会漏掉部分会议进程（实测 12 个只看到 7 个），
+        /// 但对同一个用户下的进程，QueryFullProcessImageName 是可靠的。
+        static string ProcImageName(int pid)
+        {
+            if (pid <= 0) return "";
+            IntPtr h = OpenProcess(0x1000 /*PROCESS_QUERY_LIMITED_INFORMATION*/, false, pid);
+            if (h == IntPtr.Zero)
+            {
+                try { return System.Diagnostics.Process.GetProcessById(pid).ProcessName; } catch { return ""; }
+            }
+            try
+            {
+                var sb = new StringBuilder(1024);
+                int size = sb.Capacity;
+                if (!QueryFullProcessImageName(h, 0, sb, ref size)) return "";
+                var full = sb.ToString();
+                var slash = full.LastIndexOf('\\');
+                var file = slash >= 0 ? full.Substring(slash + 1) : full;
+                var dot = file.LastIndexOf('.');
+                return dot > 0 ? file.Substring(0, dot) : file;
+            }
+            finally { CloseHandle(h); }
+        }
+
+        static int CmdSessionDevice(Dictionary<string, string> o)
+        {
+            var names = new List<string>();
+            foreach (var part in (Get(o, "process", "") ?? "").Split(','))
+            {
+                var s = part.Trim();
+                if (s.Length > 0) names.Add(s);
+            }
+            var wantedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var s2 in names) wantedNames.Add(s2);
+            var pids = new HashSet<int>();
+            foreach (var nm in names)
+            {
+                try
+                {
+                    foreach (var pr in System.Diagnostics.Process.GetProcessesByName(nm)) pids.Add(pr.Id);
+                }
+                catch { }
+            }
+            var explicitPid = 0;
+            int.TryParse(Get(o, "pid", "0"), out explicitPid);
+            if (explicitPid > 0) pids.Add(explicitPid);
+
+            Console.OutputEncoding = Encoding.UTF8;
+            if (Get(o, "debug", "0") == "1")
+            {
+                var dbg = new StringBuilder();
+                foreach (var q in pids) dbg.Append(q).Append(",");
+                Console.WriteLine("RESOLVED\t" + pids.Count + "\t" + dbg.ToString());
+            }
+            if (pids.Count == 0)
+            {
+                Console.WriteLine("NONE\tno-process");
+                return 1;
+            }
+
+            var en = CreateEnumerator();
+            IMMDeviceCollection col;
+            en.EnumAudioEndpoints(0 /*eRender*/, 1 /*ACTIVE*/, out col);
+            int n;
+            col.GetCount(out n);
+
+            string bestName = "", bestId = "";
+            int bestScore = 0;
+
+            for (int i = 0; i < n; i++)
+            {
+                IMMDevice dev;
+                col.Item(i, out dev);
+                string devName = FriendlyName(dev);
+                string devIdOut;
+                dev.GetId(out devIdOut);
+
+                object oMgr = null;
+                try { dev.Activate(typeof(IAudioSessionManager2).GUID, 0x17, IntPtr.Zero, out oMgr); }
+                catch { Marshal.ReleaseComObject(dev); continue; }
+
+                IAudioSessionEnumerator ses;
+                if (((IAudioSessionManager2)oMgr).GetSessionEnumerator(out ses) != 0)
+                {
+                    Marshal.ReleaseComObject(oMgr);
+                    Marshal.ReleaseComObject(dev);
+                    continue;
+                }
+
+                int cnt;
+                ses.GetCount(out cnt);
+                int score = 0;
+                for (int j = 0; j < cnt; j++)
+                {
+                    IAudioSessionControl ctl;
+                    if (ses.GetSession(j, out ctl) != 0) continue;
+                    try
+                    {
+                        var ctl2 = (IAudioSessionControl2)ctl;
+                        int pid = 0, state = 0;
+                        ctl2.GetProcessId(out pid);
+                        ctl2.GetState(out state);
+                        string img = pid > 0 ? ProcImageName(pid) : "";
+                        bool nameHit = img.Length > 0 && wantedNames.Contains(img);
+                        if (pid > 0 && (pids.Contains(pid) || nameHit))
+                        {
+                            // state: 0=Inactive 1=Active 2=Expired；活跃的权重更高
+                            score += (state == 1 ? 10 : (state == 0 ? 3 : 1));
+                            Console.WriteLine("HIT\t" + devName + "\t" + pid + "\t" + img + "\tstate=" + state);
+                        }
+                    }
+                    catch { }
+                    Marshal.ReleaseComObject(ctl);
+                }
+                Marshal.ReleaseComObject(ses);
+                Marshal.ReleaseComObject(oMgr);
+                Marshal.ReleaseComObject(dev);
+
+                if (score > bestScore) { bestScore = score; bestName = devName; bestId = devIdOut; }
+            }
+            Marshal.ReleaseComObject(col);
+
+            if (bestScore > 0)
+            {
+                Console.WriteLine("DEVICE\t" + bestName + "\t" + bestId);
+                return 0;
+            }
+            Console.WriteLine("NONE\tno-session");
+            return 1;
+        }
+
         // ---------------- per-process loopback (只采某个进程的声音) ----------------
 
         static int ResolvePid(string nameOrPid)

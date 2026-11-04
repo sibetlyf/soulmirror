@@ -74,6 +74,8 @@ export const Config = z.object({
   windowClass: z.string().default('VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView'),
   /** 进程名过滤，防止误操作其他同名窗口。 */
   processName: z.string().default('wemeetapp'),
+  /** 额外的会议进程名（会话枚举用）。内置已含 wemeetapp/CloudVideo/Feishu/DingTalk/Teams/Zoom/WXWork。 */
+  meetingProcs: z.array(z.string()).default([]),
   /** 音频设备。 */
   devices: z.object({
     /** 环回采集的目标渲染设备（空 = 系统默认）；会议声音从哪个设备出，就填哪个。 */
@@ -266,6 +268,7 @@ export function apply(ctx, config) {
     windowTitle: config.windowTitle || '腾讯会议',
     windowClass: config.windowClass || 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView',
     processName: config.processName || 'wemeetapp',
+    meetingProcs: Array.isArray(config.meetingProcs) ? config.meetingProcs : [],
     devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
