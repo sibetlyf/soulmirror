@@ -20,7 +20,7 @@ import { join } from 'node:path'
 
 const execFileAsync = promisify(execFile)
 
-import { bridge, listDevices, toolsDir, micUsage } from './lib/bridge.js'
+import { bridge, listDevices, toolsDir, micUsage, defaultRenderDevice } from './lib/bridge.js'
 import {
   listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
   ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect, shotWindow,
@@ -35,6 +35,7 @@ import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
 import { saveMinutes } from './lib/minutes-file.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
+import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
 import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
@@ -79,6 +80,8 @@ export const Config = z.object({
     captureMode: z.union(['loopback', 'device']).default('loopback'),
     /** 采到静音时自动把默认播放切到该设备（通常填 CABLE Input）。留空则只报警不切换。 */
     forceCaptureDevice: z.string().default(''),
+    /** 面板点过"对齐"后为 true：capture 只作参考，启动时仍跟随正在出声的设备 */
+    captureAuto: z.boolean().default(false),
     /** 发言播放到的虚拟声卡输入端点（渲染设备）。 */
     speak: z.string().default('CABLE Input'),
     /** 会议客户端里应选的麦克风名字（仅用于状态提示）。 */
@@ -261,7 +264,7 @@ export function apply(ctx, config) {
     windowTitle: config.windowTitle || '腾讯会议',
     windowClass: config.windowClass || 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView',
     processName: config.processName || 'wemeetapp',
-    devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
+    devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
       baseUrl: '', model: 'cosyvoice-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '', speed: 1, sampleRate: 16000,
@@ -684,6 +687,16 @@ export function apply(ctx, config) {
         }
 
         if (action === 'probe') {
+          // 默认走"对齐会议正在用的设备"：秒级、不需要先出声
+          if (!body.deep) {
+            const r = await alignCaptureDevice()
+            if (!r.device) {
+              return reply({ message: '没读到任何渲染设备：确认系统里能放声音，或手动填 devices.capture' })
+            }
+            savePersisted({ devices: { capture: r.device, captureAuto: true } })
+            setupCache = { at: 0, value: null }
+            return reply({ message: '已对齐（自动跟随）：' + r.device + '（' + r.note + '）', picked: r.device, via: r.source })
+          }
           if (probeJob.running) {
             return json(200, {
               ok: false, started: false,
@@ -2234,6 +2247,25 @@ export function apply(ctx, config) {
     lines.push('')
     lines.push('会议：' + (job.title || target))
     return lines.join('\n')
+  }
+
+  /**
+   * 直接对齐"会议正在用的设备"：
+   * 读一次实时电平（200ms 级）→ 有声音就用它，没声音就用系统默认。
+   * 不需要先让会议出声，也不会逐个试听十几秒。
+   */
+  async function alignCaptureDevice() {
+    if (process.env.SOULMIRROR_TEST === '1') {
+      return { device: 'Fake Device', source: 'system-default', note: '测试桩', defaultDevice: 'Fake Device', meters: [] }
+    }
+    let defaultDevice = ''
+    try { defaultDevice = await defaultRenderDevice() } catch { /* ignore */ }
+    let meters = []
+    try {
+      const out = await bridge(['meters'], { timeoutMs: 20000 })
+      meters = parseMeters(out)
+    } catch { /* 读不到电平就只按默认设备 */ }
+    return { ...resolveCaptureTarget({ configured: '', defaultDevice, meters }), defaultDevice, meters }
   }
 
   /** 逐个渲染设备环回采一小段并算 RMS，返回"哪个设备真的有声音" */
