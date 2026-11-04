@@ -36,6 +36,7 @@ import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js
 import { saveMinutes } from './lib/minutes-file.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
+import { formatAudioDiag } from './lib/audio-diag.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
 import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
@@ -3511,7 +3512,7 @@ export function apply(ctx, config) {
     name: 'soul_setup',
     description: '检查并自动配置运行环境（Windows 编译 mbridge；macOS/Linux 提示 ffmpeg 等依赖）。装完先跑一次这个。',
     parameters: {
-      action: { type: 'string', enum: ['check', 'report', 'build', 'auto', 'deps', 'install-deps', 'links'], required: true, description: 'check 看环境 / report 安装体检清单（缺什么、怎么补） / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡' },
+      action: { type: 'string', enum: ['check', 'report', 'build', 'auto', 'deps', 'install-deps', 'links', 'audio'], required: true, description: 'check 看环境 / report 安装体检清单（缺什么、怎么补） / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡 / audio 音频路由诊断' },
     },
     output: OUT(),
     execute: wrap('soul_setup', async (a) => {
@@ -3534,6 +3535,26 @@ export function apply(ctx, config) {
         lines.push('提示：computer-use 与本插件都会发键盘事件，同时操作桌面时可能互相打断；')
         lines.push('      分身发言前会先把会议窗口置前，若你正在用 computer-use 操作别的应用，可能抢焦点。')
         return { ok: true, result: lines.join('\n') }
+      }
+      if (a.action === 'audio') {
+        let defaultDevice = ''
+        try { defaultDevice = await defaultRenderDevice() } catch { /* ignore */ }
+        let meters = []
+        try { meters = parseMeters(await bridge(['meters'], { timeoutMs: 20000 })) } catch { /* ignore */ }
+        const picked = resolveCaptureTarget({ configured: cfg.devices.capture, defaultDevice, meters })
+        let app = { name: '' }
+        let inMeeting = false
+        try {
+          app = meetingApp(cfg.activeApp || '') || (await detectMeetingApp())
+          inMeeting = await meetingActive(app, await listWindows().catch(() => []))
+        } catch { /* ignore */ }
+        return {
+          ok: true,
+          result: formatAudioDiag({
+            app: app && app.name, inMeeting, defaultDevice, meters, target: picked,
+            processLoopback: false,
+          }),
+        }
       }
       if (a.action === 'deps') {
         const v = await detectVirtualAudio()
