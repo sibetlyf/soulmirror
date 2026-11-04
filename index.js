@@ -39,6 +39,7 @@ import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
 import { readWavPcm, transcribeOffline, buildOfflineMinutes } from './lib/offline-asr.js'
 import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
+import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -689,6 +690,56 @@ export function apply(ctx, config) {
         const state = await collectSetupStateCached()
         const rows = buildSetupRows(state)
         return json(200, { ok: summarizeSetup(rows).ok, rows, hint: setupHint(rows), state, probe: probeJob })
+      }
+      // ── 会前准备：会邀 / 目标 / 背景（只存文字）──
+      if (req.method === 'GET' && sub === 'prepare') {
+        return json(200, loadPreparation(session.dir || lastSessionDir))
+      }
+      if (req.method === 'POST' && sub === 'prepare') {
+        const bufP = []
+        for await (const chunk of req) bufP.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufP).toString('utf8') || '{}')
+        const dir = session.dir || lastSessionDir
+        if (!dir) return json(200, { ok: false, error: '还没有会议目录：请先开始一次录音' })
+        const saved = savePreparation(dir, body)
+        return json(200, { ok: true, preparation: saved, dir })
+      }
+
+      // ── AI 润色会议目标：给 2~3 个候选，不直接替换原文 ──
+      if (req.method === 'POST' && sub === 'polish') {
+        const bufG = []
+        for await (const chunk of req) bufG.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufG).toString('utf8') || '{}')
+        const goal = String(body.goal || '').trim()
+        if (!goal) return json(400, { ok: false, error: '没有目标可润色' })
+        if (!completer) return json(200, { ok: false, error: '当前没有可用模型' })
+        try {
+          const raw = await completer([
+            { role: 'system', content: '你是会议目标润色助手。把用户的目标改成 2-3 个更具体、可判断是否达成的表述，每条不超过 40 字。只输出 JSON 数组，不要解释。' },
+            { role: 'user', content: goal },
+          ])
+          let list = []
+          try {
+            const s = String(raw || '').split('```')[1] || String(raw || '')
+            list = JSON.parse(s.trim().replace(/^json\s*/i, ''))
+          } catch { list = [] }
+          list = (Array.isArray(list) ? list : []).map((x) => String(x || '').trim()).filter(Boolean).slice(0, 3)
+          if (!list.length) return json(200, { ok: false, error: '模型没有给出可用候选' })
+          return json(200, { ok: true, candidates: list })
+        } catch (e) {
+          return json(200, { ok: false, error: e.message })
+        }
+      }
+
+      // ── 回看：历史会议列表 / 单场详情 ──
+      if (req.method === 'GET' && sub === 'records') {
+        return json(200, { ok: true, records: listRecords(CONFIG_DIR, 30) })
+      }
+      if (req.method === 'GET' && sub === 'record') {
+        const dir = String(url.searchParams.get('dir') || '')
+        if (!dir || !dir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+        const r = loadRecord(dir)
+        return json(200, r ? { ok: true, record: r } : { ok: false, error: '读不到记录' })
       }
       if (req.method === 'POST' && sub === 'offline') {
         const r = await runOfflinePass(session.dir)
@@ -1386,6 +1437,9 @@ export function apply(ctx, config) {
     }
     return { ok: false, code: '', reason: '打开了「' + clicked + '」但没读到会议号' }
   }
+
+  // 最近一场会议目录：没在录音时，准备页与回看用它
+  let lastSessionDir = ''
 
   let codeCache = { at: 0, app: '', code: '', source: 'none' }
   async function currentMeetingCode(app) {
@@ -2613,6 +2667,14 @@ export function apply(ctx, config) {
       agent.running = true
       armed = true
       await session.startCapture(a.label || 'agent')
+      lastSessionDir = session.dir || ''
+      try {
+        saveMeta(session.dir, {
+          startedAt: session.startedAt || new Date().toISOString(),
+          title: (loadPreparation(session.dir).goal || '').slice(0, 60),
+          app: (cfg.activeApp || cfg.processName || ''),
+        })
+      } catch { /* ignore */ }
       return {
         ok: true,
         result: `后台大脑已启动\n· 策略：${cfg.policy}（auto 才会自动播报）\n· LLM：${completer ? '已配置' : '未配置，用规则+模板'}\n· 唤醒词：${brain.names.join('/')}`,
@@ -3046,6 +3108,7 @@ export function apply(ctx, config) {
       const elapsed = Math.round((Date.now() - t0) / 1000)
       logger?.info?.('[soulmirror] 离线转写完成：' + lines.length + ' 句，耗时 ' + elapsed + ' 秒')
       const speakers = new Set(lines.map((x) => x.speaker).filter(Boolean)).size
+      try { saveMeta(dir, { speakers, lines: lines.length, offlineAt: new Date().toISOString() }) } catch { /* ignore */ }
       return { ok: true, sentences: lines.length, speakers, mode, seconds: Math.round(seconds), elapsed, md, minutesPath: savedPath }
     } catch (e) {
       logger?.warn?.('[soulmirror] 离线转写失败：' + e.message)
@@ -3080,6 +3143,15 @@ export function apply(ctx, config) {
         if (ws.dir) await saveMinutes(join(ws.dir, 'minutes.md'), md)
       } catch { /* ignore */ }
     }
+
+    // 记录会议结束信息（回看要用）
+    try {
+      const startedMs = Date.parse(loadMeta(session.dir)?.startedAt || '') || Date.now()
+      saveMeta(session.dir, {
+        endedAt: new Date().toISOString(),
+        durationMin: Math.max(1, Math.round((Date.now() - startedMs) / 60000)),
+      })
+    } catch { /* ignore */ }
 
     // 1.5) 会后离线重转写：用整场录音补全实时那条线可能漏掉的句子
     try {

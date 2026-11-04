@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 面板渲染冒烟：真正执行每个面板组件（含 380px 侧栏 CompactPanel）。
  * 之前的白屏 bug 是"组件里用了未声明的变量 followBig"——语法检查发现不了，
  * 只有真正调用组件函数才会抛 ReferenceError。这个测试就是防这个。
@@ -157,7 +157,7 @@ test('DevicePicker 能渲染', () => {
 
 test('所有导出的面板组件都能在默认 props 下渲染', () => {
   const { exp } = loadClient()
-  const names = ['PanelIcon', 'LiveDock', 'SettingsSection', 'SetupCard', 'DevicePicker', 'CompactPanel', 'MeetingPage', 'Overlay']
+  const names = ['PanelIcon', 'LiveDock', 'SettingsSection', 'SetupCard', 'DevicePicker', 'StatusStrip', 'AfterMeetingCard', 'PrepareCard', 'RecordsCard', 'CompactPanel', 'MeetingPage', 'Overlay']
   for (const name of names) {
     const comp = exp.__test[name]
     assert.ok(comp, name + ' 未导出')
