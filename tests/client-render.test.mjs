@@ -140,6 +140,31 @@ test('live 状态必须能承载 mode（否则模式按钮切换后界面读不�
   live.set({ enabled: false })
 })
 
+test('SetupCard 能渲染（含 compact 模式）—— 防 props 未接线导致白屏', () => {
+  const { exp } = loadClient()
+  for (const props of [{}, { compact: true }]) {
+    const out = exp.__test.SetupCard(props)
+    assert.ok(out, '应返回节点')
+  }
+})
+
+test('DevicePicker 能渲染', () => {
+  const { exp } = loadClient()
+  for (const props of [{}, { wide: true, value: '扬声器' }]) {
+    assert.ok(exp.__test.DevicePicker(props))
+  }
+})
+
+test('所有导出的面板组件都能在默认 props 下渲染', () => {
+  const { exp } = loadClient()
+  const names = ['PanelIcon', 'LiveDock', 'SettingsSection', 'SetupCard', 'DevicePicker', 'CompactPanel', 'MeetingPage', 'Overlay']
+  for (const name of names) {
+    const comp = exp.__test[name]
+    assert.ok(comp, name + ' 未导出')
+    assert.doesNotThrow(() => comp({}), name + ' 渲染抛错')
+  }
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test
