@@ -37,6 +37,7 @@ import { saveMinutes } from './lib/minutes-file.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
+import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
 import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
@@ -349,7 +350,9 @@ export function apply(ctx, config) {
       devices: cfg.devices,
       asr: {
         provider: cfg.asr.provider,
-        model: cfg.asr.dashscopeModel,
+        // 显示真实下发的模型，而不是另一个字段
+        model: resolveAsrModel(cfg.asr),
+        dashscopeModel: cfg.asr.dashscopeModel,
         baseUrl: cfg.asr.baseUrl,
         apiKeyEnv: cfg.asr.apiKeyEnv,
         apiKey: '',
@@ -573,7 +576,7 @@ export function apply(ctx, config) {
             codeSource: codeInfo.source,
             inMeeting: await meetingActive(liveApp, statusWins),
           },
-          models: { asr: cfg.asr.provider + ' / ' + (cfg.asr.dashscopeModel || cfg.asr.model), tts: cfg.tts.provider + ' / ' + cfg.tts.model + ' / ' + cfg.tts.voice },
+          models: { asr: cfg.asr.provider + ' / ' + resolveAsrModel(cfg.asr), tts: cfg.tts.provider + ' / ' + cfg.tts.model + ' / ' + cfg.tts.voice },
           devices: { capture: cfg.devices.capture || '默认渲染设备', speak: cfg.devices.speak },
           brain: brain.stats,
           agent,
@@ -826,7 +829,8 @@ export function apply(ctx, config) {
           const key = cfg.asr.apiKey || process.env[cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY']
           if (!key) return json(200, { ok: false, error: '未配置 Key' })
           try {
-            const a = startDashScopeAsr({ apiKey: key, model: cfg.asr.dashscopeModel || 'paraformer-realtime-v2' })
+            // 和真实采集用同一个解析，避免"测试通过、开会却用另一个模型"
+            const a = startDashScopeAsr({ apiKey: key, model: resolveAsrModel(cfg.asr) })
             await a.open()
             await a.finish()
             return json(200, { ok: true })
@@ -838,6 +842,8 @@ export function apply(ctx, config) {
         const buf2 = []
         for await (const chunk of req) buf2.push(chunk)
         const patch = JSON.parse(Buffer.concat(buf2).toString('utf8') || '{}')
+        // 保存时把 ASR 模型的两个字段对齐，避免旧字段读到过期值
+        if (patch.asr) patch.asr = withSyncedModel({ ...cfg.asr, ...patch.asr })
         savePersisted(patch)
         return json(200, publicConfig())
       }
