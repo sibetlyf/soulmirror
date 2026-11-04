@@ -43,6 +43,7 @@ import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, load
 import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
 import { buildSnapshot } from './lib/context-snapshot.js'
 import { createDshCompleter } from './lib/dsh-llm.js'
+import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advice.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -711,6 +712,18 @@ export function apply(ctx, config) {
       if (req.method === 'GET' && sub === 'prepare') {
         return json(200, loadPreparation(session.dir || lastSessionDir))
       }
+      // 会中建议：GET 取缓存，POST 生成一次
+      if (sub === 'advice') {
+        if (req.method === 'GET') {
+          return json(200, { ok: true, ...adviceState, lastLlmError })
+        }
+        const bufA = []
+        for await (const chunk of req) bufA.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufA).toString('utf8') || '{}')
+        const r = await generateAdvice({ force: !!body.force })
+        return json(200, r)
+      }
+
       if (req.method === 'POST' && sub === 'context') {
         const bufC = []
         for await (const chunk of req) bufC.push(chunk)
@@ -3108,6 +3121,53 @@ export function apply(ctx, config) {
       } catch { /* 退化为抽取式 */ }
     }
     return '## 会议要点（抽取式）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
+  }
+
+  // ── 会中建议（追问 / 回应）与模型错误 ──────────────────────────
+  // 模型失败必须能看见：只写日志等于没写，用户只会觉得"没反应"
+  let lastLlmError = null
+  let adviceState = { at: 0, questions: [], replies: [], lines: 0, error: '', busy: false }
+
+  function noteLlmError(stage, err) {
+    lastLlmError = { at: new Date().toISOString(), stage, message: String(err && err.message ? err.message : err).slice(0, 300) }
+    logger?.warn?.('[soulmirror] ' + stage + ' 失败：' + lastLlmError.message)
+  }
+
+  async function generateAdvice({ force = false } = {}) {
+    if (adviceState.busy) return { ok: false, error: '上一次生成还没结束' }
+    if (!completer) return { ok: false, error: '没有可用模型：先在设置里配置 brain.provider / brain.model' }
+    const linesAll = session.transcript || []
+    if (linesAll.length === 0) return { ok: false, error: '还没有转写内容' }
+
+    adviceState.busy = true
+    try {
+      const prep = loadPreparation(session.dir || lastSessionDir)
+      const msgs = buildAdvicePrompt({ goal: prep.goal, invite: prep.invite, lines: linesAll, maxLines: 40 })
+      const raw = await completer(msgs)
+      const parsed = parseAdvice(raw)
+      if (!shouldReplaceAdvice(parsed)) {
+        const msg = '模型没有给出可用建议（可能内容太少）'
+        adviceState = { ...adviceState, at: Date.now(), error: msg, busy: false, lines: linesAll.length }
+        return { ok: false, error: msg, raw: String(raw || '').slice(0, 500) }
+      }
+      adviceState = {
+        at: Date.now(),
+        questions: parsed.questions,
+        replies: parsed.replies,
+        lines: linesAll.length,
+        error: '',
+        busy: false,
+      }
+      lastLlmError = null
+      logger?.info?.('[soulmirror] 已生成建议：追问 ' + parsed.questions.length + ' 条，回应 ' + parsed.replies.length + ' 条')
+      return { ok: true, ...adviceState }
+    } catch (e) {
+      noteLlmError('生成建议', e)
+      adviceState = { ...adviceState, at: Date.now(), error: e.message, busy: false }
+      return { ok: false, error: e.message }
+    } finally {
+      adviceState.busy = false
+    }
   }
 
   /**

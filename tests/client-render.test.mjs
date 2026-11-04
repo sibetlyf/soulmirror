@@ -249,6 +249,25 @@ test('流式那一行有打字机效果与光标（不是整句突然出现）',
   assert.ok(source.includes('@keyframes smCaret'), '缺少光标闪烁动画')
 })
 
+test('追问 / 回应 / 转写 三视图都在，且能切换', () => {
+  const { exp } = loadClient()
+  const panels = exp.__test
+  assert.ok(panels.AdviceViews, '缺少 AdviceViews 测试出口')
+  const text = textOf(panels.AdviceViews({ lines: [{ t: '2026-11-04T07:36:00.000Z', text: '你好' }] })).join(' ')
+  assert.ok(text.includes('追问'), '缺少追问视图')
+  assert.ok(text.includes('回应'), '缺少回应视图')
+  assert.ok(text.includes('转写'), '缺少转写视图')
+  assert.ok(text.includes('刷新建议'), '缺少手动生成入口')
+})
+
+test('模型调用失败必须在界面上可见（不能只写日志）', () => {
+  const { exp } = loadClient()
+  const strip = exp.__test.StatusStrip
+  const text = textOf(strip({ state: { session: { asr: { online: true } }, lastLlmError: { stage: '生成建议', message: 'insufficient_quota', at: 'x' } } })).join(' ')
+  assert.ok(text.includes('模型调用失败'), '缺少失败提示')
+  assert.ok(text.includes('insufficient_quota'), '提示里要带真实原因')
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test
