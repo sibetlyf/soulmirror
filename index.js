@@ -642,6 +642,7 @@ export function apply(ctx, config) {
           lastLlmError,
           lastSpeakError,
           lastSpeakInfo,
+          postMeeting,
           brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
@@ -1040,8 +1041,20 @@ export function apply(ctx, config) {
           cfg.enabled = false
           cfg.autoWatch = false
           lifecycle.stop()
+          const stoppedDir = session.dir || ''
+          const hadAudio = !!session.capturing
           try { await session.stopCapture() } catch { /* ignore */ }
           logger?.info?.('[soulmirror] 已关闭会议功能（disarmed），不再自动操作')
+          // 用户点"结束录音"= 这场会开完了：直接开始会后整理（离线重转写 + 纪要 + 知识库）
+          if (hadAudio && stoppedDir) {
+            setPostMeeting({ phase: 'stopping', dir: stoppedDir, error: '' })
+            finalizeMeeting({ speak: false, writeKnowledge: true })
+              .then((r) => {
+                setPostMeeting({ phase: 'done', minutesPath: (r && r.minutes) || postMeeting.minutesPath })
+                logger?.info?.('[soulmirror] 结束后整理完成：' + JSON.stringify(r).slice(0, 160))
+              })
+              .catch((e) => setPostMeeting({ phase: 'error', error: e.message }))
+          }
         }
         try { savePersisted({ autoWatch: cfg.autoWatch, enabled: cfg.enabled }) } catch { /* ignore */ }
         return json(200, { ok: true, enabled: cfg.enabled === true, armed, auto: !!(cfg.autoWatch && lifecycle.timer), lifecycle: lifecycle.snapshot() })
@@ -3564,6 +3577,11 @@ export function apply(ctx, config) {
    * 会后离线重转写：拿整场录音按 4 倍速重跑一遍识别，得到完整句子，再生成纪要。
    * 实时那条线的价值是"边开边看"；这条线的价值是"结束后不漏句"。
    */
+  // 会后整理进度：点"结束录音"后依次做 离线重转写 → 纪要 → 知识库
+  // 之前这些步骤只在会议窗口退出时触发，用户点结束录音后完全没反应、也没进度可看
+  let postMeeting = { phase: 'idle', at: 0, error: '', sentences: 0, speakers: 0, minutesPath: '', dir: '' }
+  const setPostMeeting = (patch) => { postMeeting = { ...postMeeting, ...patch, at: Date.now() } }
+
   let offlineBusy = false
   async function runOfflinePass(dir = session.dir) {
     if (offlineBusy) return { ok: false, error: '上一次离线转写还没结束' }
@@ -3574,6 +3592,7 @@ export function apply(ctx, config) {
     if (!key) return { ok: false, error: '缺少语音识别密钥' }
 
     offlineBusy = true
+    setPostMeeting({ phase: 'offline', error: '', dir })
     const t0 = Date.now()
     try {
       const { seconds } = readWavPcm(wav)
@@ -3608,11 +3627,13 @@ export function apply(ctx, config) {
       }
       const elapsed = Math.round((Date.now() - t0) / 1000)
       logger?.info?.('[soulmirror] 离线转写完成：' + lines.length + ' 句，耗时 ' + elapsed + ' 秒')
+      setPostMeeting({ phase: 'minutes', sentences: lines.length, speakers: speakers })
       const speakers = new Set(lines.map((x) => x.speaker).filter(Boolean)).size
       try { saveMeta(dir, { speakers, lines: lines.length, offlineAt: new Date().toISOString() }) } catch { /* ignore */ }
       return { ok: true, sentences: lines.length, speakers, mode, seconds: Math.round(seconds), elapsed, md, minutesPath: savedPath }
     } catch (e) {
       logger?.warn?.('[soulmirror] 离线转写失败：' + e.message)
+      setPostMeeting({ phase: 'error', error: '离线转写失败：' + e.message })
       return { ok: false, error: e.message }
     } finally {
       offlineBusy = false

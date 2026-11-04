@@ -44,7 +44,7 @@ async function call(method, url, body) {
 test('/status 必须暴露两个开关与发言失败原因', async () => {
   const r = await call('GET', '/api/soulmirror/status')
   assert.equal(r.status, 200)
-  for (const key of ['advice', 'reply', 'replyState', 'adviceState', 'lastSpeakError', 'lastSpeakInfo', 'lastLlmError', 'brainModel']) {
+  for (const key of ['advice', 'reply', 'replyState', 'adviceState', 'lastSpeakError', 'lastSpeakInfo', 'lastLlmError', 'brainModel', 'postMeeting']) {
     assert.ok(key in r.body, '/status 缺少字段 ' + key)
   }
   assert.equal(typeof r.body.reply.autoSpeak, 'boolean', 'autoSpeak 要能被界面读到')
@@ -67,5 +67,15 @@ test('Agent 默认全自动开口：autoSpeak 默认 true', async () => {
   assert.equal(cfg.body.reply.autoSpeak, true, 'Agent 不应该需要手动点才说话')
   assert.equal(cfg.body.reply.candidates, 1, '直接开口时给一条候选就够')
   assert.equal(cfg.body.advice.enabled, true, '建议卡片是默认开的（给用户看）')
+})
+
+test('postMeeting 初始为 idle；结束录音后会进入 stopping/offline 等阶段', async () => {
+  const st = await call('GET', '/api/soulmirror/status')
+  assert.equal(st.body.postMeeting.phase, 'idle', '初始应该是 idle')
+  // 触发一次"结束录音"（没有在采集时不应崩，也不该误报阶段）
+  const r = await call('POST', '/api/soulmirror/auto', { action: 'stop' })
+  assert.equal(r.status, 200)
+  const st2 = await call('GET', '/api/soulmirror/status')
+  assert.ok(['idle', 'stopping', 'offline', 'minutes', 'done', 'error'].includes(st2.body.postMeeting.phase))
 })
 test.after(() => { try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ } })
