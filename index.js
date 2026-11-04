@@ -20,7 +20,7 @@ import { join } from 'node:path'
 
 const execFileAsync = promisify(execFile)
 
-import { bridge, listDevices, toolsDir, micUsage, defaultRenderDevice } from './lib/bridge.js'
+import { bridge, listDevices, toolsDir, micUsage, defaultRenderDevice, meetingMicActive } from './lib/bridge.js'
 import {
   listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
   ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect, shotWindow,
@@ -639,6 +639,7 @@ export function apply(ctx, config) {
           },
           lastLlmError,
           lastSpeakError,
+          lastSpeakInfo,
           brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
@@ -1078,6 +1079,25 @@ export function apply(ctx, config) {
         }
 
         // 触发判别自检：输入一句话，直接看会不会被当成"在等我回应"
+        // 麦克风体检：会议到底在用哪个采集设备。改完会议设置后可以立刻验证。
+        if (kind === 'mic') {
+          try {
+            const m = await meetingMicActive(cfg.processName || 'wemeetapp')
+            const devices = (m.devices || []).map((d) => String(d))
+            const cableActive = devices.some((d) => d.toLowerCase().includes('cable') && /state=1/.test(d))
+            const active = devices.filter((d) => /state=1/.test(d)).map((d) => d.split('\t')[0])
+            return json(200, {
+              ok: true,
+              meetingUsesVirtualMic: cableActive,
+              activeDevices: active,
+              devices,
+              hint: cableActive ? '会议正在用虚拟麦克风，插件发言能听到' : '会议没有用虚拟麦克风：把它改成「与系统默认相同」',
+            })
+          } catch (e) {
+            return json(200, { ok: false, error: e.message })
+          }
+        }
+
         if (kind === 'trigger') {
           const probe = String((JSON.parse(Buffer.concat(buf).toString('utf8') || '{}').text) || '你现在听到话')
           const r = detectTrigger(probe, {
@@ -3308,6 +3328,8 @@ export function apply(ctx, config) {
   let lastLlmError = null
   // 发言失败的原因：TTS 没 key、虚拟声卡没配、mic 切换失败都会落在这里
   let lastSpeakError = null
+  // 发言链路的体检结果：音频有没有进虚拟声卡、会议有没有真的在用虚拟麦克风
+  let lastSpeakInfo = null
   let adviceState = { at: 0, questions: [], replies: [], lines: 0, error: '', busy: false }
 
   // ── Agent 发言的候选词 ──────────────────────────────────────
@@ -3328,7 +3350,18 @@ export function apply(ctx, config) {
     if (cfg.policy === 'observe') return bail('policy=observe（只记不说）')
     try {
       if (cfg.devices.speak && cfg.devices.micRestore) {
-        await sayToMeeting(t, cfg.tts, { speakDevice: cfg.devices.speak, micRestore: cfg.devices.micRestore, windowTitle: cfg.windowTitle, logger })
+        const spoken = await sayToMeeting(t, cfg.tts, { speakDevice: cfg.devices.speak, micRestore: cfg.devices.micRestore, windowTitle: cfg.windowTitle, logger })
+        lastSpeakInfo = {
+          at: new Date().toISOString(),
+          switched: !!spoken.switched,
+          verified: !!spoken.verified,
+          activeDevice: spoken.activeDevice || '',
+          cableMic: spoken.cableMic || '',
+          ptt: !!spoken.ptt,
+        }
+        if (spoken.switched && !spoken.verified) {
+          logger?.warn?.('[soulmirror] 会议没有使用虚拟麦克风（当前：' + (spoken.activeDevice || '未知') + '），对方可能听不到')
+        }
       } else {
         // 没配虚拟声卡时也会播到扬声器，由 sayToMeeting 自己处理
         await sayToMeeting(t, cfg.tts, { logger })

@@ -44,7 +44,7 @@ async function call(method, url, body) {
 test('/status 必须暴露两个开关与发言失败原因', async () => {
   const r = await call('GET', '/api/soulmirror/status')
   assert.equal(r.status, 200)
-  for (const key of ['advice', 'reply', 'replyState', 'adviceState', 'lastSpeakError', 'lastLlmError', 'brainModel']) {
+  for (const key of ['advice', 'reply', 'replyState', 'adviceState', 'lastSpeakError', 'lastSpeakInfo', 'lastLlmError', 'brainModel']) {
     assert.ok(key in r.body, '/status 缺少字段 ' + key)
   }
   assert.equal(typeof r.body.reply.autoSpeak, 'boolean', 'autoSpeak 要能被界面读到')
