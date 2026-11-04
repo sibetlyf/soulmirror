@@ -50,7 +50,7 @@ import { LivingWorld } from './lib/living.js'
 import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
 import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio } from './lib/uimap.js'
 import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib/join-url.js'
-import { resolveApiKey, keyInfo } from './lib/env.js'
+import { resolveApiKey, resolveDashScopeKey, keyInfo } from './lib/env.js'
 import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
 import { findMeeting, findMeetingInEvent, AutoJoinGate } from './lib/auto-join.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
@@ -119,7 +119,7 @@ export const Config = z.object({
     /** dashscope 用：阿里云百炼实时识别模型。 */
     dashscopeModel: z.string().default('paraformer-realtime-v2'),
     /** 读取密钥的环境变量名。 */
-    apiKeyEnv: z.string().default('DSH_ASR_API_KEY'),
+    apiKeyEnv: z.string().default('DASHSCOPE_API_KEY'),
     /** 每片时长（秒）。 */
     chunkSeconds: z.number().default(6),
     lang: z.string().default('zh'),
@@ -623,6 +623,13 @@ export function apply(ctx, config) {
         const lastAgeMs = last && last.t ? Math.max(0, Date.now() - Date.parse(last.t)) : null
         const asr = snap.asr || {}
         const problems = []
+    // 缺密钥时采集根本不会启动，健康检查必须说出来
+    try {
+      if (cfg.asr.provider !== 'none' && !resolveDashScopeKey(cfg.asr).key) {
+        problems.push('缺少语音识别密钥：在「会议 → 配置 → 语音识别」填 Key，或设置环境变量 ' +
+          (cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY'))
+      }
+    } catch { /* ignore */ }
         if (cfg.enabled && session.capturing && !(asr.online)) problems.push('语音识别未连接')
         if (cfg.enabled && session.capturing && (asr.failed)) problems.push('语音识别重连失败次数用尽')
         if (lastAgeMs !== null && lastAgeMs > 120000 && session.capturing) problems.push('超过 2 分钟没有新转写')
@@ -652,6 +659,26 @@ export function apply(ctx, config) {
         })
       }
 
+      if (req.method === 'GET' && sub === 'devices') {
+        let rows = []
+        let def = ''
+        try {
+          rows = (await listDevices()).filter((d) => d.flow === 'RENDER').map((d) => ({ name: d.name, index: d.index }))
+          def = await defaultRenderDevice()
+        } catch { /* 读不到就返回空表 */ }
+        return json(200, {
+          ok: true,
+          devices: rows,
+          defaultDevice: def,
+          render: rows.map((d) => d.name),
+          capture: rows.map((d) => d.name),
+          current: cfg.devices.capture || '',
+          auto: !!cfg.devices.captureAuto,
+          note: cfg.devices.captureAuto
+            ? '自动跟随：启动时优先用此刻正在出声的设备'
+            : (cfg.devices.capture ? '已固定到你选的设备' : '未指定：按系统默认'),
+        })
+      }
       if (req.method === 'GET' && sub === 'setup') {
         const state = await collectSetupStateCached()
         const rows = buildSetupRows(state)
@@ -2344,7 +2371,7 @@ export function apply(ctx, config) {
     let key = ''
     let keySource = ''
     try {
-      const r = resolveApiKey(cfg.asr)
+      const r = resolveDashScopeKey(cfg.asr)
       key = r.key || ''
       // config / env / env:registry —— 面板要能说清"这个 key 从哪来的"
       keySource = r.source || ''
@@ -2556,7 +2583,7 @@ export function apply(ctx, config) {
     execute: wrap('meeting_agent_start', async (a) => {
       if (cfg.asr.provider === 'none') return { ok: false, result: 'ASR 未配置，无法开启' }
       if (cfg.asr.provider === 'dashscope') {
-        const key = resolveApiKey(cfg.asr).key
+        const key = resolveDashScopeKey(cfg.asr).key
         if (!key) {
           return { ok: false, result: '缺少 DashScope Key：环境变量 ' + (cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY') + ' 未设置，配置里也没有填。\n在「会议 → 配置」里填 Key 并保存，或 setx 后重启 DSH。' }
         }
@@ -3587,7 +3614,7 @@ export function apply(ctx, config) {
         const rows = installChecklist({
           configFile: !cfgFile.error,
           bridge: !!(env.tools && env.tools.mbridge),
-          key: !!resolveApiKey(cfg.asr).key,
+          key: !!resolveDashScopeKey(cfg.asr).key,
           captureDevice: cfg.devices.capture,
           virtualMic: !!(cfg.devices.speak && (cfg.devices.speak || '').toUpperCase().includes('CABLE')),
         })
