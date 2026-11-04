@@ -321,7 +321,7 @@ export function apply(ctx, config) {
       candidates: config.reply?.candidates || 1,
       cooldownMs: config.reply?.cooldownMs || 20000,
     },
-    devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
+    devices: { switchMic: true, capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || { }) },
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
       baseUrl: '', model: 'cosyvoice-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '', speed: 1, sampleRate: 16000,
@@ -3349,7 +3349,8 @@ export function apply(ctx, config) {
     if (!cfg.enabled) return bail('插件未开启')
     if (cfg.policy === 'observe') return bail('policy=observe（只记不说）')
     try {
-      if (cfg.devices.speak && cfg.devices.micRestore) {
+      // switchMic=false：会议已经把虚拟麦克风选死了，不需要每次切系统默认
+      if (cfg.devices.speak && cfg.devices.micRestore && cfg.devices.switchMic !== false) {
         const spoken = await sayToMeeting(t, cfg.tts, { speakDevice: cfg.devices.speak, micRestore: cfg.devices.micRestore, windowTitle: cfg.windowTitle, logger })
         lastSpeakInfo = {
           at: new Date().toISOString(),
