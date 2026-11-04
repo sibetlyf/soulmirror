@@ -625,6 +625,19 @@ export function apply(ctx, config) {
           autoAppSelect: cfg.autoAppSelect !== false,
           activeApp: cfg.activeApp || '',
           pendingKnowledge: (agent.pendingKnowledge || []).slice(0, 5),
+          // 两个开关、候选词、以及所有"为什么没动/没说"的原因，都要能被界面读到
+          advice: cfg.advice,
+          reply: cfg.reply,
+          replyState,
+          adviceState: {
+            at: adviceState.at,
+            questions: (adviceState.questions || []).length,
+            replies: (adviceState.replies || []).length,
+            error: adviceState.error || '',
+          },
+          lastLlmError,
+          lastSpeakError,
+          brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
           meeting: {
@@ -2712,6 +2725,9 @@ export function apply(ctx, config) {
   const httpCompleter = brainKey ? createCompleter(cfg.brain) : null
   // 优先级：显式配置的 OpenAI 兼容端点 → DSH 会话（默认）。
   // 用户明确要求"用 dsh 的 session 跑"，所以不再依赖 catalog.default 这类全局默认模型。
+  // 判定/候选词实际用的模型（由 resolveModel 填入，供界面显示）
+  let brainModel = null
+
   const sessionCompleter = makeSessionCompleter()
   const completer = httpCompleter
     || (cfg.brain.provider ? makeDshCompleter(cfg.brain) : sessionCompleter)
@@ -2827,6 +2843,9 @@ export function apply(ctx, config) {
       startTaskInBackground(r.task, { why: decision.why }).catch?.(() => {})
     }
     // autoSpeak 才真的说；否则只把候选词挂到面板上等用户点
+    if (!cfg.reply.autoSpeak && r.candidates.length) {
+      logger?.info?.('[soulmirror] 已生成候选词，等待确认（未开启自动开口）：' + r.candidates[0].slice(0, 30))
+    }
     if (cfg.reply.autoSpeak && r.candidates.length) {
       const said = await speakNow(r.candidates[0])
       if (said.ok) { replyState.spoken = r.candidates[0]; addAssistantLine(r.candidates[0], 'Agent 发言') }
@@ -3293,9 +3312,15 @@ export function apply(ctx, config) {
   /** 真正把一句话说进会议；返回 {ok,error} 便于界面反馈 */
   async function speakNow(text) {
     const t = String(text || '').trim()
-    if (!t) return { ok: false, error: '没有内容可说' }
-    if (!cfg.enabled) return { ok: false, error: '插件未开启' }
-    if (cfg.policy === 'observe') return { ok: false, error: 'policy=observe（只记不说）' }
+    // 这些"提前返回"也是失败，必须记录，否则界面一片安静
+    const bail = (why) => {
+      lastSpeakError = { at: new Date().toISOString(), message: why }
+      logger?.warn?.('[soulmirror] 未发言：' + why)
+      return { ok: false, error: why }
+    }
+    if (!t) return bail('没有内容可说')
+    if (!cfg.enabled) return bail('插件未开启')
+    if (cfg.policy === 'observe') return bail('policy=observe（只记不说）')
     try {
       if (cfg.devices.speak && cfg.devices.micRestore) {
         await sayToMeeting(t, cfg.tts, { speakDevice: cfg.devices.speak, micRestore: cfg.devices.micRestore, windowTitle: cfg.windowTitle, logger })
