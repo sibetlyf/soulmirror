@@ -63,15 +63,16 @@ test('POST /setup config 生成配置文件并回到最新清单', async () => {
   assert.ok(existsSync(join(fakeHome, '.dsh', 'soulmirror', 'config.json')), '应真的生成配置')
 })
 
-test('POST /setup key 允许留空（清空），不当作错误', async () => {
+test('POST /setup key 允许留空（清空），状态按来源如实反映', async () => {
   const r = await call('POST', '/api/soulmirror/setup', { action: 'key', value: '' })
   assert.equal(r.status, 200)
   assert.match(r.body.message, /清空|留空|不可用|已保存/)
   const key = r.body.rows.find((x) => x.id === 'key')
-  // 配置里的 key 清空后：若环境变量仍提供 key，ok 仍为 true（这是正确行为）
   const src = r.body.state.keySource || ''
-  assert.equal(key.ok, !!src && src !== 'missing' && src !== 'none',
-    '密钥可用性应跟随实际来源，来源=' + src)
+  // 三态：自己配的才算 ok；只由环境变量提供的是 auto（不打勾）；没有是 missing
+  const expected = (src === 'config') ? 'ok' : ((src === 'env' || src === 'env:registry') ? 'auto' : 'missing')
+  assert.equal(key.state, expected, '密钥状态应跟随实际来源，来源=' + src)
+  assert.equal(key.ok, expected === 'ok', '只有自己配过才打勾')
 })
 
 test('POST /setup 未知动作返回 400 而不是静默成功', async () => {

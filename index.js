@@ -2389,6 +2389,7 @@ export function apply(ctx, config) {
       key: !!key,
       keySource,
       captureDevice: cfg.devices.capture || '',
+      captureAuto: !!cfg.devices.captureAuto,
       virtualMic: /cable/i.test(String(cfg.devices.speak || '')),
       calibrated,
     }
