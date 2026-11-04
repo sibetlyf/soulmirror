@@ -34,6 +34,7 @@ import { DemoController } from './lib/demo.js'
 import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
 import { saveMinutes } from './lib/minutes-file.js'
+import { extractMeetingCode } from './lib/meeting-code.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
 import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
@@ -645,7 +646,7 @@ export function apply(ctx, config) {
       }
 
       if (req.method === 'GET' && sub === 'setup') {
-        const state = await collectSetupState()
+        const state = await collectSetupStateCached()
         const rows = buildSetupRows(state)
         return json(200, { ok: summarizeSetup(rows).ok, rows, hint: setupHint(rows), state, probe: probeJob })
       }
@@ -655,6 +656,7 @@ export function apply(ctx, config) {
         const body = JSON.parse(Buffer.concat(bufS).toString('utf8') || '{}')
         const action = String(body.action || '')
         const reply = (extra = {}) => {
+          setupCache = { at: 0, value: null }
           const stateP = collectSetupState()
           return stateP.then((state) => {
             const rows = buildSetupRows(state)
@@ -701,6 +703,7 @@ export function apply(ctx, config) {
             probeJob.best = r.best || ''
             probeJob.bestRms = r.bestRms || 0
             probeJob.error = r.ok ? '' : (r.result || '')
+            setupCache = { at: 0, value: null }
             if (r.ok && r.bestRms >= 0.004) {
               savePersisted({ devices: { capture: r.best } })
               probeJob.picked = r.best
@@ -830,9 +833,20 @@ export function apply(ctx, config) {
         const body = JSON.parse(Buffer.concat(bufM).toString('utf8') || '{}')
         if (body.detect) {
           const app = await detectMeetingApp()
-          const code = await detectMeetingCode(app)
-          codeCache = { at: Date.now(), app: app.name, code, source: code ? 'auto' : 'none' }
-          return json(200, { ok: !!code, app: app.name, code, source: code ? 'auto' : 'none' })
+          // 先做无副作用的被动扫描；读不到再按需主动点开「会议信息」
+          let code = await detectMeetingCode(app)
+          let source = code ? 'auto' : 'none'
+          let reason = ''
+          if (!code && body.active) {
+            const r = await probeMeetingCodeActive(app)
+            if (r.code) { code = r.code; source = 'auto' }
+            reason = r.reason || ''
+          }
+          codeCache = { at: Date.now(), app: app.name, code, source }
+          return json(200, {
+            ok: !!code, app: app.name, code, source, reason,
+            hint: code ? '' : '当前界面读不到会议号：可以手动填，或点「识别会议号」让我打开会议信息面板看一眼',
+          })
         }
         const code = normalizeMeetingCode(body.code || '')
         const manual = body.manual !== false
@@ -1163,31 +1177,8 @@ export function apply(ctx, config) {
   }
 
   function normalizeMeetingCode(text) {
-    const raw = String(text || "")
-    if (!raw) return ""
-  
-    // 1) 带标签的最可信：移动会议写"移动会议：379422987"，腾讯会议写"会议号 206 275 219"
-    const labeled = /(?:会议号|移动会议|会议\s*ID|会议ID|Meeting\s*ID|meeting_code)[：:\s]*([0-9][0-9\s-]{6,}[0-9])/gi
-    for (const m of raw.matchAll(labeled)) {
-      const code = m[1].replace(/[^0-9]/g, "")
-      if (code.length >= 8 && code.length <= 12) return code
-    }
-  
-    // 2) 邀请链接里的号：…/share/379422987 或 …/dm/xxx
-    const fromLink = raw.match(/\/(?:share|j)\/(\d{8,12})/)
-    if (fromLink) return fromLink[1]
-  
-    // 3) 裸号：三位一组的写法，或 9~11 位连写
-    for (const re of [/\b(\d{3}[\s-]\d{3}[\s-]\d{3,4})\b/, /\b(\d{9,11})\b/]) {
-      const m = raw.match(re)
-      if (!m) continue
-      const code = m[1].replace(/[^0-9]/g, "")
-      if (code.length < 8 || code.length > 12) continue
-      // 排除日期拼出来的假号（2026-11-02 → 2026110216）
-      if (/^(19|20)\d{2}/.test(code)) continue
-      return code
-    }
-    return ""
+    // 真正的提取逻辑在 lib/meeting-code.js（可单测），这里只做委托
+    return extractMeetingCode(text).code
   }
 
   /** 从窗口标题和剪贴板里找会议号；没有就返回空串。 */
@@ -1266,6 +1257,77 @@ export function apply(ctx, config) {
 
     // 3) 剪贴板（用户刚复制的邀请文案）
     return normalizeMeetingCode(await clipboardText())
+  }
+
+  /**
+   * 主动识别：只在用户显式点「识别会议号」时调用。
+   *
+   * 为什么需要：腾讯会议「快速会议」主界面的可访问树里压根没有会议号，
+   * 号只出现在「会议信息」面板里。被动扫描再怎么写也读不到，
+   * 必须去点开那块面板读一次，读完按 Esc 关掉。
+   *
+   * 代价：这是一次真实点击。所以绝不放在每秒轮询里。
+   */
+  let activeProbeAt = 0
+  async function probeMeetingCodeActive(app) {
+    if (!cfg.enabled) return { ok: false, code: '', reason: '插件未开启，不做界面操作' }
+    if (Date.now() - activeProbeAt < 5000) return { ok: false, code: '', reason: '刚探测过，稍等几秒' }
+    activeProbeAt = Date.now()
+
+    const opts = meetingOpts(app)
+    const wins = await listWindows().catch(() => [])
+    const proc = String(app.proc || '').toLowerCase()
+    const mine = wins.filter((w) => !proc || String(w.proc || '').toLowerCase() === proc)
+    const inMeeting = mine.filter((w) => /FloatSpeakingWnd|VideoMainWindow|MeetingView|ParticipantWnd|VideoCellWnd|MeetingMainWindow|BaseDialog/i.test(w.cls || ''))
+    const host = inMeeting[0] || mine[0]
+    if (!host) return { ok: false, code: '', reason: '没找到会议窗口' }
+
+    // 0) 面板可能已经开着：先直接扫一遍所有窗口
+    for (const w of mine.slice(0, 5)) {
+      try {
+        const text = await dump(w.title || host.title, 400, { ...opts, cls: w.cls })
+        const hit = extractMeetingCode(String(text || '').replace(/\t/g, ' '))
+        if (hit.code && hit.source === 'labeled') return { ok: true, code: hit.code, reason: '窗口里已有会议号' }
+      } catch { /* 下一个 */ }
+    }
+
+    // 1) 找「会议信息 / 详情」按钮并点开
+    const names = ['会议信息', '会议详情', '信息', '邀请']
+    let clicked = ''
+    for (const cand of names) {
+      try {
+        await click(host.title, cand, { ...opts, cls: host.cls })
+        clicked = cand
+        break
+      } catch { /* 试下一个 */ }
+    }
+    if (!clicked) {
+      return { ok: false, code: '', reason: '这个界面没有可点的「会议信息」，可能版本不同' }
+    }
+
+    // 2) 等面板出现后读文本
+    let found = ''
+    for (let i = 0; i < 6; i++) {
+      await new Promise((r) => setTimeout(r, 400))
+      const now = await listWindows().catch(() => [])
+      for (const w of now.filter((x) => !proc || String(x.proc || '').toLowerCase() === proc)) {
+        try {
+          const text = await dump(w.title || host.title, 400, { ...opts, cls: w.cls })
+          const hit = extractMeetingCode(String(text || '').replace(/\t/g, ' '))
+          if (hit.code) { found = hit.code; break }
+        } catch { /* 下一个 */ }
+      }
+      if (found) break
+    }
+
+    // 3) 关掉面板，别干扰你
+    try { await pressKey(host.title, 'escape', { ...opts, cls: host.cls }) } catch { /* ignore */ }
+
+    if (found) {
+      codeCache = { at: Date.now(), app: app.name, code: found, source: 'auto' }
+      return { ok: true, code: found, reason: '打开「' + clicked + '」读到了' }
+    }
+    return { ok: false, code: '', reason: '打开了「' + clicked + '」但没读到会议号' }
   }
 
   let codeCache = { at: 0, app: '', code: '', source: 'none' }
@@ -2220,13 +2282,26 @@ export function apply(ctx, config) {
     }
     : probeRenderDevices
 
+  // 体检状态缓存：面板轮询时不要每次重新探测环境
+  let setupCache = { at: 0, value: null }
+  async function collectSetupStateCached() {
+    if (setupCache.value && Date.now() - setupCache.at < 2000) return setupCache.value
+    const v = await collectSetupState()
+    setupCache = { at: Date.now(), value: v }
+    return v
+  }
+
   // 设备试听要十几秒，不能同步等：立即返回 + 这里记进度，面板轮询
   let probeJob = { running: false, total: 0, done: 0, last: '', rows: [], best: '', error: '', at: 0 }
 
   /** 当前安装状态：给面板体检用，也可被 soul_setup report 复用 */
   async function collectSetupState() {
+    // 只做文件存在性判断：detectEnv() 里有 which() 子进程，轮询时太慢
     let bridge = false
-    try { bridge = !!(detectEnv().tools || {}).mbridge } catch { /* ignore */ }
+    try {
+      const { toolsDir } = await import('./lib/bridge.js')
+      bridge = existsSync(join(toolsDir, 'mbridge.exe'))
+    } catch { /* ignore */ }
     let key = ''
     let keySource = ''
     try {

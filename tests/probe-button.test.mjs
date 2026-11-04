@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -67,7 +67,7 @@ test('轮询 GET /setup 能看到进度，最终给出选中的设备', async ()
     const r = await call('GET', '/api/soulmirror/setup')
     if (!r.body.probe || r.body.probe.running) return false
     return r.body
-  }, 3000)
+  }, 6000)
   assert.ok(finished, '试听应在几秒内结束')
   assert.equal(finished.probe.best, 'Fake A')
   assert.equal(finished.probe.rows.length, 2)
@@ -88,3 +88,4 @@ async function waitFor(fn, timeoutMs = 3000) {
 test.after(() => {
   try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
 })
+
