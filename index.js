@@ -16,7 +16,8 @@ import { appendFile, mkdir, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 
@@ -47,6 +48,7 @@ import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advic
 import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
+import { petStateFromStatus, petMenuFromStatus } from './lib/pet-state.js'
 import { resolveDefaultModel } from './lib/model-resolve.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd, detectKnowledgeCwd } from './lib/workspace.js'
@@ -304,6 +306,8 @@ export function apply(ctx, config) {
     meetingProcs: Array.isArray(config.meetingProcs) ? config.meetingProcs : [],
     // 转写上下文：默认不自动送进会话（每送一次都是一轮真实对话，会产生费用）
     // agent 的工作目录：留空则自动对齐知识库（能直接看文档/制品）
+    // 桌面宠物：可选。用一个小窗口显示会议助手的状态，并可直接操作。
+    pet: { enabled: Boolean(config.pet?.enabled), url: String(config.pet?.url || ''), x: Number(config.pet?.x || 0), y: Number(config.pet?.y || 0) },
     workspace: { cwd: String(config.workspace?.cwd || '') },
     context: { autoInject: false, everyMs: 60000, maxLines: 20, maxChars: 4000, ...(config.context || {}) },
     // 建议卡片：给"人"看的，自动生成、可关
@@ -643,6 +647,7 @@ export function apply(ctx, config) {
           lastSpeakError,
           lastSpeakInfo,
           postMeeting,
+          pet: { running: !!petProc, enabled: !!cfg.pet.enabled },
           brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
@@ -1094,7 +1099,8 @@ export function apply(ctx, config) {
         }
 
         // 触发判别自检：输入一句话，直接看会不会被当成"在等我回应"
-        // 麦克风体检：会议到底在用哪个采集设备。改完会议设置后可以立刻验证。
+
+      // 麦克风体检：会议到底在用哪个采集设备。改完会议设置后可以立刻验证。
         if (kind === 'mic') {
           try {
             const m = await meetingMicActive(cfg.processName || 'wemeetapp')
@@ -1230,6 +1236,22 @@ export function apply(ctx, config) {
         const r = await joinTool.execute({ code, app: app.name, displayName: cfg.userName || '', confirm: true })
         return json(200, { ...r, code, app: app.name })
       }
+      // 桌面宠物：GET 取当前表情与菜单状态，POST 启停
+      if (sub === 'pet') {
+        if (req.method === 'POST') {
+          const bufPet = []
+          for await (const chunk of req) bufPet.push(chunk)
+          const bodyPet = JSON.parse(Buffer.concat(bufPet).toString('utf8') || '{}')
+          if (bodyPet.enabled === false) { stopPet(); return json(200, { ok: true, running: false }) }
+          if (bodyPet.enabled === true) {
+            const rPet = await startPet()
+            return json(200, { ok: rPet.ok, running: !!petProc, error: rPet.error || '' })
+          }
+        }
+        const sPet = petState()
+        return json(200, { ok: true, running: !!petProc, enabled: !!cfg.pet.enabled, ...sPet })
+      }
+
       return json(404, { error: 'not found' })
     } catch (e) {
       return json(500, { error: e.message })
@@ -1779,8 +1801,75 @@ export function apply(ctx, config) {
     }
   }
 
+    // ── 桌面宠物 ──────────────────────────────────────────────
+    // 可选功能：一个独立的小窗口显示状态、并提供常用操作。
+    // 窗口本身是 tools/pet.exe（WinForms，csc 编译，零依赖），这里只负责拉起与关闭。
+    let petProc = null
+
+    function petState() {
+    try {
+    return {
+    state: petStateFromStatus({
+    session, meeting, reply: cfg.reply, advice: cfg.advice,
+    replyState, adviceState, lastSpeakError, lastSpeakInfo, lastLlmError,
+    postMeeting,
+    }),
+    menu: petMenuFromStatus({ session, reply: cfg.reply, advice: cfg.advice }),
+    }
+    } catch (e) { return { state: { key: 'error', face: 'error', label: '状态异常', color: '#dc2626', text: e.message, hint: '' }, menu: {} } }
+    }
+
+    async function startPet() {
+    if (petProc) return { ok: true, already: true, pid: petProc.pid }
+    const exe = join(dirname(fileURLToPath(import.meta.url)), 'tools', 'pet.exe')
+    if (!existsSync(exe)) return { ok: false, error: '找不到 tools/pet.exe，请先编译（csc /target:winexe tools/pet.cs）' }
+    const { spawn } = await import("node:child_process")
+    const port = ctx.webServer?.port || 3080
+    const url = cfg.pet.url || ('http://127.0.0.1:' + port)
+    petProc = spawn(exe, ["--url=" + url], { detached: false, stdio: "ignore" })
+    petProc.on("exit", () => { petProc = null })
+    cfg.pet.enabled = true
+    try { savePersisted({ pet: cfg.pet }) } catch { /* ignore */ }
+    logger?.info?.('[soulmirror] 桌面宠物已启动 pid=' + petProc.pid)
+    return { ok: true, pid: petProc.pid, url }
+    }
+
+    function stopPet() {
+    if (petProc) { try { petProc.kill() } catch { /* ignore */ } petProc = null }
+    cfg.pet.enabled = false
+    try { savePersisted({ pet: cfg.pet }) } catch { /* ignore */ }
+    return { ok: true }
+    }
+
   // ── 状态 ────────────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
+    name: 'meeting_pet',
+    description: '桌面宠物：可选的小窗口，实时显示会议助手的状态（在听/说话/整理中/出错），并可直接开始录音、结束录音、切换 Agent 与建议开关。action=start 打开，stop 关闭，status 查看当前表情与状态。',
+    parameters: {
+      action: { type: 'string', required: true, description: 'start | stop | status' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_pet', async (a) => {
+      const action = String(a.action || '').trim()
+      if (action === 'start') {
+        const r = await startPet()
+        if (!r.ok) return { ok: false, result: r.error }
+        return { ok: true, result: r.already ? '桌面宠物已在运行' : ('桌面宠物已打开（pid ' + r.pid + '）') }
+      }
+      if (action === 'stop') {
+        stopPet()
+        return { ok: true, result: '桌面宠物已关闭' }
+      }
+      if (action === 'status') {
+        const s = petState()
+        return { ok: true, result: s.state.label + (s.state.text ? '：' + s.state.text : '') + '（' + (petProc ? '运行中' : '未运行') + '）', ...s }
+      }
+      return { ok: false, result: '未知 action：' + action }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+
     name: 'meeting_status',
     description: '会议代理状态：识别当前桌面上的会议窗口、音频设备与转写/发言配置是否就绪。操作会议前先调用它确认环境。',
     parameters: {},
@@ -3834,6 +3923,8 @@ export function apply(ctx, config) {
   )
   // 恢复上次的开关状态：上次开着就继续开，上次关着就保持待命
   if (cfg.enabled === true) armed = true
+  // 桌面宠物是可选项：上次开着就自动恢复
+  if (cfg.pet.enabled === true) startPet().catch((e) => logger?.warn?.('[soulmirror] 宠物启动失败: ' + e.message))
   // 只在总开关打开时才轮询窗口，关闭时完全不碰桌面
   if (cfg.enabled && cfg.autoWatch && process.env.SOULMIRROR_TEST !== '1') lifecycle.start()
 
