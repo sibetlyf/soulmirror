@@ -204,6 +204,33 @@ test('StatusStrip 能反映连接状态（这是"一点提示都没有"的修复
   assert.match(noAudioText, /还没有转写/)
 })
 
+test('大页面必须保留会议接入、会议号、模式开关（防"功能被折叠弄丢"）', () => {
+  const { exp } = loadClient()
+  const text = textOf(exp.__test.MeetingPage({})).join(' ')
+  // 顶层可见标签（Card 是函数组件，假 React 不展开其子节点，所以只查顶层）
+  for (const label of ['会议助手', '会议接入', '会议号', '软件', '只转录']) {
+    assert.ok(text.includes(label), '大页面缺少「' + label + '」')
+  }
+  // 卡片里的交互入口用源码静态断言（渲染层面测不到）
+  const source = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
+  for (const need of ["'入会'", 'switchMode(', "'自动识别会议号'", 'React.createElement(DevicePicker']) {
+    assert.ok(source.includes(need), '大页面缺少源码入口 ' + need)
+  }
+  // 模式开关两个按钮都要在
+  assert.ok(text.includes('Agent') || text.includes('agent'), '大页面缺少 Agent 模式开关')
+})
+
+test('小窗必须保留去大页面的入口', () => {
+  const { exp } = loadClient()
+  const tree = exp.__test.CompactPanel({ onExpand() {}, onClose() {} })
+  const text = textOf(tree).join(' ')
+  assert.ok(text.includes('会议助手'), '小窗缺少标题')
+  assert.ok(text.includes('开始录音') || text.includes('结束录音'), '小窗缺少录音按钮')
+  assert.ok(text.includes('转写'), '小窗缺少转写标签')
+  // ⤢ 是展开按钮，不能丢
+  assert.ok(text.includes('⤢'), '小窗缺少「打开大页面」按钮')
+})
+
 test('小窗 / 大页面 / Overlay 都能渲染', () => {
   const { exp } = loadClient()
   const { CompactPanel, MeetingPage, Overlay } = exp.__test

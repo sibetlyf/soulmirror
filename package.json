@@ -1,6 +1,6 @@
-{
+﻿{
   "name": "soulmirror",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "SoulMirror 会议助手：实时转写、会议识别、对话开会、可选的 Agent 自动回复、会后归档；内置演练模式，不装会议软件也能验证",
   "type": "module",
   "main": "index.js",
