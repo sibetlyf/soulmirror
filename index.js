@@ -38,6 +38,7 @@ import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
 import { readWavPcm, transcribeOffline, buildOfflineMinutes } from './lib/offline-asr.js'
+import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -688,6 +689,10 @@ export function apply(ctx, config) {
         const state = await collectSetupStateCached()
         const rows = buildSetupRows(state)
         return json(200, { ok: summarizeSetup(rows).ok, rows, hint: setupHint(rows), state, probe: probeJob })
+      }
+      if (req.method === 'POST' && sub === 'offline') {
+        const r = await runOfflinePass(session.dir)
+        return json(200, r)
       }
       if (req.method === 'POST' && sub === 'setup') {
         const bufS = []
@@ -3008,12 +3013,31 @@ export function apply(ctx, config) {
     offlineBusy = true
     const t0 = Date.now()
     try {
-      const { pcm, seconds } = readWavPcm(wav)
-      logger?.info?.('[soulmirror] 会后离线转写开始：' + Math.round(seconds) + ' 秒音频')
-      const r = await transcribeOffline({ apiKey: key, model: resolveAsrModel(cfg.asr), pcm, sampleRate: 16000, speed: 4 })
-      const lines = (r.sentences || []).filter((x) => x.text)
+      const { seconds } = readWavPcm(wav)
+      logger?.info?.('[soulmirror] 会后重转写开始（云端文件识别 + 说话人分离）：' + Math.round(seconds) + ' 秒音频')
+
+      // 优先用云端文件识别：能分人、断句更准
+      let lines = []
+      let mode = 'file'
+      try {
+        const r = await transcribeFileWithSpeakers({
+          apiKey: key,
+          file: readFileSync(wav),
+          fileName: 'meeting.wav',
+          languageHints: ['zh', 'en'],
+        })
+        lines = (r.sentences || []).filter((x) => x.text)
+      } catch (e) {
+        // 云端失败就退回本地快速重放（至少不丢功能）
+        logger?.warn?.('[soulmirror] 云端文件识别失败，回退到本地重放：' + e.message)
+        mode = 'replay'
+        const { pcm } = readWavPcm(wav)
+        const r2 = await transcribeOffline({ apiKey: key, model: resolveAsrModel(cfg.asr), pcm, sampleRate: 16000, speed: 4 })
+        lines = (r2.sentences || []).filter((x) => x.text).map((x) => ({ ...x, speaker: '' }))
+      }
+
       await writeFile(join(dir, 'transcript-offline.jsonl'), lines.map((x) => JSON.stringify(x)).join('\n') + (lines.length ? '\n' : ''), 'utf8').catch(() => {})
-      const md = await buildOfflineMinutes({ sentences: lines, completer })
+      const md = await buildOfflineMinutes({ sentences: lines.map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text })), completer })
       let savedPath = ''
       if (md) {
         const saved = await saveMinutes(join(dir, 'minutes.md'), md)
@@ -3021,7 +3045,8 @@ export function apply(ctx, config) {
       }
       const elapsed = Math.round((Date.now() - t0) / 1000)
       logger?.info?.('[soulmirror] 离线转写完成：' + lines.length + ' 句，耗时 ' + elapsed + ' 秒')
-      return { ok: true, sentences: lines.length, seconds: Math.round(seconds), elapsed, md, minutesPath: savedPath }
+      const speakers = new Set(lines.map((x) => x.speaker).filter(Boolean)).size
+      return { ok: true, sentences: lines.length, speakers, mode, seconds: Math.round(seconds), elapsed, md, minutesPath: savedPath }
     } catch (e) {
       logger?.warn?.('[soulmirror] 离线转写失败：' + e.message)
       return { ok: false, error: e.message }
@@ -3038,7 +3063,7 @@ export function apply(ctx, config) {
     if (Date.now() - lastFinalizedAt < 60000) return { skipped: '刚刚收尾过' }
     finalizing = true
     try {
-    const md = await buildMinutes()
+    let md = await buildMinutes()
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
     const title = (cfg.knowledge.titlePrefix || '会议纪要') + ' · ' + stamp
     const results = { minutes: '', knowledge: '', persona: '' }
@@ -3060,8 +3085,13 @@ export function apply(ctx, config) {
     try {
       const off = await runOfflinePass(session.dir)
       if (off.ok) {
-        results.offline = '离线重转写：' + off.sentences + ' 句（' + off.seconds + ' 秒音频，用时 ' + off.elapsed + ' 秒）'
+        results.offline = '会后重转写：' + off.sentences + ' 句' +
+          (off.speakers ? '（' + off.speakers + ' 位说话人）' : '') +
+          '，' + off.seconds + ' 秒音频，用时 ' + off.elapsed + ' 秒' +
+          (off.mode === 'replay' ? '（云端不可用，本地重放）' : '')
         if (off.minutesPath) results.minutes = off.minutesPath
+        // 会后重转写的纪要比实时版更完整（含说话人），优先把它写进知识库
+        if (off.md) md = off.md
       } else if (off.error) {
         results.offline = '跳过：' + off.error
       }
