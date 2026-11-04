@@ -12,7 +12,7 @@
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, writeFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
@@ -37,6 +37,7 @@ import { saveMinutes } from './lib/minutes-file.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
+import { readWavPcm, transcribeOffline, buildOfflineMinutes } from './lib/offline-asr.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -2471,9 +2472,20 @@ export function apply(ctx, config) {
   const completer = (cfg.brain.provider ? makeDshCompleter(cfg.brain) : null) || httpCompleter || makeDshCompleter(cfg.brain)
 
   // 注意：必须在 completer 初始化之后再装配纠错器，否则会踩 TDZ
-  session.correctText = (cfg.asr.llmCorrect === false || !completer)
+  //
+  // 纠错只在 agent 模式下有意义（它要理解语义再决定是否接话）。
+  // 只转录模式每句都等一次模型 = 纯粹增加延迟，所以直接跳过。
+  // mode 可以在运行时切换，因此判断放在函数内部，而不是装配时。
+  const corrector = (cfg.asr.llmCorrect === false || !completer)
     ? null
     : makeCorrector({ names: fixNames, context: (cfg.asr.context || '') + (currentPersona() ? '\n' + currentPersona().slice(0, 800) : ''), completer })
+
+  session.correctText = corrector
+    ? async (text) => {
+      if (cfg.mode !== 'agent') return '' // 只转录：原样落库，不做任何模型调用
+      return corrector(text)
+    }
+    : null
   const agent = { running: false, lastDecision: null, spoken: 0, errors: 0 }
   // 同一段话 5 分钟内不重复播；同样内容的展示行 30 秒内不重复插
   const speechGuard = new SpeechDeduper({ windowMs: 5 * 60 * 1000 })
@@ -2980,6 +2992,44 @@ export function apply(ctx, config) {
     return '## 会议要点（抽取式）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
   }
 
+  /**
+   * 会后离线重转写：拿整场录音按 4 倍速重跑一遍识别，得到完整句子，再生成纪要。
+   * 实时那条线的价值是"边开边看"；这条线的价值是"结束后不漏句"。
+   */
+  let offlineBusy = false
+  async function runOfflinePass(dir = session.dir) {
+    if (offlineBusy) return { ok: false, error: '上一次离线转写还没结束' }
+    if (!dir) return { ok: false, error: '没有会议目录' }
+    const wav = join(dir, 'audio.wav')
+    if (!existsSync(wav)) return { ok: false, error: '没有录音文件（本次可能没采到音频）' }
+    const key = resolveDashScopeKey(cfg.asr).key
+    if (!key) return { ok: false, error: '缺少语音识别密钥' }
+
+    offlineBusy = true
+    const t0 = Date.now()
+    try {
+      const { pcm, seconds } = readWavPcm(wav)
+      logger?.info?.('[soulmirror] 会后离线转写开始：' + Math.round(seconds) + ' 秒音频')
+      const r = await transcribeOffline({ apiKey: key, model: resolveAsrModel(cfg.asr), pcm, sampleRate: 16000, speed: 4 })
+      const lines = (r.sentences || []).filter((x) => x.text)
+      await writeFile(join(dir, 'transcript-offline.jsonl'), lines.map((x) => JSON.stringify(x)).join('\n') + (lines.length ? '\n' : ''), 'utf8').catch(() => {})
+      const md = await buildOfflineMinutes({ sentences: lines, completer })
+      let savedPath = ''
+      if (md) {
+        const saved = await saveMinutes(join(dir, 'minutes.md'), md)
+        savedPath = saved.path
+      }
+      const elapsed = Math.round((Date.now() - t0) / 1000)
+      logger?.info?.('[soulmirror] 离线转写完成：' + lines.length + ' 句，耗时 ' + elapsed + ' 秒')
+      return { ok: true, sentences: lines.length, seconds: Math.round(seconds), elapsed, md, minutesPath: savedPath }
+    } catch (e) {
+      logger?.warn?.('[soulmirror] 离线转写失败：' + e.message)
+      return { ok: false, error: e.message }
+    } finally {
+      offlineBusy = false
+    }
+  }
+
   /** 会后：纪要落盘 → 写知识库 → 沉淀人格 */
   let finalizing = false
   let lastFinalizedAt = 0
@@ -3005,6 +3055,17 @@ export function apply(ctx, config) {
         if (ws.dir) await saveMinutes(join(ws.dir, 'minutes.md'), md)
       } catch { /* ignore */ }
     }
+
+    // 1.5) 会后离线重转写：用整场录音补全实时那条线可能漏掉的句子
+    try {
+      const off = await runOfflinePass(session.dir)
+      if (off.ok) {
+        results.offline = '离线重转写：' + off.sentences + ' 句（' + off.seconds + ' 秒音频，用时 ' + off.elapsed + ' 秒）'
+        if (off.minutesPath) results.minutes = off.minutesPath
+      } else if (off.error) {
+        results.offline = '跳过：' + off.error
+      }
+    } catch { /* 离线失败不影响纪要 */ }
 
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
     if (writeKnowledge && cfg.knowledge.enabled && md && cfg.twin.enabled) {
