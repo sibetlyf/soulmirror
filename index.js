@@ -47,6 +47,7 @@ import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advic
 import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
+import { resolveDefaultModel } from './lib/model-resolve.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -172,7 +173,7 @@ export const Config = z.object({
     disfluencyRemoval: z.boolean().default(true),
     speakerDiarization: z.boolean().default(false),
     languageHints: z.array(z.string()).default(['zh', 'en']),
-    llmCorrect: z.boolean().default(true),
+    llmCorrect: z.boolean().default(false),
   }),
   /** 后台大脑：转写流 → 判定是否插话（LLM 走 OpenAI 兼容接口，不配则用规则+模板）。 */
   brain: z.object({
@@ -341,7 +342,7 @@ export function apply(ctx, config) {
       chunkSeconds: 6, lang: 'zh', whisperBin: '', whisperModel: '', silenceRms: 0.004,
       hotwords: [], vocabularyId: '', context: '', sentenceSilenceMs: 400,
       punctuation: true, itn: true, disfluencyRemoval: true, speakerDiarization: false,
-      languageHints: ['zh', 'en'], llmCorrect: true, ...(config.asr || {}),
+      languageHints: ['zh', 'en'], llmCorrect: false, ...(config.asr || {}),
     },
     mode: config.mode === 'agent' ? 'agent' : 'transcribe',
     policy: config.policy || 'auto',
@@ -2655,6 +2656,29 @@ export function apply(ctx, config) {
   // ── ASR 纠错：用大模型把同音错字改回正确人名/术语 ──────────────
   const fixNames = Array.from(new Set([cfg.userName, ...(cfg.wakeWords || []), ...((cfg.apps || []).map((a) => a.name))].filter(Boolean)))
 
+    /**
+     * 走 DSH 会话的补全：不自己挑模型，直接让会议会话回答。
+     *
+     * 用户的要求：会议助手的所有 agent 功能都在 dsh 的 session 里原生实现，
+     * 不需要"默认模型"这类额外配置——会话用什么模型，判定就用什么模型。
+     *
+     * 代价是每次都是一个完整回合（比裸调模型慢、更贵），
+     * 所以只用于低频场景：建议卡片、候选词、目标润色。逐句纠错不用它。
+     */
+    function makeSessionCompleter() {
+      return async function complete(messages) {
+        const list = Array.isArray(messages) ? messages : []
+        const system = list.filter((m) => m && m.role === 'system').map((m) => String(m.content || '')).join('\n')
+        const user = list.filter((m) => m && m.role !== 'system').map((m) => String(m.content || '')).join('\n')
+        const prompt = [system, user].filter(Boolean).join('\n\n')
+        const r = await runInMeetingSession(prompt, { timeoutMs: Math.min(120000, cfg.twin.timeoutMs || 120000) })
+        if (!r.ok) throw new Error(r.error || '会话未返回结果')
+        const text = String(r.text || '').trim()
+        if (!text) throw new Error('会话返回空内容')
+        return text
+      }
+    }
+
     function makeDshCompleter(brainCfg) {
       const llm = ctx.get('llm')
       if (!llm || typeof llm.stream !== 'function') return null
@@ -2663,10 +2687,18 @@ export function apply(ctx, config) {
         llm,
         provider: String(brainCfg.provider || ''),
         model: String(brainCfg.model || ''),
+        // 逐级回退：配置 → 宿主默认 → 第一个可用 provider 的第一个模型。
+        // 以前只查 catalog.default，它为空时整条判定链路直接死掉（现场错误："DSH 没有可用的默认模型"）
         resolveModel: async () => {
-          const catalog = controller?.modelCatalog ? await controller.modelCatalog() : null
-          if (!catalog || !catalog.default) return null
-          return { provider: catalog.default.provider, model: catalog.default.model }
+          const r = await resolveDefaultModel({
+            preferred: { provider: brainCfg.provider, model: brainCfg.model },
+            catalog: async () => (controller?.modelCatalog ? await controller.modelCatalog() : null),
+            listProviders: async () => (llm.listProviders ? await llm.listProviders() : []),
+            listModels: async (p) => (llm.listModels ? await llm.listModels(p) : []),
+          })
+          brainModel = { provider: r.provider, model: r.model, source: r.source }
+          logger?.info?.('[soulmirror] 判定用模型：' + r.provider + '/' + r.model + '（' + r.source + '）')
+          return { provider: r.provider, model: r.model }
         },
       })
     }
@@ -2677,7 +2709,11 @@ export function apply(ctx, config) {
     || process.env.OPENAI_API_KEY
   // 留空 = 用 DSH 当前模型；只有真的配置了 Key 才走自定义 endpoint。
   const httpCompleter = brainKey ? createCompleter(cfg.brain) : null
-  const completer = (cfg.brain.provider ? makeDshCompleter(cfg.brain) : null) || httpCompleter || makeDshCompleter(cfg.brain)
+  // 优先级：显式配置的 OpenAI 兼容端点 → DSH 会话（默认）。
+  // 用户明确要求"用 dsh 的 session 跑"，所以不再依赖 catalog.default 这类全局默认模型。
+  const sessionCompleter = makeSessionCompleter()
+  const completer = httpCompleter
+    || (cfg.brain.provider ? makeDshCompleter(cfg.brain) : sessionCompleter)
 
   // 注意：必须在 completer 初始化之后再装配纠错器，否则会踩 TDZ
   //
@@ -2799,7 +2835,8 @@ export function apply(ctx, config) {
   session.onLine = async (item) => {
     // 每句转写后：① 建议卡片按阈值自动生成（给人看） ② Agent 发言只在候选句触发（说给会议听）
     try { tickAdvice() } catch { /* ignore */ }
-    try { await maybeReply(item) } catch (e) { noteLlmError('候选词', e) }
+    // 会话回合可能要十几秒，不能阻塞转写流程：发出去就不管了
+    try { maybeReply(item).catch((e) => noteLlmError('候选词', e)) } catch (e) { noteLlmError('候选词', e) }
     noteSpeech()
     try {
       const spk = await speakerNow()
