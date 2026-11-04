@@ -361,6 +361,9 @@ export function apply(ctx, config) {
     silenceRms: (config.asr && config.asr.silenceRms) || 0.004,
   }
 
+  // mode 只是 reply.enabled 的视图：持久化里只认开关，避免两者不一致
+  cfg.mode = cfg.reply.enabled ? 'agent' : 'transcribe'
+
   // ── 持久化配置 + 页面 API ────────────────────────────────────────────
   const CONFIG_DIR = join(homedir(), '.dsh', 'soulmirror')
   const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -401,6 +404,8 @@ export function apply(ctx, config) {
       policy: cfg.policy,
       devices: cfg.devices,
       context: cfg.context,
+      advice: cfg.advice,
+      reply: cfg.reply,
       asr: {
         provider: cfg.asr.provider,
         // 显示真实下发的模型，而不是另一个字段
@@ -762,9 +767,12 @@ export function apply(ctx, config) {
           return json(200, said)
         }
         if (body.enabled !== undefined || body.autoSpeak !== undefined) {
-          if (body.enabled !== undefined) cfg.reply.enabled = !!body.enabled
+          if (body.enabled !== undefined) {
+            cfg.reply.enabled = !!body.enabled
+            cfg.mode = cfg.reply.enabled ? 'agent' : 'transcribe'
+          }
           if (body.autoSpeak !== undefined) cfg.reply.autoSpeak = !!body.autoSpeak
-          try { savePersisted({ reply: cfg.reply }) } catch { /* ignore */ }
+          try { savePersisted({ reply: cfg.reply, mode: cfg.mode }) } catch { /* ignore */ }
           return json(200, { ok: true, reply: cfg.reply })
         }
         return json(400, { ok: false, error: '缺少参数' })
@@ -988,7 +996,10 @@ export function apply(ctx, config) {
         const body = JSON.parse(Buffer.concat(bufM).toString('utf8') || '{}')
         const mode = body.mode === 'agent' ? 'agent' : 'transcribe'
         cfg.mode = mode
-        try { savePersisted({ mode }) } catch { /* ignore */ }
+        // 关键：模式就是"是否让 Agent 发言"，必须同时改 reply.enabled，
+        // 否则界面显示 Agent、后端却认为发言是关的（曾经真实发生过）
+        cfg.reply.enabled = mode === 'agent'
+        try { savePersisted({ mode, reply: cfg.reply }) } catch { /* ignore */ }
         logger?.info?.('[soulmirror] 模式切到 ' + mode + (mode === 'agent' ? '（自动回复）' : '（只转录）'))
         return json(200, { ok: true, mode })
       }
