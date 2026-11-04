@@ -40,6 +40,7 @@ import { formatAudioDiag } from './lib/audio-diag.js'
 import { readWavPcm, transcribeOffline, buildOfflineMinutes } from './lib/offline-asr.js'
 import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
 import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
+import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -733,7 +734,23 @@ export function apply(ctx, config) {
 
       // ── 回看：历史会议列表 / 单场详情 ──
       if (req.method === 'GET' && sub === 'records') {
-        return json(200, { ok: true, records: listRecords(CONFIG_DIR, 30) })
+        const q = String(url.searchParams.get('q') || '').trim()
+        const all = listRecords(CONFIG_DIR, 60)
+        if (!q) return json(200, { ok: true, records: all.slice(0, 30), query: '', total: all.length })
+        // 搜索命中要说明"为什么中"：目标 / 会邀 / 纪要 / 转写
+        const hits = searchRecords(all, q, (dir) => loadRecord(dir, { transcriptLimit: 2000 }), 30)
+        return json(200, { ok: true, records: hits, query: q, total: hits.length })
+      }
+
+      // 导出：?dir=&format=md|txt  →  返回文本与建议文件名（前端用 Blob 下载）
+      if (req.method === 'GET' && sub === 'record/export') {
+        const dir = String(url.searchParams.get('dir') || '')
+        if (!dir || !dir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+        const rec = loadRecord(dir, { transcriptLimit: 5000 })
+        if (!rec) return json(404, { ok: false, error: '读不到记录' })
+        const format = String(url.searchParams.get('format') || 'md') === 'txt' ? 'text' : 'markdown'
+        const text = renderExport(rec, { format })
+        return json(200, { ok: true, format, fileName: exportFileName(rec, format), text })
       }
       if (req.method === 'GET' && sub === 'record') {
         const dir = String(url.searchParams.get('dir') || '')
