@@ -44,6 +44,8 @@ import { renderExport, exportFileName, searchRecords } from './lib/record-export
 import { buildSnapshot } from './lib/context-snapshot.js'
 import { createDshCompleter } from './lib/dsh-llm.js'
 import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advice.js'
+import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
+import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
@@ -84,6 +86,21 @@ export const Config = z.object({
   /** 额外的会议进程名（会话枚举用）。内置已含 wemeetapp/CloudVideo/Feishu/DingTalk/Teams/Zoom/WXWork。 */
   meetingProcs: z.array(z.string()).default([]),
   /** 会议转写上下文：是否自动同步进 Agent 会话。 */
+  /** 建议卡片：给用户看的会议建议，自动生成。 */
+  advice: z.object({
+    enabled: z.boolean().default(true),
+    auto: z.boolean().default(true),
+    characters: z.number().default(500),
+    intervalMs: z.number().default(300000),
+    cooldownMs: z.number().default(60000),
+  }).default({}),
+  /** Agent 发言：说给会议里所有人听，与建议卡片互不影响。 */
+  reply: z.object({
+    enabled: z.boolean().default(false),
+    autoSpeak: z.boolean().default(false),
+    candidates: z.number().default(2),
+    cooldownMs: z.number().default(20000),
+  }).default({}),
   context: z.object({
     autoInject: z.boolean().default(false),
     everyMs: z.number().default(60000),
@@ -285,6 +302,21 @@ export function apply(ctx, config) {
     meetingProcs: Array.isArray(config.meetingProcs) ? config.meetingProcs : [],
     // 转写上下文：默认不自动送进会话（每送一次都是一轮真实对话，会产生费用）
     context: { autoInject: false, everyMs: 60000, maxLines: 20, maxChars: 4000, ...(config.context || {}) },
+    // 建议卡片：给"人"看的，自动生成、可关
+    advice: {
+      enabled: config.advice?.enabled !== false,
+      auto: config.advice?.auto !== false,
+      characters: config.advice?.characters || DEFAULT_ADVICE_RULE.characters,
+      intervalMs: config.advice?.intervalMs || DEFAULT_ADVICE_RULE.intervalMs,
+      cooldownMs: config.advice?.cooldownMs || DEFAULT_ADVICE_RULE.cooldownMs,
+    },
+    // Agent 发言：说给"会议里所有人"听的，独立开关
+    reply: {
+      enabled: config.reply?.enabled === true,
+      autoSpeak: config.reply?.autoSpeak === true,
+      candidates: config.reply?.candidates || 2,
+      cooldownMs: config.reply?.cooldownMs || 20000,
+    },
     devices: { capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || {}) },
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
@@ -712,6 +744,31 @@ export function apply(ctx, config) {
       if (req.method === 'GET' && sub === 'prepare') {
         return json(200, loadPreparation(session.dir || lastSessionDir))
       }
+      // Agent 发言候选词：GET 取当前候选，POST 生成或采用
+      if (sub === 'reply') {
+        if (req.method === 'GET') return json(200, { ok: true, ...replyState })
+        const bufR = []
+        for await (const chunk of req) bufR.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufR).toString('utf8') || '{}')
+        if (body.text) {
+          const r = await generateReplyCandidates(body.text)
+          return json(200, r)
+        }
+        if (body.speak) {
+          // 采用某一候选：真的说给会议听
+          const said = await speakNow(String(body.speak))
+          replyState = { ...replyState, spoken: said.ok ? body.speak : '' }
+          return json(200, said)
+        }
+        if (body.enabled !== undefined || body.autoSpeak !== undefined) {
+          if (body.enabled !== undefined) cfg.reply.enabled = !!body.enabled
+          if (body.autoSpeak !== undefined) cfg.reply.autoSpeak = !!body.autoSpeak
+          try { savePersisted({ reply: cfg.reply }) } catch { /* ignore */ }
+          return json(200, { ok: true, reply: cfg.reply })
+        }
+        return json(400, { ok: false, error: '缺少参数' })
+      }
+
       // 会中建议：GET 取缓存，POST 生成一次
       if (sub === 'advice') {
         if (req.method === 'GET') {
@@ -720,6 +777,12 @@ export function apply(ctx, config) {
         const bufA = []
         for await (const chunk of req) bufA.push(chunk)
         const body = JSON.parse(Buffer.concat(bufA).toString('utf8') || '{}')
+        if (body.enabled !== undefined || body.auto !== undefined) {
+          if (body.enabled !== undefined) cfg.advice.enabled = !!body.enabled
+          if (body.auto !== undefined) cfg.advice.auto = !!body.auto
+          try { savePersisted({ advice: cfg.advice }) } catch { /* ignore */ }
+          return json(200, { ok: true, advice: cfg.advice })
+        }
         const r = await generateAdvice({ force: !!body.force })
         return json(200, r)
       }
@@ -2605,7 +2668,7 @@ export function apply(ctx, config) {
 
   session.correctText = corrector
     ? async (text) => {
-      if (cfg.mode !== 'agent') return '' // 只转录：原样落库，不做任何模型调用
+      if (!cfg.reply.enabled) return '' // 没开 Agent 发言：原样落库，不做任何模型调用
       return corrector(text)
     }
     : null
@@ -2681,7 +2744,36 @@ export function apply(ctx, config) {
     }
   }
 
+
+  let lastReplyAt = 0
+  async function maybeReply(item) {
+    if (!cfg.reply.enabled) return
+    const text = String(item?.text || '').trim()
+    if (!text) return
+    // 候选句：被点名 / 问句 / 待办。其余不打扰
+    const trig = brain.push({ text, ...item })
+    if (!trig) return
+    const now = Date.now()
+    if (now - lastReplyAt < Math.max(5000, Number(cfg.reply.cooldownMs) || 20000)) return
+    lastReplyAt = now
+    const r = await generateReplyCandidates(text)
+    if (!r.ok) return
+    const decision = shouldStartTask({ needsTask: r.needsTask, line: text, names: cfg.brain.names || [] })
+    if (decision.start && r.task) {
+      logger?.info?.('[soulmirror] 启动 DSH 任务（' + decision.why + '）：' + r.task.slice(0, 60))
+      startTaskInBackground(r.task, { why: decision.why }).catch?.(() => {})
+    }
+    // autoSpeak 才真的说；否则只把候选词挂到面板上等用户点
+    if (cfg.reply.autoSpeak && r.candidates.length) {
+      const said = await speakNow(r.candidates[0])
+      if (said.ok) { replyState.spoken = r.candidates[0]; addAssistantLine(r.candidates[0], 'Agent 发言') }
+    }
+  }
+
   session.onLine = async (item) => {
+    // 每句转写后：① 建议卡片按阈值自动生成（给人看） ② Agent 发言只在候选句触发（说给会议听）
+    try { tickAdvice() } catch { /* ignore */ }
+    try { await maybeReply(item) } catch (e) { noteLlmError('候选词', e) }
     noteSpeech()
     try {
       const spk = await speakerNow()
@@ -2691,7 +2783,7 @@ export function apply(ctx, config) {
     try { memory.add({ role: 'user', text: item.text, session: session.dir }) } catch { /* ignore */ }
     try { living.absorb(item.text, { speaker: item.speaker || '', source: 'meeting' }) } catch { /* ignore */ }
     // 只转录模式：到此为止——不判定要不要接话、不发言、不建任务会话
-    if (cfg.mode !== 'agent') return
+    if (!cfg.reply.enabled) return
     const trig = brain.push(item)
     // brain.push 返回 null 有两种含义：静音期（自说自听）或规则未命中。
     // 前者必须无条件退出，否则 LLM 模式会把我们自己的 TTS 当成别人说话，形成回声自答。
@@ -3128,12 +3220,104 @@ export function apply(ctx, config) {
   let lastLlmError = null
   let adviceState = { at: 0, questions: [], replies: [], lines: 0, error: '', busy: false }
 
+  // ── Agent 发言的候选词 ──────────────────────────────────────
+  // 与建议卡片分开：建议是给人看的，候选词是要说给会议里所有人听的
+  let replyState = { at: 0, line: '', candidates: [], needsTask: false, task: '', spoken: '', error: '' }
+
+  /** 真正把一句话说进会议；返回 {ok,error} 便于界面反馈 */
+  async function speakNow(text) {
+    const t = String(text || '').trim()
+    if (!t) return { ok: false, error: '没有内容可说' }
+    if (!cfg.enabled) return { ok: false, error: '插件未开启' }
+    if (cfg.policy === 'observe') return { ok: false, error: 'policy=observe（只记不说）' }
+    try {
+      if (cfg.devices.speak && cfg.devices.micRestore) {
+        await sayToMeeting(t, cfg.tts, { speakDevice: cfg.devices.speak, micRestore: cfg.devices.micRestore, windowTitle: cfg.windowTitle, logger })
+      } else {
+        // 没配虚拟声卡时也会播到扬声器，由 sayToMeeting 自己处理
+        await sayToMeeting(t, cfg.tts, { logger })
+      }
+      agent.spoken = (agent.spoken || 0) + 1
+      return { ok: true, text: t }
+    } catch (e) {
+      noteLlmError('发言', e)
+      return { ok: false, error: e.message }
+    }
+  }
+
+  async function generateReplyCandidates(lineText) {
+    if (!completer) return { ok: false, error: '没有可用模型' }
+    const text = String(lineText || '').trim()
+    if (!text) return { ok: false, error: '没有内容可回复' }
+    try {
+      const msgs = buildReplyPrompt({
+        line: text,
+        context: (session.transcript || []).slice(-8),
+        names: cfg.brain.names || [],
+      })
+      const raw = await completer(msgs)
+      const parsed = parseReply(raw)
+      replyState = {
+        at: Date.now(),
+        line: text,
+        candidates: parsed.candidates,
+        needsTask: parsed.needsTask,
+        task: parsed.task,
+        spoken: '',
+        error: parsed.candidates.length ? '' : '模型没有给出可用候选',
+      }
+      lastLlmError = null
+      return { ok: parsed.candidates.length > 0, ...replyState }
+    } catch (e) {
+      noteLlmError('生成候选词', e)
+      replyState = { ...replyState, at: Date.now(), line: text, candidates: [], error: e.message }
+      return { ok: false, error: e.message }
+    }
+  }
+
   function noteLlmError(stage, err) {
     lastLlmError = { at: new Date().toISOString(), stage, message: String(err && err.message ? err.message : err).slice(0, 300) }
     logger?.warn?.('[soulmirror] ' + stage + ' 失败：' + lastLlmError.message)
   }
 
-  async function generateAdvice({ force = false } = {}) {
+  // 自动触发的状态（与参考项目同构）：throughLine / failedThroughLine / 冷却
+  let adviceTrigger = { throughLine: 0, failedThroughLine: -1, lastAttemptAt: 0, lastSuccessAt: Date.now(), running: false, characters: 0 }
+
+  /** 每次有新转写就检查一次该不该自动生成；返回触发原因便于日志 */
+  function tickAdvice() {
+    if (!cfg.advice.enabled || !cfg.advice.auto) return null
+    if (!completer) return null
+    const linesAll = session.transcript || []
+    if (linesAll.length === 0) return null
+    let chars = 0
+    for (const l of linesAll) chars += countCharacters(l.text)
+    const newChars = Math.max(0, chars - adviceTrigger.characters)
+    const reason = automaticReason(
+      { ...adviceTrigger, running: adviceTrigger.running },
+      { latestLine: linesAll.length, newChars, now: Date.now() },
+      cfg.advice,
+    )
+    if (!reason) return null
+    adviceTrigger.lastAttemptAt = Date.now()
+    adviceTrigger.running = true
+    generateAdvice({ reason })
+      .then((r) => {
+        if (r && r.ok) {
+          adviceTrigger.throughLine = linesAll.length
+          adviceTrigger.characters = chars
+          adviceTrigger.lastSuccessAt = Date.now()
+          adviceTrigger.failedThroughLine = -1
+        } else {
+          // 同样的内容失败后不再自动重试（避免反复烧钱）
+          adviceTrigger.failedThroughLine = linesAll.length
+        }
+      })
+      .catch(() => { adviceTrigger.failedThroughLine = linesAll.length })
+      .finally(() => { adviceTrigger.running = false })
+    return reason
+  }
+
+  async function generateAdvice({ force = false, reason = 'manual' } = {}) {
     if (adviceState.busy) return { ok: false, error: '上一次生成还没结束' }
     if (!completer) return { ok: false, error: '没有可用模型：先在设置里配置 brain.provider / brain.model' }
     const linesAll = session.transcript || []
@@ -3220,7 +3404,7 @@ export function apply(ctx, config) {
     if (ctxTimer) return
     ctxTimer = setInterval(() => {
       if (!cfg.context.autoInject) return
-      if (cfg.mode !== 'agent') return
+      if (!cfg.reply.enabled) return
       if (!session.capturing) return
       injectTranscriptContext({ reason: 'auto' }).catch(() => {})
     }, Math.max(15000, Number(cfg.context.everyMs) || 60000))
@@ -3460,7 +3644,7 @@ export function apply(ctx, config) {
         agent.running = true
         budget.reset()
         // 只转录模式不建会话：会消耗模型、也会刷会话列表
-        if (cfg.mode === 'agent') ensureMeetingSession(reason).catch(() => {})
+        if (cfg.reply.enabled) ensureMeetingSession(reason).catch(() => {})
         logger?.info?.('[soulmirror] 已开启：开始采集转写并建会话（' + reason + '）')
       },
       onExit: async () => {
