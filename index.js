@@ -393,7 +393,14 @@ export function apply(ctx, config) {
   cfg.mode = cfg.reply.enabled ? 'agent' : 'transcribe'
 
   // ── 持久化配置 + 页面 API ────────────────────────────────────────────
-  const CONFIG_DIR = join(homedir(), '.dsh', 'soulmirror')
+  // 数据目录同样跟随 DSH 根，而不是写死 homedir：
+  // 同一台机器上跑多个实例时，各实例的会议记录不应互相覆盖。
+  const DSH_HOME_RESOLVED = (() => {
+    try {
+      return resolveDshHome({ selfUrl: import.meta.url, env: process.env, homeDir: homedir(), exists: existsSync, join }) || join(homedir(), '.dsh')
+    } catch { return join(homedir(), '.dsh') }
+  })()
+  const CONFIG_DIR = join(DSH_HOME_RESOLVED, 'soulmirror')
   const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
 
   function deepMerge(base, patch) {
@@ -2843,7 +2850,7 @@ export function apply(ctx, config) {
             const cands = [
               (cfg.workspace && cfg.workspace.cwd) || "",
               join('G:', 'dsh-knowledge'),
-              join(homedir(), '.dsh', 'knowledge'),
+              join(DSH_HOME_RESOLVED, 'knowledge'),
             ].filter(Boolean)
             const kd = detectKnowledgeCwd(cands, { existsSync, statSync, join })
             const pick = pickWorkspaceCwd({ configured: (cfg.workspace && cfg.workspace.cwd) || "", active: kd, fallback: "" })
@@ -4620,7 +4627,7 @@ export function apply(ctx, config) {
 
   // ── 演练模式（不需要会议软件、不需要网络） ────────────────────────────
   const demo = new DemoController({
-    root: join(homedir(), '.dsh', 'soulmirror', 'demo'),
+    root: join(CONFIG_DIR, 'demo'),
     makeTranscriber: async ({ onEvent }) => {
       const key = resolveApiKey({ apiKeyEnv: 'DASHSCOPE_API_KEY' }).key
       if (!key) throw new Error('没有 DASHSCOPE_API_KEY')
