@@ -49,6 +49,7 @@ import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/adv
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
 import { createSessionGate, keyOf } from './lib/session-gate.js'
+import { isModelCommentary, isSelfEcho, sanitizeCorrection } from './lib/echo-guard.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
 import { checkOptionalDeps, featureAllowed, featureGateMessage, installPlugin } from './lib/deps-optional.js'
 import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
@@ -3203,7 +3204,14 @@ export function apply(ctx, config) {
   session.correctText = corrector
     ? async (text) => {
       if (!cfg.reply.enabled) return '' // 没开 Agent 发言：原样落库，不做任何模型调用
-      return corrector(text)
+      try {
+        const out = await corrector(text)
+        // 事故：纠错器把"思考过程"当结果返回，整段被写进转写，越滚越大。
+        // 只接受"改好的那一句"，其余一律丢弃（返回空 = 用原文）。
+        return sanitizeCorrection(text, out)
+      } catch {
+        return ''
+      }
     }
     : null
   const agent = { running: false, lastDecision: null, spoken: 0, errors: 0 }
@@ -3228,7 +3236,42 @@ export function apply(ctx, config) {
     return waited
   }
 
-  session.acceptLine = () => Date.now() >= brain.muteUntil
+  /** 最近我们说过的话（新到旧），用于识别回采回声 */
+  function recentSaidTexts() {
+    const out = []
+    try {
+      for (const l of (session.transcript || []).slice(-20)) {
+        if (l && (l.src === 'assistant' || l.role === 'assistant') && l.text) out.push(l.text)
+      }
+    } catch { /* ignore */ }
+    try {
+      if (replyState && replyState.spoken) out.push(replyState.spoken)
+    } catch { /* ignore */ }
+    try {
+      if (lastSpokenText) out.push(lastSpokenText)
+    } catch { /* ignore */ }
+    return out
+  }
+
+  // 转写入库前的最后一道闸：挡掉"模型自己的话"和"我们刚说过的回声"
+  let echoSkipped = 0
+  session.acceptLine = (item) => {
+    if (Date.now() < brain.muteUntil) return false
+    const text = String((item && item.text) || '')
+    // ① 模型思考/元指令（纠错器与判定器都可能漏出来）
+    if (isModelCommentary(text)) {
+      echoSkipped += 1
+      logger?.warn?.('[soulmirror] 挡掉自己的输出（第 ' + echoSkipped + ' 次）：' + text.slice(0, 50))
+      return false
+    }
+    // ② 我们刚说出去的话被回采成新的一句
+    if (isSelfEcho(text, recentSaidTexts())) {
+      echoSkipped += 1
+      logger?.warn?.('[soulmirror] 挡掉自己的回声（第 ' + echoSkipped + ' 次）：' + text.slice(0, 50))
+      return false
+    }
+    return true
+  }
   /** 决策落地：先表态 → 后台跑任务 → 说完再汇报 */
   async function applyDecision(d, item) {
     agent.lastDecision = { at: new Date().toISOString(), text: (item.text || "").slice(0, 60), ...d }
@@ -3756,8 +3799,21 @@ export function apply(ctx, config) {
     return max
   }
 
+  /**
+   * 给模型看的转写行：只保留"人说的话"。
+   *
+   * 事故根因之一：assistant 行（我们自己的回复与判定输出）也躺在 session.transcript 里，
+   * 于是每一次纪要/建议都把上一轮的模型输出当成"会议内容"再喂一遍——
+   * 转写越长、喂得越多，越像在无限复读。
+   */
+  function speechLines(limit = 80) {
+    const all = Array.isArray(session.transcript) ? session.transcript : []
+    const human = all.filter((l) => l && l.text && l.role !== 'assistant' && l.src !== 'assistant')
+    return human.slice(-limit)
+  }
+
   async function buildMinutes(limit = 80) {
-    const lines = session.transcript.slice(-limit)
+    const lines = speechLines(limit)
     if (lines.length === 0) return ''
     const text = lines.map((l) => l.text).join('\n')
     // 快照 = 目录 + 句数 + 末句。三者都没变 → 内容必然一样，没有重算的理由。
@@ -3789,6 +3845,7 @@ export function apply(ctx, config) {
   // 模型失败必须能看见：只写日志等于没写，用户只会觉得"没反应"
   let lastLlmError = null
   // 发言失败的原因：TTS 没 key、虚拟声卡没配、mic 切换失败都会落在这里
+  let lastSpokenText = ''
   let lastSpeakError = null
   // 发言链路的体检结果：音频有没有进虚拟声卡、会议有没有真的在用虚拟麦克风
   let lastSpeakInfo = null
@@ -3831,6 +3888,7 @@ export function apply(ctx, config) {
       }
       agent.spoken = (agent.spoken || 0) + 1
       lastSpeakError = null
+    lastSpokenText = String(text || "")
       return { ok: true, text: t }
     } catch (e) {
       lastSpeakError = { at: new Date().toISOString(), message: String(e.message || e).slice(0, 300) }
@@ -3887,7 +3945,7 @@ export function apply(ctx, config) {
   function tickAdvice() {
     if (!cfg.advice.enabled || !cfg.advice.auto) return null
     if (!completer) return null
-    const linesAll = session.transcript || []
+    const linesAll = speechLines(40)
     if (linesAll.length === 0) return null
     let chars = 0
     for (const l of linesAll) chars += countCharacters(l.text)
@@ -3920,7 +3978,7 @@ export function apply(ctx, config) {
   async function generateAdvice({ force = false, reason = 'manual' } = {}) {
     if (adviceState.busy) return { ok: false, error: '上一次生成还没结束' }
     if (!completer) return { ok: false, error: '没有可用模型：先在设置里配置 brain.provider / brain.model' }
-    const linesAll = session.transcript || []
+    const linesAll = speechLines(40)
     if (linesAll.length === 0) return { ok: false, error: '还没有转写内容' }
 
     adviceState.busy = true
@@ -3977,7 +4035,7 @@ export function apply(ctx, config) {
     if (!sc || typeof sc.prompt !== 'function') return { ok: false, error: '没有可用的会话服务' }
     if (!sid) return { ok: false, error: '还没有为这场会议建会话（先开始录音）' }
 
-    const linesAll = session.transcript || []
+    const linesAll = speechLines(40)
     if (linesAll.length === 0) return { ok: false, error: '还没有转写内容' }
     // 没有新内容就别重复发（自动同步会一直空转）
     if (!force && linesAll.length === lastInjectCount) return { ok: true, skipped: '没有新转写' }
@@ -4446,7 +4504,7 @@ export function apply(ctx, config) {
     },
     output: OUT(),
     execute: wrap('meeting_minutes', async (a) => {
-      const lines = session.transcript.slice(-(a.limit || 80))
+      const lines = speechLines(a.limit || 80)
       if (lines.length === 0) return { ok: false, result: '还没有转写内容' }
       const text = lines.map((l) => l.text).join('\n')
       let out = ''
