@@ -26,7 +26,8 @@ test('主 README 保持精简（只放理念/功能/要求）', () => {
 
 test('主 README 必须包含四块核心内容与文档入口', () => {
   const t = read('README.md')
-  assert.match(t, /禅境设计理念/, '缺少设计理念')
+  assert.match(t, /禅 · 与魂|禅境/, '缺少设计理念')
+  assert.match(t, /魂/, '缺少"魂"这一层（用户明确要求介绍 soul 如何复刻灵魂）')
   assert.match(t, /它做什么|功能/, '缺少功能简介')
   assert.match(t, /运行所需|必需/, '缺少所需插件/环境')
   assert.match(t, /文档地图/, '缺少文档入口')
@@ -85,4 +86,16 @@ test('旧的长篇设计文档被保留在 archive 而不是丢弃', () => {
   for (const f of ['DESIGN-v2.md', 'DESIGN-v3.md', 'DESIGN-v4.md']) {
     assert.ok(names.includes(f), 'archive 缺少 ' + f)
   }
+})
+
+test('灵魂文档存在且讲清了四根柱子', () => {
+  const p = join(root, 'docs', 'soul-architecture.md')
+  assert.ok(existsSync(p), '缺少 docs/soul-architecture.md')
+  const s = readFileSync(p, 'utf8')
+  for (const k of ['四层人格', '记忆会呼吸', '情绪成地形', '信念会进化']) {
+    assert.ok(s.includes(k), '灵魂文档缺少：' + k)
+  }
+  // 必须写清哪些自动、哪些手动（避免读成"全自动"）
+  assert.match(s, /自动跑|需要叫它/, '应说明自动/手动的边界')
+  assert.match(s, /soul_belief/, '应给出信念工具用法')
 })

@@ -19,7 +19,8 @@
 
 | 文档 | 内容 |
 |---|---|
-| [philosophy.md](philosophy.md) | 禅境设计理念（完整版） |
+| [philosophy.md](philosophy.md) | 禅 · 与魂（完整版） |
+| [soul-architecture.md](soul-architecture.md) | **魂的实现**：四层人格 / 记忆 / 信念 / 情绪 + 工具 |
 | [architecture.md](architecture.md) | 分层、会话身份、目录结构 |
 | [features.md](features.md) | 能力与活数据（记忆/信念/情绪） |
 | [tools.md](tools.md) | 工具清单 |

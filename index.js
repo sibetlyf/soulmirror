@@ -1619,6 +1619,12 @@ export function apply(ctx, config) {
     session.partial = ''
     // 走账本统一入口：保证"只增不改 + replaces 标记"的规则只有一处实现
     if (session.dir) session._appendTranscript?.(item)
+    // 灵魂进食：记一条记忆 + 感知一次情绪（纯本地启发式，不调模型、不花钱）
+    try {
+      if (item.role !== 'assistant' && item.src !== 'gap') {
+        living.absorb(item.text, { source: 'meeting', speaker: item.speaker || '' })
+      }
+    } catch { /* 魂不该挡路 */ }
     return item
   }
   // 麦克风状态：UIA 读不到腾讯会议的静音态，只能自己记账
