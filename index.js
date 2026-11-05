@@ -49,6 +49,7 @@ import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/adv
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
 import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
+import { formatTranscriptBubble, formatAdviceBubble, pickBubble, shouldPushTranscript, bumpOpenRequest } from './lib/pet-display.js'
 import { resolveDefaultModel } from './lib/model-resolve.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd, detectKnowledgeCwd } from './lib/workspace.js'
@@ -655,6 +656,7 @@ export function apply(ctx, config) {
           lastSpeakInfo,
           postMeeting,
           pet: {
+            openRequest: petOpenRequest,
             enabled: cfg.pet.enabled !== false,
             provider: 'dsh-pet',
             available: petAvail,
@@ -1831,6 +1833,11 @@ export function apply(ctx, config) {
   // 注册菜单项，并在它没装/没跑时安静降级（绝不拖累会议主流程）。
   let dshPet = null
   let lastPushed = null
+  // 气泡只有一个，三路内容抢它：发言 > 建议 > 转写（见 lib/pet-display.js）
+  let lastTranscriptBubble = null
+  let lastAdviceBubbleAt = 0
+  // 「打开会议助手」的跨端信号：宿主加计数，页面看到变化就开面板
+  let petOpenRequest = { count: 0, at: 0 }
   let petAvail = false
   let petMenuReady = false
   let petMenuLoop = null
@@ -1869,6 +1876,20 @@ export function apply(ctx, config) {
       if (r.ok) lastPushed = next
       return r
     } catch (e) { return { ok: false, error: e.message } }
+  }
+
+  /**
+   * 按优先级决定气泡内容并推给桌宠。
+   * 发言优先（它正在对外说话，最该被看见），其次建议，最后才轮到转写环境音。
+   */
+  async function bubbleByPriority({ speaking = '', advice = '', transcript = '' } = {}) {
+    const pick = pickBubble({ speaking, advice, transcript })
+    if (!pick.text) return { ok: false, skipped: 'empty' }
+    if (cfg.pet.showBubble === false) return { ok: false, skipped: 'config' }
+    const r = await pushSay(pick.text)
+    if (r.ok && pick.kind === 'transcript') lastTranscriptBubble = { text: transcript, at: Date.now() }
+    if (r.ok && pick.kind === 'advice') lastAdviceBubbleAt = Date.now()
+    return { ...r, kind: pick.kind }
   }
 
   /** 让桌宠把这句话显示在气泡里（取锁 → 投喂 → 稍后释放） */
@@ -1937,7 +1958,12 @@ export function apply(ctx, config) {
       await pushWorkStatus(true)
       return
     }
-    if (act.type === "open") { logger?.info?.("[soulmirror] 桌宠请求打开面板") }
+    if (act.type === "open") {
+      petOpenRequest = bumpOpenRequest(petOpenRequest)
+      logger?.info?.("[soulmirror] 桌宠请求打开面板 count=" + petOpenRequest.count)
+      await pushSay("会议助手在侧边栏「会议」按钮里")
+      return
+    }
   }
 
   // 用 unref 的定时器：菜单长轮询的等待不该阻止进程退出（测试里会直接挂住）
@@ -3119,6 +3145,13 @@ export function apply(ctx, config) {
     try { tickAdvice() } catch { /* ignore */ }
     // 让桌宠跟着会议状态走（内部按"有没有变化"去重）
     try { pushWorkStatus().catch(() => {}) } catch { /* ignore */ }
+    // 把最新一句送进气泡（节流 8 秒，碎片与重复句跳过）
+    try {
+      const line = formatTranscriptBubble(item)
+      if (shouldPushTranscript(lastTranscriptBubble, line)) {
+        bubbleByPriority({ transcript: line }).catch(() => {})
+      }
+    } catch { /* ignore */ }
     // 会话回合可能要十几秒，不能阻塞转写流程：发出去就不管了
     try { maybeReply(item).catch((e) => noteLlmError('候选词', e)) } catch (e) { noteLlmError('候选词', e) }
     noteSpeech()
@@ -3716,6 +3749,11 @@ export function apply(ctx, config) {
       }
       lastLlmError = null
       logger?.info?.('[soulmirror] 已生成建议：追问 ' + parsed.questions.length + ' 条，回应 ' + parsed.replies.length + ' 条')
+      // 建议也送到桌宠气泡（优先级低于发言，高于转写）
+      try {
+        const adv = formatAdviceBubble(adviceState)
+        if (adv) bubbleByPriority({ advice: adv }).catch(() => {})
+      } catch { /* ignore */ }
       return { ok: true, ...adviceState }
     } catch (e) {
       noteLlmError('生成建议', e)
