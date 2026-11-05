@@ -48,6 +48,7 @@ import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advic
 import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
+import { createSessionGate, keyOf } from './lib/session-gate.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
 import { checkOptionalDeps, featureAllowed, featureGateMessage, installPlugin } from './lib/deps-optional.js'
 import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
@@ -669,6 +670,7 @@ export function apply(ctx, config) {
             menu: petMenuReady,
             lastPushed,
           },
+          sessionGate: (typeof gateStats === 'function' ? gateStats() : null),
           brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
@@ -1864,6 +1866,7 @@ export function apply(ctx, config) {
   let petOpenRequest = { count: 0, at: 0 }
   // 可选插件的安装状态：没装的能力一律不启动（用户要求）
   let optionalDeps = []
+  let gateStatsRef = null
   let depsCheckedAt = 0
 
   function profileDirNow() {
@@ -1885,6 +1888,8 @@ export function apply(ctx, config) {
   }
 
   /** 这个能力现在允许启动吗（没装插件就不启动） */
+  function gateStats() { return gateStatsRef ? gateStatsRef() : null }
+
   function gate(key) {
     return featureGateMessage(key, optionalDeps.length ? optionalDeps : refreshOptionalDeps())
   }
@@ -3091,17 +3096,58 @@ export function apply(ctx, config) {
      * 代价是每次都是一个完整回合（比裸调模型慢、更贵），
      * 所以只用于低频场景：建议卡片、候选词、目标润色。逐句纠错不用它。
      */
+    /**
+     * 判定专用会话（内部）：ASR 纠错、候选词、建议、决策都走它。
+     *
+     * 为什么不复用会议会话：那些调用都是"完整回合"，会以用户消息的形式
+     * 出现在会话列表里——用户会看到
+     *   The input is "Hello, 你在吗？" — no names to fix, no errors. Output as-is.
+     * 这种内部提示词，一次说话冒出 N 条，完全没法看。
+     * 判定照旧用 DSH 会话（模型与配置沿用会话），只是换一个不给人看的会话。
+     */
+    let judgementSessionId = ''
+    let judgementBusyUntil = 0
+    async function ensureJudgementSession() {
+      if (judgementSessionId) return judgementSessionId
+      const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
+      const cwd = ws.agentCwd || ws.dir
+      judgementSessionId = await createSession(ctx, { cwd, title: '会议助手 · 判定（内部）' })
+      logger?.info?.('[soulmirror] 判定会话已就绪：' + judgementSessionId)
+      return judgementSessionId
+    }
+
     function makeSessionCompleter() {
+      // 所有"判定"类调用（建议/候选词/润色）共用这一个闸门：
+      // 同一时刻只跑一个回合，排队上限 2，同内容自动合并。
+      // 不这么做的话，一句话同时触发建议+候选词、或多句连着落地，
+      // 就会在会议会话里看到 N 条排队消息。
+      const gate = createSessionGate({
+        maxPending: 2,
+        run: async (prompt) => {
+          const sid = await ensureJudgementSession()
+          const r = await promptSession(ctx, sid, prompt, { timeoutMs: Math.min(120000, cfg.twin.timeoutMs || 120000) })
+          judgementBusyUntil = Date.now()
+          if (!r.ok) throw new Error(r.error || '会话未返回结果')
+          const text = String(r.text || '').trim()
+          if (!text) throw new Error('会话返回空内容')
+          return text
+        },
+      })
+      gateStatsRef = () => gate.stats()
       return async function complete(messages) {
         const list = Array.isArray(messages) ? messages : []
         const system = list.filter((m) => m && m.role === 'system').map((m) => String(m.content || '')).join('\n')
         const user = list.filter((m) => m && m.role !== 'system').map((m) => String(m.content || '')).join('\n')
         const prompt = [system, user].filter(Boolean).join('\n\n')
-        const r = await runInMeetingSession(prompt, { timeoutMs: Math.min(120000, cfg.twin.timeoutMs || 120000) })
-        if (!r.ok) throw new Error(r.error || '会话未返回结果')
-        const text = String(r.text || '').trim()
-        if (!text) throw new Error('会话返回空内容')
-        return text
+        const out = await gate.submit(keyOf(prompt), prompt)
+        // 被合并/丢弃：不是错误，是"这一轮不做了"。用 code 标出来，
+        // 让调用方安静跳过，别把它写成"模型失败"吓用户。
+        if (out && typeof out === 'object' && out.skipped) {
+          const e = new Error('已合并到后一次请求')
+          e.code = 'COALESCED'
+          throw e
+        }
+        return String(out || '')
       }
     }
 
@@ -3803,6 +3849,9 @@ export function apply(ctx, config) {
       lastLlmError = null
       return { ok: parsed.candidates.length > 0, ...replyState }
     } catch (e) {
+      if (e && e.code === 'COALESCED') {
+        return { ok: false, skipped: 'coalesced' }
+      }
       noteLlmError('生成候选词', e)
       replyState = { ...replyState, at: Date.now(), line: text, candidates: [], error: e.message }
       return { ok: false, error: e.message }
@@ -3810,6 +3859,8 @@ export function apply(ctx, config) {
   }
 
   function noteLlmError(stage, err) {
+    // 被闸门合并掉的请求不是失败，别写进 lastLlmError 让用户以为模型坏了
+    if (err && err.code === 'COALESCED') return
     lastLlmError = { at: new Date().toISOString(), stage, message: String(err && err.message ? err.message : err).slice(0, 300) }
     logger?.warn?.('[soulmirror] ' + stage + ' 失败：' + lastLlmError.message)
   }
@@ -3885,6 +3936,10 @@ export function apply(ctx, config) {
       } catch { /* ignore */ }
       return { ok: true, ...adviceState }
     } catch (e) {
+      if (e && e.code === 'COALESCED') {
+        adviceState = { ...adviceState, busy: false }
+        return { ok: false, skipped: 'coalesced' }
+      }
       noteLlmError('生成建议', e)
       adviceState = { ...adviceState, at: Date.now(), error: e.message, busy: false }
       return { ok: false, error: e.message }
