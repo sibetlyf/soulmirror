@@ -670,6 +670,7 @@ export function apply(ctx, config) {
             menu: petMenuReady,
             lastPushed,
           },
+          minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
           sessionGate: (typeof gateStats === 'function' ? gateStats() : null),
           brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
@@ -3759,15 +3760,29 @@ export function apply(ctx, config) {
     const lines = session.transcript.slice(-limit)
     if (lines.length === 0) return ''
     const text = lines.map((l) => l.text).join('\n')
+    // 快照 = 目录 + 句数 + 末句。三者都没变 → 内容必然一样，没有重算的理由。
+    const key = [session.dir || '', lines.length, lines[lines.length - 1].t || '', (lines[lines.length - 1].text || '').slice(0, 40)].join('|')
+    if (key && key === minutesKey) {
+      minutesKeyRuns += 1
+      logger?.warn?.('[soulmirror] 跳过重复的纪要生成（转写快照未变，第 ' + minutesKeyRuns + ' 次），' + lines.length + ' 句')
+      return lastMinutesMd || ''
+    }
+    minutesKey = key
+    minutesKeyRuns = 0
+    minutesRuns += 1
+    logger?.info?.('[soulmirror] 生成纪要（第 ' + minutesRuns + ' 次）：' + lines.length + ' 句，dir=' + (session.dir || '(空)'))
     if (completer) {
       try {
-        return await completer([
+        const out = await completer([
           { role: 'system', content: '你是会议纪要助手。输出 Markdown：## 决议 / ## 待办 / ## 风险 / ## 未决问题，没有就写“无”。不要编造。' },
           { role: 'user', content: text },
         ])
+        if (out) { lastMinutesMd = out; return out }
       } catch { /* 退化为抽取式 */ }
     }
-    return '## 会议要点（抽取式）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
+    const fallback = '## 会议要点（抽取式）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
+    lastMinutesMd = fallback
+    return fallback
   }
 
   // ── 会中建议（追问 / 回应）与模型错误 ──────────────────────────
@@ -4076,10 +4091,23 @@ export function apply(ctx, config) {
   /** 会后：纪要落盘 → 写知识库 → 沉淀人格 */
   let finalizing = false
   let lastFinalizedAt = 0
+  /**
+   * 纪要的"同一份内容只生成一次"。
+   *
+   * 实测事故：一场会结束后 8 分钟里，buildMinutes 被调了 34 次，
+   * 每次都把整段提示词投进会话，用户看到的就是"不断重复写纪要"。
+   * 调用方一时没定位到，所以从结果侧堵：转写快照没变，就不该再生成。
+   */
+  let lastMinutesMd = ''
+  let minutesRuns = 0
+  let minutesKey = ''
+  let minutesKeyRuns = 0
   async function finalizeMeeting({ speak = false, writeKnowledge = true } = {}) {
     if (finalizing) return { skipped: '正在收尾中' }
     if (Date.now() - lastFinalizedAt < 60000) return { skipped: '刚刚收尾过' }
     finalizing = true
+    // 先占位再干活：万一中途抛错，也不会让下一次调用立刻重来
+    lastFinalizedAt = Date.now()
     try {
     let md = await buildMinutes()
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
