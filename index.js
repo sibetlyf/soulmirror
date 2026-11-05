@@ -49,6 +49,7 @@ import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/adv
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
 import { petStateFromStatus, petMenuFromStatus } from './lib/pet-state.js'
+import { createPetClient, toWorkStatus, shouldPush } from './lib/pet-dsh.js'
 import { resolveDefaultModel } from './lib/model-resolve.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd, detectKnowledgeCwd } from './lib/workspace.js'
@@ -647,7 +648,13 @@ export function apply(ctx, config) {
           lastSpeakError,
           lastSpeakInfo,
           postMeeting,
-          pet: { running: !!petProc, enabled: !!cfg.pet.enabled },
+          pet: {
+            running: !!petProc,
+            enabled: !!cfg.pet.enabled,
+            provider: cfg.pet.provider || 'builtin',
+            dshPetAvailable: probeCache.dshPet === true,
+            lastPushed,
+          },
           brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
           partial: session.partial || '',
@@ -1819,7 +1826,53 @@ export function apply(ctx, config) {
     } catch (e) { return { state: { key: 'error', face: 'error', label: '状态异常', color: '#dc2626', text: e.message, hint: '' }, menu: {} } }
     }
 
-    async function startPet() {
+    // ── 与 dsh-pet 联动 ────────────────────────────────────────
+  // 用户要的是"用桌面宠物展示会议助手"，而 dsh-pet 已经能把状态变成动画，
+  // 所以这里只做状态翻译与推送，不再自己画窗口。
+  let dshPet = null
+  let lastPushed = null
+
+  function petClient() {
+    if (!dshPet) dshPet = createPetClient({ base: cfg.pet.dshBase || undefined })
+    return dshPet
+  }
+
+  async function pushWorkStatus(force = false) {
+    if (cfg.pet.provider !== 'dsh-pet') return { ok: false, skipped: 'provider' }
+    try {
+      const st = petState().state
+      const next = toWorkStatus(st)
+      if (!force && !shouldPush(lastPushed, next)) return { ok: true, skipped: 'unchanged' }
+      const c = petClient()
+      const r = await c.setWorkStatus(next)
+      if (r.ok) lastPushed = next
+      return r
+    } catch (e) {
+      return { ok: false, error: e.message }
+    }
+  }
+
+  /** 让桌宠把这句话说进气泡（取锁 → 投喂 → 释放） */
+  async function pushSay(text) {
+    if (cfg.pet.provider !== 'dsh-pet') return { ok: false, skipped: 'provider' }
+    const body = String(text || '').trim()
+    if (!body) return { ok: false, error: '没有内容' }
+    try {
+      const c = petClient()
+      const l = await c.lock(cfg.pet.petName || '')
+      if (!l.ok) {
+        // 拿不到锁就直接投喂一次，让上层的 lock-required 明确暴露出来
+        return await c.broadcast(body, { pet: cfg.pet.petName || '' })
+      }
+      const r = await c.broadcast(body, { lockId: l.lockId, pet: cfg.pet.petName || '' })
+      setTimeout(() => { c.release(l.lockId, cfg.pet.petName || '').catch(() => {}) }, 6000)
+      return r
+    } catch (e) {
+      return { ok: false, error: e.message }
+    }
+  }
+
+  async function startPet() {
     if (petProc) return { ok: true, already: true, pid: petProc.pid }
     const exe = join(dirname(fileURLToPath(import.meta.url)), 'tools', 'pet.exe')
     if (!existsSync(exe)) return { ok: false, error: '找不到 tools/pet.exe，请先编译（csc /target:winexe tools/pet.cs）' }
@@ -2988,6 +3041,8 @@ export function apply(ctx, config) {
       const said = await speakNow(sayText)
       if (said.ok) {
         replyState = { ...replyState, spoken: sayText }
+        // 桌宠同步说一遍（气泡），这样不上会也能看到它在说什么
+        try { pushSay(sayText).catch(() => {}) } catch { /* ignore */ }
         addAssistantLine(sayText, 'Agent 发言')
       }
     } else if (sayText) {
@@ -2998,6 +3053,8 @@ export function apply(ctx, config) {
   session.onLine = async (item) => {
     // 每句转写后：① 建议卡片按阈值自动生成（给人看） ② Agent 发言只在候选句触发（说给会议听）
     try { tickAdvice() } catch { /* ignore */ }
+    // 让桌宠跟着会议状态走（内部按"有没有变化"去重）
+    try { pushWorkStatus().catch(() => {}) } catch { /* ignore */ }
     // 会话回合可能要十几秒，不能阻塞转写流程：发出去就不管了
     try { maybeReply(item).catch((e) => noteLlmError('候选词', e)) } catch (e) { noteLlmError('候选词', e) }
     noteSpeech()
@@ -3682,6 +3739,7 @@ export function apply(ctx, config) {
 
     offlineBusy = true
     setPostMeeting({ phase: 'offline', error: '', dir })
+    try { pushWorkStatus(true).catch(() => {}) } catch { /* ignore */ }
     const t0 = Date.now()
     try {
       const { seconds } = readWavPcm(wav)
