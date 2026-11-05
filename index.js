@@ -713,6 +713,7 @@ export function apply(ctx, config) {
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
           lastModelProbe,
+          hostPort: hostPortInfo,
           // 内存水位与"可能无限增长"的计数器：崩溃前看一眼就知道是谁在涨
           mem: (function () {
             try {
@@ -2032,6 +2033,8 @@ export function apply(ctx, config) {
   let optionalDeps = []
   /** 最近一次模型联通性探测结果（给面板展示，刷新后仍在） */
   let lastModelProbe = null
+  /** 宿主端口解析情况（0 表示没拿到，写库会跳过） */
+  let hostPortInfo = null
   let gateStatsRef = null
   let depsCheckedAt = 0
 
@@ -4411,6 +4414,33 @@ export function apply(ctx, config) {
     })
   }
 
+  /**
+   * 拿到宿主 web 服务的端口。
+   *
+   * 原来只看 ctx.webServer.port，取不到就 return 0 —— 于是写库静默变成
+   * "跳过（宿主没装知识库或拿不到端口）"，用户只看到纪要没进库，完全不知道原因。
+   * 这里多找几个来源，并把结果记进 /status 便于排查。
+   */
+  function resolveHostPort() {
+    const tried = []
+    try {
+      const ws = ctx.webServer || ctx.get?.('webServer')
+      if (ws?.port) return Number(ws.port)
+      tried.push('webServer.port')
+      const addr = ws?.server?.address?.()
+      if (addr && typeof addr === 'object' && addr.port) return Number(addr.port)
+      tried.push('webServer.server.address().port')
+      if (ws?.server?.port) return Number(ws.server.port)
+    } catch { /* ignore */ }
+    for (const k of ['DSH_WEB_PORT', 'DASH_PORT', 'PORT']) {
+      const v = Number(process.env[k])
+      if (v) return v
+    }
+    tried.push('env')
+    hostPortInfo = { port: 0, tried }
+    return 0
+  }
+
   async function runOfflineInBackground(dir) {
     const prompt = '执行 meeting_offline_pass，dir=' + dir +
       '。只做这一件事：对这场会议的录音做会后重转写，生成纪要写到该目录，不要汇报别的内容。'
@@ -4607,15 +4637,16 @@ export function apply(ctx, config) {
         results.knowledge = '跳过（未安装 dsh-knowledge）'
       } else if (mode === 'host') {
         // 直连宿主里知识库插件的本地管理 API：不需要额外安装、不需要模型
-        let port = 0
-        try { port = (ctx.webServer || ctx.get?.('webServer'))?.port || 0 } catch { port = 0 }
+        const port = resolveHostPort()
         if (kd.host && port) {
-          const r = await writeViaHostApi({ port, title, markdown: md, type: 'decision', group: '会议纪要' })
+          const origin = 'http://127.0.0.1:' + port
+          const r = await writeViaHostApi({ port, origin, title, markdown: md, type: 'decision', group: '会议纪要' })
           if (r.ok) {
             results.knowledge = '已写入知识库（' + (r.id || 'ok').toString().slice(0, 8) + '）'
             addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
           } else {
-            results.knowledge = '写入失败：' + (r.error || r.status || '')
+            results.knowledge = '写入失败：' + (r.error || r.status || '') + '（' + origin + '/knowledge-local/v1/entries）'
+            logger?.warn?.('[soulmirror] 知识库写入失败：' + JSON.stringify(r).slice(0, 200))
           }
         } else {
           results.knowledge = '跳过（宿主没装知识库或拿不到端口）'
