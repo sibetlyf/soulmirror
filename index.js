@@ -51,6 +51,7 @@ import { detectTrigger } from './lib/trigger-rules.js'
 import { createSessionGate, keyOf } from './lib/session-gate.js'
 import { isModelCommentary, isSelfEcho, sanitizeCorrection } from './lib/echo-guard.js'
 import { resolveProfileDir } from './lib/profile-path.js'
+import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
 import { checkOptionalDeps, featureAllowed, featureGateMessage, installPlugin } from './lib/deps-optional.js'
 import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
@@ -650,6 +651,7 @@ export function apply(ctx, config) {
           apps: (cfg.apps || []).map((a) => ({ name: a.name, proc: a.proc || '', active: (cfg.activeApp || '') === a.name })),
           autoAppSelect: cfg.autoAppSelect !== false,
           activeApp: cfg.activeApp || '',
+          activeAppAuto: !!cfg.activeAppAuto,
           pendingKnowledge: (agent.pendingKnowledge || []).slice(0, 5),
           // 两个开关、候选词、以及所有"为什么没动/没说"的原因，都要能被界面读到
           advice: cfg.advice,
@@ -712,6 +714,7 @@ export function apply(ctx, config) {
         const pickName = String(body.name || '').trim()
         if (!pickName) {
           cfg.activeApp = ''
+          cfg.activeAppAuto = false
           cfg.autoAppSelect = true
           savePersisted({ activeApp: '', autoAppSelect: true })
           return json(200, { ok: true, activeApp: '', autoAppSelect: true })
@@ -725,6 +728,7 @@ export function apply(ctx, config) {
           savePersisted({ apps: cfg.apps })
         }
         cfg.activeApp = hit.name
+        cfg.activeAppAuto = false
         cfg.autoAppSelect = false
         savePersisted({ activeApp: hit.name, autoAppSelect: false })
         logger?.info?.('[soulmirror] 手动切换会议软件：' + hit.name)
@@ -1525,14 +1529,25 @@ export function apply(ctx, config) {
   /** 自动识别当前该盯哪个会议软件（只在没手动指定时生效） */
   async function autoPickApp() {
     if (!cfg.autoAppSelect) return null
-    if ((cfg.activeApp || '').trim()) return null
+    // 只有"用户手动指定"才跳过自动跟随；自动选中过的还要继续跟随
+    if ((cfg.activeApp || '').trim() && !cfg.activeAppAuto) return null
     try {
       const wins = await listWindows()
-      const hit = pickAutoApp(wins, cfg.apps || [])
+      // 自动选中的结果**不落盘**：落盘后就等于"手动指定"，以后再也不重算，
+      // 于是开着腾讯会议首页时会永远跟着腾讯会议，移动会议永远选不上。
+      const micProcs = []
+      try {
+        const rows = await micUsage()
+        const micPids = (Array.isArray(rows) ? rows : []).filter((r) => r && Number(r.state) === 1).map((r) => Number(r.pid))
+        for (const w of wins) if (micPids.includes(Number(w.pid))) micProcs.push(String(w.proc || ''))
+      } catch { /* ignore */ }
+      const ranked = pickApp({ apps: cfg.apps || [], windows: wins, micProcs })
+      const hit = ranked ? { app: ranked.app, confidence: ranked.reasons.join('、') || ('score ' + ranked.score) } : null
       if (!hit) return null
+      if (cfg.activeApp === hit.app.name) return hit
       cfg.activeApp = hit.app.name
-      logger?.info?.('[soulmirror] 自动跟随会议软件：' + hit.app.name + '（' + hit.confidence + '，proc=' + hit.proc + '）')
-      try { savePersisted({ activeApp: cfg.activeApp }) } catch { /* ignore */ }
+      cfg.activeAppAuto = true
+      logger?.info?.('[soulmirror] 自动跟随会议软件：' + hit.app.name + '（' + hit.confidence + '）')
       return hit
     } catch { return null }
   }
@@ -1568,6 +1583,34 @@ export function apply(ctx, config) {
       }
     }
     for (const app of all) if (!ordered.includes(app)) ordered.push(app)
+    // 先按"谁真的在开会"打分：会议中窗口 > 占着麦克风 > 前台 > 窗口大小 > 标题
+    // （旧逻辑按配置顺序取第一个有窗口的，腾讯会议留在托盘就能抢走移动会议）
+    try {
+      // micUsage() 返回 [{device, pid, proc, state}]，其中 proc 经常是空的，
+      // 所以"谁占着麦克风"要用 pid 去对窗口（同一进程的窗口 pid 相同）。
+      const micProcs = []
+      try {
+        const rows = await micUsage()
+        const micPids = (Array.isArray(rows) ? rows : [])
+          .filter((r) => r && Number(r.state) === 1)
+          .map((r) => Number(r.pid))
+        for (const r of (Array.isArray(rows) ? rows : [])) {
+          if (r && Number(r.state) === 1 && r.proc) micProcs.push(String(r.proc))
+        }
+        if (micPids.length) {
+          for (const w of wins) if (micPids.includes(Number(w.pid))) micProcs.push(String(w.proc || ''))
+        }
+      } catch { /* 拿不到麦克风信息就只按窗口打 */ }
+      const picked = pickApp({ apps: ordered, windows: wins, micProcs })
+      if (picked && picked.score > 0) {
+        logger?.info?.('[soulmirror] 选中的会议软件：' + picked.app.name + '（' + picked.reasons.join('、') + '，' + picked.score + ' 分）')
+        return meetingApp(picked.app.name)
+      }
+    } catch (e) {
+      logger?.warn?.('[soulmirror] 会议软件打分失败，回落旧规则：' + e.message)
+    }
+
+    // 兜底：没有强证据时，保留原来的"有窗口就算"（只是不再抢在打分前面）
     for (const app of ordered) {
       const proc = String(app.proc || '').toLowerCase()
       const hit = wins.some((w) => {
@@ -3740,6 +3783,7 @@ export function apply(ctx, config) {
       const pick = String(a.name || '').trim()
       if (!pick) {
         cfg.activeApp = ''
+        cfg.activeAppAuto = false
         cfg.autoAppSelect = true
         savePersisted({ activeApp: '', autoAppSelect: true })
         return { ok: true, result: '已恢复自动跟随：哪个会议软件在开会就用哪个' }
@@ -3757,6 +3801,7 @@ export function apply(ctx, config) {
         savePersisted({ apps: cfg.apps })
       }
       cfg.activeApp = hit.name
+      cfg.activeAppAuto = false
       savePersisted({ activeApp: hit.name })
       const wins = await listWindows().catch(() => [])
       const running = wins.some((w) => (w.proc || '').toLowerCase() === (hit.proc || '').toLowerCase())

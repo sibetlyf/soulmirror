@@ -244,8 +244,23 @@ dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
 | 钉钉会议 | `DingTalk` | 预设就绪，未实测 |
 | Zoom / Teams | `Zoom` / `ms-teams` | 预设就绪 |
 
-识别打分：进程精确 100，进程相似 80，标题命中 60，专用类名 40。`BaseDialog` 这种谁都在用的
-类名不算证据，否则会把 GameViewer 误认成会议软件。
+**判定"现在抓谁"的规则**（`lib/app-detect.js`，8 例单测）：
+
+| 证据 | 分数 | 为什么这么算 |
+|---|---|---|
+| 出现会议中才有的窗口类 | 100 | `VideoMainWindow`/`ParticipantWnd`/`FloatSpeakingWnd`/`MeetingView`… 只在会里出现 |
+| 占着麦克风 | 60 | 最强的"在会中"信号，用 pid 对应到进程 |
+| 窗口在前台 | 40 | 你正在用的那个 |
+| 窗口正常可见（≥120000 px²） | 20 | 托盘小窗、提示条不算 |
+| 窗口标题命中软件名 | 10 | 兜底证据 |
+
+**同分保持配置顺序**，全都没证据时回落"有窗口就算"的旧规则。
+
+> 之前是按配置顺序取**第一个有窗口的**，于是腾讯会议只要留在托盘就能一直抢走移动会议；
+> 而且自动选中后还会被写进配置，等于从此钉死。现在：自动选中**不落盘**，
+> 每次按当前证据重算；只有你在面板里手动选过才真正钉死。
+
+`BaseDialog` 这种谁都在用的类名不算"会议中窗口"，否则会把 GameViewer 误认成会议软件。
 
 面板「抓取」是个下拉：自动跟随，或者钉死某个客户端。也可以命令行来：
 
@@ -258,7 +273,7 @@ meeting_app_select { name }     # 钉死；传空串回到自动跟随
 
 ```yaml
 autoAppSelect: true
-activeApp: 腾讯会议     # 写了就钉死，自动跟随不再覆盖
+activeApp: 腾讯会议     # 你自己写的 = 钉死；插件自动选的会被重新评估
 apps:
   - { name: 腾讯会议, proc: wemeetapp }
   - { name: 自定义会议, proc: MyMeeting }
