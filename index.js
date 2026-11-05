@@ -48,6 +48,7 @@ import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advic
 import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
+import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
 import { checkOptionalDeps, featureAllowed, featureGateMessage, installPlugin } from './lib/deps-optional.js'
 import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
 import { formatTranscriptBubble, formatAdviceBubble, pickBubble, shouldPushTranscript, bumpOpenRequest } from './lib/pet-display.js'
@@ -318,6 +319,8 @@ export function apply(ctx, config) {
       base: String(config.pet?.base || ''),
     },
     workspace: { cwd: String(config.workspace?.cwd || '') },
+    // 入会总超时：UI 探测步骤多，卡住时必须自己认输而不是让用户干等
+    joinTimeoutMs: Number(config.joinTimeoutMs) || 20000,
     context: { autoInject: false, everyMs: 60000, maxLines: 20, maxChars: 4000, ...(config.context || {}) },
     // 建议卡片：给"人"看的，自动生成、可关
     advice: {
@@ -2247,6 +2250,20 @@ export function apply(ctx, config) {
       return { ok: false, result: '已打开链接但没检测到入会：' + rawUrl + '\n（可能需要在客户端里确认一下，或链接已过期）' }
     }
     if (!a.code) return { ok: false, result: '缺少会议号（也可以直接给入会链接 url）' }
+    // 能在事前判断的就别进 UI：格式错的会议号会一路走到探测里，白等几十秒
+    const codeCheck = validateMeetingCode(a.code)
+    if (!codeCheck.ok) return { ok: false, result: codeCheck.error, invalidCode: true }
+    a.code = codeCheck.code
+    // 总超时：每个关键步骤之间查一次
+    const joinDeadline = Date.now() + Math.max(5000, Number(cfg.joinTimeoutMs) || 20000)
+    const ensureTime = () => {
+      if (Date.now() > joinDeadline) {
+        const secs = Math.round((Number(cfg.joinTimeoutMs) || 20000) / 1000)
+        const err = new Error('入会超时（' + secs + ' 秒）：没进入会议，可能是会议号不对，或客户端停在不是首页的界面')
+        err.code = 'JOIN_TIMEOUT'
+        throw err
+      }
+    }
       const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
       // 已经在会里：不要再"启动会议"或点加入，否则会弹对话框打断当前会议
       try {
@@ -2339,7 +2356,7 @@ export function apply(ctx, config) {
       if (!saved) {
         steps.push('首页按钮没有可点的控件名，也还没有标定过坐标')
         steps.push('跑一次 meeting_calibrate 截图，看完图用 meeting_set_ui_map 存下「加入会议」位置即可')
-        return { ok: false, result: steps.join('\n') }
+        return { ok: false, result: joinFailureResult(steps.join('\n')) }
       }
       // 点一次 → 验证 → 失败就在附近小范围重试
       for (const off of probeOffsets(0.02, 2)) {
@@ -2368,17 +2385,19 @@ export function apply(ctx, config) {
     }
 
     if (!opened) {
+      ensureTime()
       const names = await listClickableNames(app)
       uiMap.markFailure(app.name, 'join', '打不开入会对话框')
       const calib = maybeCalibrate(app, 'join', '打不开入会对话框')
       steps.push(calib.started ? '已在后台用 computer-use 重新标定按钮位置，稍后重试' : '（标定未触发：' + (calib.skipped || calib.why || '') + '）')
       steps.push('没能打开入会对话框。首页可见控件：' + (names.slice(0, 10).join(' / ') || '（读不到）'))
       steps.push('排查：确认会议客户端停在首页（不是已入会状态），或调 config.joinClickRatio')
-      return { ok: false, result: steps.join('\n') }
+      return { ok: false, result: joinFailureResult(steps.join('\n')) }
     }
 
     // 对话框里：会议号 → 昵称 → 自动连音频 → 加入
     let filled = false
+    ensureTime()
     for (const cand of ['请输入会议号', 'meeting_code', '会议号']) {
       try {
         await setText(JOIN_DIALOG, cand, a.code, opts)
@@ -2406,6 +2425,7 @@ export function apply(ctx, config) {
       try { await pressKey(JOIN_DIALOG, 'Return', opts); steps.push('已回车提交（兜底）') } catch { /* ignore */ }
     }
 
+    ensureTime()
     await new Promise((r) => setTimeout(r, 3000))
     const wins = await listWindows()
     const joined = meetingInProgress(app, wins)
