@@ -1251,6 +1251,23 @@ export function apply(ctx, config) {
         const r = await joinTool.execute({ code, app: app.name, displayName: cfg.userName || '', confirm: true })
         return json(200, { ...r, code, app: app.name })
       }
+      // 一句话入口：把自然语言交给会议会话（语音、桌宠、脚本都走这里）
+      if (sub === 'run' && req.method === 'POST') {
+        const bufRun = []
+        for await (const chunk of req) bufRun.push(chunk)
+        const bodyRun = JSON.parse(Buffer.concat(bufRun).toString('utf8') || '{}')
+        const textRun = String(bodyRun.text || bodyRun.request || '').trim()
+        if (!textRun) return json(400, { ok: false, error: '缺少 text' })
+        try {
+          const rRun = await runInMeetingSession(textRun, { timeoutMs: cfg.twin.timeoutMs })
+          const out = String(rRun.text || rRun.error || '').trim()
+          if (out) { try { await bubbleByPriority({ speaking: out.slice(0, 80) }) } catch { /* ignore */ } }
+          return json(200, { ok: !!rRun.ok, text: out, sessionId: rRun.sessionId || '', error: rRun.error || '' })
+        } catch (e) {
+          return json(200, { ok: false, error: e.message })
+        }
+      }
+
       // 桌面宠物（对接 dsh-pet）：GET 看状态与可用性，POST 开关联动
       if (sub === 'pet') {
         if (req.method === 'POST') {
@@ -1971,6 +1988,35 @@ export function apply(ctx, config) {
     const h = setTimeout(r, ms)
     if (h && typeof h.unref === 'function') h.unref()
   })
+
+  ctx.tools.register(defineTool({
+    name: 'meeting_run',
+    description: '把一句自然语言交给会议会话执行：预约会议、到点入会、开始/结束录音、出纪要、写知识库，都由会话里的 agent 调用本插件的工具完成。用户说「帮我在腾讯会议约个明天的周会」「现在开始听」「散会出纪要」时用这个，不要自己拆解意图。',
+    parameters: {
+      request: { type: 'string', required: true, description: '用户的原话，原样传，不要改写' },
+      speak: { type: 'boolean', description: '完成后是否让桌宠/会议把它们说出来（默认 false）' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_run', async (a) => {
+      const request = String(a.request || '').trim()
+      if (!request) return { ok: false, result: '没有内容' }
+      const r = await runInMeetingSession(request, { timeoutMs: cfg.twin.timeoutMs })
+      const text = String(r.text || r.error || '').trim()
+      if (text) {
+        try { await bubbleByPriority({ speaking: text.slice(0, 80) }) } catch { /* ignore */ }
+      }
+      if (a.speak && text) {
+        try { await speakNow(text.slice(0, 200)) } catch { /* ignore */ }
+      }
+      return {
+        ok: !!r.ok,
+        result: text || (r.ok ? '已完成' : '执行失败'),
+        sessionId: r.sessionId || '',
+        via: r.via || '',
+        error: r.error || '',
+      }
+    }),
+  }))
 
   ctx.tools.register(defineTool({
     name: 'meeting_pet',
