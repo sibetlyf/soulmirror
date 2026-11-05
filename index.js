@@ -51,6 +51,7 @@ import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candi
 import { detectTrigger } from './lib/trigger-rules.js'
 import { createSessionGate, keyOf } from './lib/session-gate.js'
 import { isModelCommentary, isSelfEcho, sanitizeCorrection } from './lib/echo-guard.js'
+import { classifyProbeError, buildProbeReport } from './lib/model-probe.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
@@ -711,6 +712,7 @@ export function apply(ctx, config) {
             lastPushed,
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
+          lastModelProbe,
           // 内存水位与"可能无限增长"的计数器：崩溃前看一眼就知道是谁在涨
           mem: (function () {
             try {
@@ -1042,6 +1044,25 @@ export function apply(ctx, config) {
             })
           }
           return reply({ message: value ? '密钥已保存 → ' + sv.path : '密钥已清空（转写不可用，其它功能照常）' })
+        }
+
+        if (action === 'probe-models') {
+          // 真的连一次模型：ASR 走 WebSocket 握手，TTS 合成一个字听有没有音频回来
+          const only = String(body.model || '').trim()
+          const wantAsr = !only || only === 'asr'
+          const wantTts = !only || only === 'tts'
+          const [asr, tts] = await Promise.all([
+            wantAsr ? probeAsrConn() : null,
+            wantTts ? probeTtsConn() : null,
+          ])
+          const report = buildProbeReport({ asr, tts })
+          lastModelProbe = {
+            at: new Date().toISOString(),
+            ok: report.ok,
+            asr: asr ? { ok: !!asr.ok, ms: asr.ms || 0, kind: asr.ok ? '' : classifyProbeError(asr.error || '').kind } : null,
+            tts: tts ? { ok: !!tts.ok, ms: tts.ms || 0, kind: tts.ok ? '' : classifyProbeError(tts.error || '').kind } : null,
+          }
+          return reply({ ok: report.ok, message: report.text, probeModels: lastModelProbe })
         }
 
         if (action === 'probe') {
@@ -2005,6 +2026,8 @@ export function apply(ctx, config) {
   let petOpenRequest = { count: 0, at: 0 }
   // 可选插件的安装状态：没装的能力一律不启动（用户要求）
   let optionalDeps = []
+  /** 最近一次模型联通性探测结果（给面板展示，刷新后仍在） */
+  let lastModelProbe = null
   let gateStatsRef = null
   let depsCheckedAt = 0
 
@@ -4304,6 +4327,86 @@ export function apply(ctx, config) {
    * 曾经在 4GB 堆上限处把宿主撑爆。放到子进程后，即使它爆了也只死那个进程，
    * 会议数据仍在磁盘上（transcript.jsonl 是流式写入的，随时可恢复）。
    */
+  /**
+   * 语音识别联通性：真的开一次 WebSocket，等到 task-started 就算通。
+   *
+   * 为什么不做"假的 HTTP 探测"：DashScope 的流式识别只有真正握手 + 建任务才算可用；
+   * 拿 401 这种鉴权问题，只有握手阶段才暴露。
+   */
+  async function probeAsrConn() {
+    const t0 = Date.now()
+    const key = resolveDashScopeKey(cfg.asr).key
+    if (!key) return { ok: false, ms: 0, error: new Error('缺少密钥：环境变量 DASHSCOPE_API_KEY 未设置') }
+    return await new Promise((resolve) => {
+      let settled = false
+      const done = (r) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        try { asr?.finish?.()?.catch?.(() => {}) } catch { /* ignore */ }
+        resolve(r)
+      }
+      const timer = setTimeout(() => done({ ok: false, ms: Date.now() - t0, error: new Error('timeout: 15s 内没握手成功') }), 15000)
+      let asr
+      try {
+        asr = startDashScopeAsr({
+          apiKey: key,
+          model: resolveAsrModel(cfg.asr),
+          sampleRate: 16000,
+          asr: cfg.asr,
+          onSentence: () => {},
+          onError: (e) => done({ ok: false, ms: Date.now() - t0, error: e }),
+          onReady: () => done({ ok: true, ms: Date.now() - t0 }),
+        })
+        asr.open().catch((e) => done({ ok: false, ms: Date.now() - t0, error: e }))
+      } catch (e) {
+        done({ ok: false, ms: Date.now() - t0, error: e })
+      }
+    })
+  }
+
+  /**
+   * 语音合成联通性：合成一个极短词，拿到第一块音频就算通。
+   * 只发"测"一个字，成本可以忽略。
+   */
+  async function probeTtsConn() {
+    const t0 = Date.now()
+    const key = resolveDashScopeKey(cfg.tts).key
+    const provider = String(cfg.tts.provider || 'dashscope')
+    if (provider !== 'dashscope') {
+      // sapi 是本机离线合成：只要没抛错就算通，不产生网络请求
+      try {
+        const out = join(CONFIG_DIR, 'tts-probe.wav')
+        await synthesize('测', cfg.tts, out)
+        return { ok: existsSync(out), ms: Date.now() - t0, detail: '本机离线合成（sapi）' }
+      } catch (e) {
+        return { ok: false, ms: Date.now() - t0, error: e }
+      }
+    }
+    if (!key) return { ok: false, ms: 0, error: new Error('缺少密钥：环境变量 DASHSCOPE_API_KEY 未设置') }
+    return await new Promise((resolve) => {
+      let settled = false
+      const done = (r) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(r)
+      }
+      const timer = setTimeout(() => done({ ok: false, ms: Date.now() - t0, error: new Error('timeout: 20s 内没合成出音频') }), 20000)
+      synthesizeStream({
+        apiKey: key,
+        model: cfg.tts.model || 'cosyvoice-v2',
+        voice: cfg.tts.voice || 'longxiaochun_v2',
+        sampleRate: 16000,
+        onAudio: () => done({ ok: true, ms: Date.now() - t0 }),
+      }).then((s) => {
+        // 只发一个短词，拿到第一块就停
+        try { s.speak('测') } catch (e) { done({ ok: false, ms: Date.now() - t0, error: e }) }
+        try { s.finish() } catch { /* ignore */ }
+      }).catch((e) => done({ ok: false, ms: Date.now() - t0, error: e }))
+    })
+  }
+
   async function runOfflineInBackground(dir) {
     const prompt = '执行 meeting_offline_pass，dir=' + dir +
       '。只做这一件事：对这场会议的录音做会后重转写，生成纪要写到该目录，不要汇报别的内容。'
