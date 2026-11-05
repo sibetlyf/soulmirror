@@ -1131,7 +1131,11 @@ export function apply(ctx, config) {
           return r
         }
 
-        return json(400, { ok: false, error: '未知动作：' + action })
+        return json(400, {
+          ok: false,
+          // 旧宿主遇到新动作会走到这里：把"重启"写进错误里，别让用户只看到"未知动作"
+          error: '未知动作：' + action + (action === 'probe-models' ? '（当前宿主是旧版本，重启 DSH 后可用）' : ''),
+        })
       }
 
       if (req.method === 'POST' && sub === 'demo') {
