@@ -48,6 +48,7 @@ import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advic
 import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
+import { checkOptionalDeps, featureAllowed, featureGateMessage, installPlugin } from './lib/deps-optional.js'
 import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
 import { formatTranscriptBubble, formatAdviceBubble, pickBubble, shouldPushTranscript, bumpOpenRequest } from './lib/pet-display.js'
 import { resolveDefaultModel } from './lib/model-resolve.js'
@@ -655,6 +656,8 @@ export function apply(ctx, config) {
           lastSpeakError,
           lastSpeakInfo,
           postMeeting,
+          optionalDeps,
+          depsCheckedAt,
           pet: {
             openRequest: petOpenRequest,
             enabled: cfg.pet.enabled !== false,
@@ -1252,6 +1255,23 @@ export function apply(ctx, config) {
         return json(200, { ...r, code, app: app.name })
       }
 
+      // 可选依赖：GET 体检，POST 一键安装（用 DSH 自己的 plugin add）
+      if (sub === 'deps') {
+        if (req.method === 'GET') {
+          return json(200, { ok: true, profile: process.env.DSH_PROFILE || '', profileDir: profileDirNow(), deps: refreshOptionalDeps(), checkedAt: depsCheckedAt })
+        }
+        const bufDep = []
+        for await (const chunk of req) bufDep.push(chunk)
+        const bodyDep = JSON.parse(Buffer.concat(bufDep).toString('utf8') || '{}')
+        const pkg = String(bodyDep.pkg || '').trim()
+        if (!pkg) return json(400, { ok: false, error: '缺少 pkg' })
+        const prof = process.env.DSH_PROFILE || String(bodyDep.profile || '')
+        if (!prof) return json(400, { ok: false, error: '拿不到当前 profile，无法安装' })
+        const r = await installPlugin({ pkg, profile: prof })
+        refreshOptionalDeps()
+        return json(200, { ok: r.ok, pkg, profile: prof, output: r.output.slice(-1200), error: r.error, deps: optionalDeps })
+      }
+
       // 桌面宠物（对接 dsh-pet）：GET 看状态与可用性，POST 开关联动
       if (sub === 'pet') {
         if (req.method === 'POST') {
@@ -1839,6 +1859,33 @@ export function apply(ctx, config) {
   let lastAdviceBubbleAt = 0
   // 「打开会议助手」的跨端信号：宿主加计数，页面看到变化就开面板
   let petOpenRequest = { count: 0, at: 0 }
+  // 可选插件的安装状态：没装的能力一律不启动（用户要求）
+  let optionalDeps = []
+  let depsCheckedAt = 0
+
+  function profileDirNow() {
+    const prof = process.env.DSH_PROFILE || ''
+    const home = process.env.USERPROFILE || process.env.HOME || ''
+    if (!prof || !home) return ''
+    return join(home, '.dsh', 'profiles', prof)
+  }
+
+  function refreshOptionalDeps() {
+    try {
+      optionalDeps = checkOptionalDeps({ profileDir: profileDirNow() })
+      depsCheckedAt = Date.now()
+    } catch (e) {
+      optionalDeps = []
+      logger?.warn?.('[soulmirror] 依赖体检失败: ' + e.message)
+    }
+    return optionalDeps
+  }
+
+  /** 这个能力现在允许启动吗（没装插件就不启动） */
+  function gate(key) {
+    return featureGateMessage(key, optionalDeps.length ? optionalDeps : refreshOptionalDeps())
+  }
+
   let petAvail = false
   let petMenuReady = false
   let petMenuLoop = null
@@ -1869,6 +1916,8 @@ export function apply(ctx, config) {
   /** 推工作状态（内部按"有没有变化"去重，不会每句都打接口） */
   async function pushWorkStatus(force = false) {
     if (cfg.pet.enabled === false) return { ok: false, skipped: "disabled" }
+    // 没装 dsh-pet 就不启动这条功能（而不是推了再静默失败）
+    if (!gate('pet').allowed) return { ok: false, skipped: 'not-installed', error: gate('pet').message }
     if (!(await probeDshPet())) return { ok: false, skipped: "unavailable" }
     try {
       const next = toWorkStatus(derivePetState(petStatusSnapshot()))
@@ -1896,6 +1945,7 @@ export function apply(ctx, config) {
   /** 让桌宠把这句话显示在气泡里（取锁 → 投喂 → 稍后释放） */
   async function pushSay(text) {
     if (cfg.pet.enabled === false) return { ok: false, skipped: "disabled" }
+    if (!gate('pet').allowed) return { ok: false, skipped: 'not-installed', error: gate('pet').message }
     if (cfg.pet.sayInBubble === false) return { ok: false, skipped: "config" }
     if (!(await probeDshPet())) return { ok: false, skipped: "unavailable" }
     const body = String(text || "").trim()
@@ -1913,6 +1963,7 @@ export function apply(ctx, config) {
   /** 注册右键菜单，并起一条长轮询把点击接回来 */
   async function ensurePetMenu(force = false) {
     if (cfg.pet.enabled === false) return { ok: false, skipped: "disabled" }
+    if (!gate('pet').allowed) return { ok: false, skipped: 'not-installed', error: gate('pet').message }
     if (process.env.SOULMIRROR_TEST === "1") return { ok: false, skipped: "test-env" }
     if (cfg.pet.menu === false) return { ok: false, skipped: "config" }
     if (!(await probeDshPet(true))) return { ok: false, skipped: "unavailable" }
@@ -3999,7 +4050,7 @@ export function apply(ctx, config) {
     } catch { /* 离线失败不影响纪要 */ }
 
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
-    if (writeKnowledge && cfg.knowledge.enabled && md && cfg.twin.enabled) {
+    if (writeKnowledge && cfg.knowledge.enabled && md && cfg.twin.enabled && gate('knowledge').allowed) {
       const kd = detectKnowledge(cfg.knowledge.profile || '')
       const mode = String(cfg.knowledge.mode || 'host')
       if (!writeKnowledge) {
@@ -4143,6 +4194,15 @@ export function apply(ctx, config) {
   if (cfg.enabled === true) armed = true
   // 桌面宠物是可选项：上次开着就自动恢复
   // 桌面宠物是可选项：开着就在启动时注册菜单并推一次状态
+  // 先做一次可选插件体检：没装的能力不启动（用户要求）
+  try {
+    refreshOptionalDeps()
+    const gatePet = gate('pet')
+    const gateKb = gate('knowledge')
+    if (!gatePet.allowed) logger?.info?.('[soulmirror] ' + gatePet.message)
+    if (!gateKb.allowed) logger?.info?.('[soulmirror] ' + gateKb.message)
+  } catch { /* ignore */ }
+
   if (cfg.pet.enabled !== false) {
     ensurePetMenu().catch((e) => logger?.warn?.('[soulmirror] 桌宠联动失败: ' + e.message))
   }
