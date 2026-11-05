@@ -4284,6 +4284,19 @@ export function apply(ctx, config) {
       }
     },
     logger,
+    // 与真实会议共用同一套钩子：演练也要能验到建议、候选词、桌宠状态
+    onLine: (item) => {
+      // 演练的句子也要进 session.transcript：建议与纪要读的是它，
+      // 否则演练只能验转写，验不到"建议/纪要"这两段。
+      try {
+        if (session && Array.isArray(session.transcript) && !session.transcript.some((x) => x.t === item.t && x.text === item.text)) {
+          session.transcript.push(item)
+        }
+      } catch { /* ignore */ }
+      try { tickAdvice() } catch { /* ignore */ }
+      try { maybeReply(item).catch((e) => noteLlmError('候选词', e)) } catch { /* ignore */ }
+      try { pushWorkStatus().catch(() => {}) } catch { /* ignore */ }
+    },
   })
 
   // ── 演练：不需要任何会议软件就能验证整条链路 ──────────────────────────
