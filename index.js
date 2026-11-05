@@ -2940,6 +2940,20 @@ export function apply(ctx, config) {
     return deriveMeetingKey({ explicit: meetingIdOverride, title: ttl })
   }
 
+  /** 目录重名时加序号：xxx (2)、xxx (3) —— 同一天开两场同名会议用得上 */
+  function uniqDirName(base) {
+    const root = workspaceRoot
+    let name = base
+    for (let i = 2; i < 50; i++) {
+      const p = join(root, name)
+      if (!existsSync(p)) return name
+      // 目录在但没账本 → 视为残留，直接用
+      if (!existsSync(join(p, 'transcript.jsonl'))) return name
+      name = base + ' (' + i + ')'
+    }
+    return base + ' (' + Date.now() + ')'
+  }
+
   function ensureMeetingWorkspace(label = '', title = '') {
     if (meeting.id) return meeting
     const ident = currentMeetingKey(title)
@@ -2951,11 +2965,37 @@ export function apply(ctx, config) {
     const key = ident.key || ('time:' + new Date().toISOString().slice(0, 16))
     const prev = sessionMap.get(key)
     const now = new Date().toISOString()
+
+    // 目录名：软件 · 时间 · 主题（认得出来），而不是一串时间戳
+    const appName = appPrefix || (cfg.apps.find((x) => x && x.name) || {}).name || ''
+    const codeInTitle = (ident.display || '').match(/\d{3}[-\s]?\d{3}[-\s]?\d{3}/)
+    const topic = topicFromTitle({ title: winTitle, app: appName, code: codeInTitle ? codeInTitle[0] : '' })
+    const friendly = buildMeetingDirName({
+      app: appName,
+      at: Date.now(),
+      topic,
+      code: codeInTitle ? codeInTitle[0] : (ident.source === 'title-id' ? ident.display : ''),
+    })
+
+    // 一场会只留一条记录：同键 + 上一场没结束 + 在窗口内 → 复用原目录，继续往同一本账里写
+    const prevDir = prev && prev.dir ? prev.dir : ''
+    const prevEnded = (() => {
+      try { return !!JSON.parse(readFileSync(join(prevDir, 'meta.json'), 'utf8')).endedAt } catch { return false }
+    })()
+    const prevAge = (() => {
+      try { return Date.now() - statSync(join(prevDir, 'transcript.jsonl')).mtimeMs } catch { return Infinity }
+    })()
+    const reuse = shouldReuseDir({
+      sameKey: !!prevDir,
+      sinceLastMs: prevAge,
+      mergeWindowMs: Number(cfg.mergeWindowMinutes || 45) * 60000,
+      previousEnded: prevEnded,
+    })
     meeting = {
       id: safeName(key),
       key,
       display: ident.display || label || key,
-      dir: join(workspaceRoot, safeName(key)),
+      dir: reuse ? prevDir : join(workspaceRoot, uniqDirName(friendly)),
       dshSessionId: prev?.dshSessionId || '',
         // agent 的工作目录：配置 > 知识库目录 > 插件工作区（与知识库对齐才能看到文档/制品）
         ...(() => {
