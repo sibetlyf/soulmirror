@@ -11,7 +11,7 @@
  */
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync, openAsBlob } from 'node:fs'
+import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync, openAsBlob, readdirSync } from 'node:fs'
 import {appendFile, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -52,6 +52,8 @@ import { detectTrigger } from './lib/trigger-rules.js'
 import { createSessionGate, keyOf } from './lib/session-gate.js'
 import { isModelCommentary, isSelfEcho, sanitizeCorrection } from './lib/echo-guard.js'
 import { classifyProbeError, buildProbeReport } from './lib/model-probe.js'
+import { scanPendingRecovery, isPendingRecovery } from './lib/recovery.js'
+import { readLogText, linesToText } from './lib/transcript-log.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
@@ -714,6 +716,7 @@ export function apply(ctx, config) {
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
           lastModelProbe,
           hostPort: hostPortInfo,
+          pendingRecovery,
           // 内存水位与"可能无限增长"的计数器：崩溃前看一眼就知道是谁在涨
           mem: (function () {
             try {
@@ -1139,7 +1142,29 @@ export function apply(ctx, config) {
         })
       }
 
-      if (req.method === 'POST' && sub === 'demo') {
+      if (sub === 'recover') {
+      if (req.method === 'GET') {
+        const list = await listPendingRecovery({ force: true })
+        return json(200, {
+          ok: true,
+          pending: list,
+          hint: list.length
+            ? '有 ' + list.length + ' 场会议没整理完（进程被强杀或窗口被直接关闭）。数据都还在，可以补出纪要。'
+            : '没有需要补整理的会议',
+        })
+      }
+      if (req.method === 'POST') {
+        const buf = []
+        for await (const chunk of req) buf.push(chunk)
+        const body = JSON.parse(Buffer.concat(buf).toString('utf8') || '{}')
+        const dir = String(body.dir || '').trim()
+        if (!dir) return json(400, { ok: false, error: '缺少 dir' })
+        const r = await recoverMeeting(dir)
+        return json(200, r)
+      }
+    }
+
+    if (req.method === 'POST' && sub === 'demo') {
         const bufD = []
         for await (const chunk of req) bufD.push(chunk)
         const body = JSON.parse(Buffer.concat(bufD).toString('utf8') || '{}')
@@ -4440,6 +4465,107 @@ export function apply(ctx, config) {
     return 0
   }
 
+  /**
+   * 未整理会议的扫描结果缓存。
+   *
+   * /status 会被面板每隔几秒轮询一次，所以：
+   *   - 扫描本身只 stat、不读内容（见 lib/recovery.js）
+   *   - 结果缓存 30 秒，避免每次都 walk 目录
+   *   - 启动后异步跑一次，不阻塞任何请求
+   */
+  let pendingRecovery = []
+  let pendingRecoveryAt = 0
+  let pendingRecoveryBusy = false
+
+  async function listPendingRecovery({ force = false } = {}) {
+    const now = Date.now()
+    if (!force && now - pendingRecoveryAt < 30000) return pendingRecovery
+    if (pendingRecoveryBusy) return pendingRecovery
+    pendingRecoveryBusy = true
+    try {
+      const root = CONFIG_DIR
+      pendingRecovery = scanPendingRecovery({
+        root,
+        now,
+        readdir: (p) => readdirSync(p),
+        exists: existsSync,
+        stat: (p) => { try { const s = statSync(p); return { size: s.size, mtimeMs: s.mtimeMs } } catch { return null } },
+        join,
+      })
+      pendingRecoveryAt = now
+    } catch (e) {
+      logger?.warn?.('[soulmirror] 扫描未整理会议失败：' + e.message)
+      pendingRecovery = []
+    } finally {
+      pendingRecoveryBusy = false
+    }
+    return pendingRecovery
+  }
+
+  /**
+   * 用账本补出纪要（不重转写、不上传、不占内存）。
+   *
+   * 只做：读账本（回放折叠）→ 生成纪要 → 落盘 →（可选）写知识库。
+   * 音频不参与，所以内存占用与"一次读一个文本文件"相当。
+   */
+  async function recoverMeeting(dir) {
+    if (!dir) return { ok: false, error: '没有会议目录' }
+    const ok = isPendingRecovery({
+      dir, now: Date.now(),
+      exists: existsSync,
+      stat: (p) => { try { const s = statSync(p); return { size: s.size, mtimeMs: s.mtimeMs } } catch { return null } },
+      join,
+    })
+    if (!ok) return { ok: false, error: '这场会议不需要补整理（已有纪要，或数据太新/为空）' }
+
+    try {
+      // 内存保护：补整理会把账本整份读进来做回放。正常会议账本只有几十 KB；
+      // 异常大时（说明有东西在刷行）直接拒绝，避免一次读几百 MB 造成卡顿。
+      const st = (() => { try { return statSync(join(dir, 'transcript.jsonl')) } catch { return null } })()
+      const sizeMb = st ? st.size / 1048576 : 0
+      if (sizeMb > 8) {
+        return {
+          ok: false,
+          error: '账本过大（' + sizeMb.toFixed(1) + 'MB），不做内存回放。请改用「会后重转写」（基于录音文件），它不把账本整份读进内存。',
+        }
+      }
+      const raw = await readFile(join(dir, 'transcript.jsonl'), 'utf8')
+      const replay = readLogText(raw)
+      const texts = replay.lines
+        .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
+        .map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text }))
+      if (!texts.length) return { ok: false, error: '账本里没有可用句子' }
+
+      setPostMeeting({ phase: 'minutes', sentences: texts.length, dir })
+      const md = await buildOfflineMinutes({ sentences: texts, completer })
+      if (!md) return { ok: false, error: '纪要生成失败（模型没返回内容）' }
+      const saved = await saveMinutes(join(dir, 'minutes.md'), md)
+      logger?.info?.('[soulmirror] 已从账本补出纪要：' + dir + '（' + texts.length + ' 句）')
+
+      // 能写知识库就顺手写：失败不影响本地纪要
+      let knowledge = ''
+      try {
+        const kd = detectKnowledge(cfg.knowledge.profile || '')
+        const port = resolveHostPort()
+        if (cfg.knowledge.enabled && kd.host && port) {
+          const r = await writeViaHostApi({
+            port, origin: 'http://127.0.0.1:' + port,
+            title: '补整理 · ' + (require('node:path').basename(dir)),
+            markdown: md, type: 'decision', group: '会议纪要',
+          })
+          knowledge = r.ok ? '已写入知识库' : '写库失败：' + (r.error || r.status || '')
+        }
+      } catch { /* ignore */ }
+
+      setPostMeeting({ phase: 'done', sentences: texts.length, dir })
+      pendingRecoveryAt = 0   // 让下次轮询重新扫描
+      return { ok: true, sentences: texts.length, minutesPath: saved.path, knowledge, md }
+    } catch (e) {
+      setPostMeeting({ phase: 'error', error: e.message, dir })
+      return { ok: false, error: e.message }
+    }
+  }
+
   async function runOfflineInBackground(dir) {
     const prompt = '执行 meeting_offline_pass，dir=' + dir +
       '。只做这一件事：对这场会议的录音做会后重转写，生成纪要写到该目录，不要汇报别的内容。'
@@ -4828,6 +4954,15 @@ export function apply(ctx, config) {
   }, 30000)
   budgetGuard.unref?.()
   ctx.effect(() => () => clearInterval(budgetGuard))
+
+  // 启动后延迟扫描"未整理完的会议"：只 stat 不读内容，且不阻塞任何请求
+  const recoveryBoot = setTimeout(() => {
+    listPendingRecovery({ force: true })
+      .then((l) => { if (l.length) logger?.info?.('[soulmirror] 发现 ' + l.length + ' 场未整理的会议，可在面板补出纪要') })
+      .catch(() => {})
+  }, 8000)
+  recoveryBoot.unref?.()
+  ctx.effect(() => () => clearTimeout(recoveryBoot))
 
   // 混沌注入：SOULMIRROR_FAULT=kill-capture 时，开会 5 秒后杀掉采集进程，
   // 用于验证"采集死了能自己恢复、且不抖动"这条不变量
