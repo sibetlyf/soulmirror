@@ -30,11 +30,11 @@ test('大页面「接入」用统一来源，不再直接绑 meeting.app', () =>
   assert.equal(/lv\.meeting && lv\.meeting\.app\) \|\| '—'/.test(seg), false, '接入不该再直接用 meeting.app')
 })
 
-test('侧栏小窗也显示同一个来源', () => {
-  const at = src.indexOf("已入会' : '未入会'")
-  assert.ok(at > 0, '找不到小窗状态行')
-  const seg = src.slice(at, at + 400)
-  assert.match(seg, /pickActiveApp\(lv\)\.name/, '小窗应显示同一个软件名')
+test('侧栏小窗也用同一个来源（放 tooltip，不占纵向空间）', () => {
+  const at = src.indexOf('抓取软件：')
+  assert.ok(at > 0, '小窗接入下拉缺少统一来源提示')
+  const seg = src.slice(at, at + 160)
+  assert.match(seg, /pickActiveApp\(lv\)\.name/, 'tooltip 应使用统一来源')
 })
 
 test('「抓取」下拉仍绑 activeApp（它就是手动选择本身）', () => {
