@@ -490,6 +490,16 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 保存持久化配置。
+   *
+   * 关键：**必须如实返回成功/失败**。
+   * 原来写盘失败只记一条 warn，接口照样回"已保存"，于是界面显示已连接，
+   * 刷新/重启后又变成"未连接"——用户看到的就是"保存了但不生效"。
+   * 这种失败在别的机器上常见于安装目录不可写。
+   *
+   * @returns {{ok: boolean, path: string, error: string}}
+   */
   function savePersisted(patch) {
     const clearBrainKey = !!(patch && patch.brain && patch.brain.clearKey === true)
     if (clearBrainKey) {
@@ -497,14 +507,29 @@ export function apply(ctx, config) {
       if (stored.brain) stored.brain.apiKey = ''
     }
     const keep = patchToStore(patch)
-    // 关键：把历史配置合并进来，别用补丁覆盖整个文件
+    const prevStored = stored
+    // cfg 是 const，不能整体替换：记住本次补丁动过的顶层键的原值，失败时原地还原
+    const touched = Object.keys(keep)
+    const snapshot = {}
+    for (const k of touched) snapshot[k] = cfg[k] === undefined ? undefined : JSON.parse(JSON.stringify(cfg[k]))
     stored = deepMerge(stored, keep)
     Object.assign(cfg, deepMerge(cfg, keep))
     try {
       mkdirSync(CONFIG_DIR, { recursive: true })
-      writeFileSync(CONFIG_FILE, JSON.stringify(stored, null, 2), 'utf8')
+      const text = JSON.stringify(stored, null, 2)
+      writeFileSync(CONFIG_FILE, text, 'utf8')
+      const back = readFileSync(CONFIG_FILE, 'utf8')
+      if (back !== text) throw new Error('回读内容与写入不一致')
+      return { ok: true, path: CONFIG_FILE, error: '' }
     } catch (e) {
-      logger?.warn?.('[soulmirror] 保存配置失败: ' + e.message)
+      stored = prevStored
+      for (const k of touched) {
+        if (snapshot[k] === undefined) delete cfg[k]
+        else cfg[k] = snapshot[k]
+      }
+      const msg = e && e.message ? e.message : String(e)
+      logger?.warn?.('[soulmirror] 保存配置失败: ' + msg + ' → ' + CONFIG_FILE)
+      return { ok: false, path: CONFIG_FILE, error: msg }
     }
   }
 
@@ -981,8 +1006,26 @@ export function apply(ctx, config) {
           // 允许留空：空字符串就是"清空密钥"，不写就不动
           if (body.value === undefined) return reply({ message: '没有提供 value，未改动' })
           const value = String(body.value || '').trim()
-          savePersisted({ asr: { apiKey: value } })
-          return reply({ message: value ? '密钥已保存' : '密钥已清空（转写不可用，其它功能照常）' })
+          let sv
+          if (!value) {
+            // 显式清空：patchToStore 为了保护"留空不覆盖"会跳过空 apiKey，
+            // 所以这里直接改内存与待写对象，再走一次保存。
+            cfg.asr.apiKey = ''
+            if (!stored.asr) stored.asr = {}
+            stored.asr.apiKey = ''
+            sv = savePersisted({})
+          } else {
+            sv = savePersisted({ asr: { apiKey: value } })
+          }
+          if (!sv.ok) {
+            return reply({
+              ok: false,
+              message: '保存失败（没写进磁盘）：' + sv.error + '\n配置文件：' + sv.path +
+                '\n请换一个可写的安装目录，或用以有权限的账号运行 DSH',
+              saveError: sv.error,
+            })
+          }
+          return reply({ message: value ? '密钥已保存 → ' + sv.path : '密钥已清空（转写不可用，其它功能照常）' })
         }
 
         if (action === 'probe') {
