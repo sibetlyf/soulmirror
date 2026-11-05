@@ -11,8 +11,8 @@
  */
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { appendFile, mkdir, writeFile, openAsBlob } from 'node:fs/promises'
+import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync, openAsBlob } from 'node:fs'
+import {appendFile, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
@@ -4213,6 +4213,54 @@ export function apply(ctx, config) {
   const setPostMeeting = (patch) => { postMeeting = { ...postMeeting, ...patch, at: Date.now() } }
 
   let offlineBusy = false
+  /**
+   * 把会后重转写交给独立的 dsh 进程（后台 agent），主进程不再承担这份内存与 CPU。
+   *
+   * 为什么：离线重转写要把整份录音上传、等云端排队、再解析结果，
+   * 曾经在 4GB 堆上限处把宿主撑爆。放到子进程后，即使它爆了也只死那个进程，
+   * 会议数据仍在磁盘上（transcript.jsonl 是流式写入的，随时可恢复）。
+   */
+  async function runOfflineInBackground(dir) {
+    const prompt = '执行 meeting_offline_pass，dir=' + dir +
+      '。只做这一件事：对这场会议的录音做会后重转写，生成纪要写到该目录，不要汇报别的内容。'
+    try {
+      const r = await runDshTask(prompt, { cwd: dir, timeoutMs: Math.max(60000, Number(cfg.offlineTimeoutMs) || 10 * 60 * 1000) })
+      if (r && r.ok) {
+        logger?.info?.('[soulmirror] 会后重转写（后台进程）完成：' + String(r.text || '').slice(0, 120))
+        // 子进程已经把结果写进会议目录；这里读回摘要，保持与内联版本一致的返回形状
+        return await readOfflineResult(dir, r.text)
+      }
+      logger?.warn?.('[soulmirror] 后台重转写失败，改为主进程内联执行：' + (r && r.error))
+    } catch (e) {
+      logger?.warn?.('[soulmirror] 后台重转写异常，改为主进程内联执行：' + e.message)
+    }
+    return runOfflinePass(dir)
+  }
+
+  /** 从会议目录读回子进程写下的结果（供 finalizeMeeting 使用） */
+  async function readOfflineResult(dir, text) {
+    try {
+      const raw = await readFile(join(dir, 'transcript-offline.jsonl'), 'utf8')
+      const lines = raw.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l) } catch { return null } }).filter(Boolean)
+      const speakers = new Set(lines.map((x) => x.speaker).filter(Boolean)).size
+      const mdPath = join(dir, 'minutes.md')
+      const md = existsSync(mdPath) ? await readFile(mdPath, 'utf8') : ''
+      return {
+        ok: lines.length > 0,
+        sentences: lines.length,
+        speakers,
+        mode: 'file',
+        seconds: 0,
+        elapsed: 0,
+        md,
+        minutesPath: existsSync(mdPath) ? mdPath : '',
+        viaBackground: true,
+      }
+    } catch {
+      return { ok: false, error: '后台任务已执行，但读不到结果文件：' + String(text || '').slice(0, 100) }
+    }
+  }
+
   async function runOfflinePass(dir = session.dir) {
     if (offlineBusy) return { ok: false, error: '上一次离线转写还没结束' }
     if (!dir) return { ok: false, error: '没有会议目录' }
@@ -4336,8 +4384,10 @@ export function apply(ctx, config) {
       // 网络或服务端变慢时可能拖很久。卡住必须自己认输，
       // 否则用户看到的是"转文字一直不动"，最后什么都没落盘。
       const offlineTimeoutMs = Math.max(60000, Number(cfg.offlineTimeoutMs) || 10 * 60 * 1000)
+      // 遵循"节约资源"：会后重转写是唯一的重活（整份上传 + 云端排队），
+      // 交给**独立的 dsh 子进程**跑，主进程只等结果。子进程挂了也不影响宿主。
       const off = await withTimeout(
-        runOfflinePass(session.dir),
+        runOfflineInBackground(session.dir),
         offlineTimeoutMs,
         '离线重转写超时（' + Math.round(offlineTimeoutMs / 60000) + ' 分钟）',
       )
@@ -4639,6 +4689,32 @@ export function apply(ctx, config) {
   }))
 
   // ── 实时纪要 ────────────────────────────────────────────────────────
+  ctx.tools.register(defineTool({
+    name: 'meeting_offline_pass',
+    description: '对某场会议的录音做会后再转写（云端文件识别 + 说话人分离），并把纪要写到会议目录。会后整理交给后台 agent 调用本工具，可以避免占用主进程内存。参数 dir 是会议目录。',
+    parameters: {
+      dir: { type: 'string', description: '会议目录（含 audio.wav）' },
+      minutes: { type: 'boolean', description: '是否同时生成纪要，默认 true' },
+    },
+    output: OUT(),
+    execute: wrap('meeting_offline_pass', async (a) => {
+      const dir = String(a.dir || session.dir || '').trim()
+      if (!dir) return { ok: false, result: '没有会议目录' }
+      if (!cfg.enabled) return { ok: false, result: '会议功能未开启' }
+      const r = await runOfflinePass(dir)
+      if (!r.ok) return { ok: false, result: r.error || '会后重转写失败' }
+      return {
+        ok: true,
+        result: '会后重转写完成：' + r.sentences + ' 句' +
+          (r.speakers ? '（' + r.speakers + ' 位说话人）' : '') +
+          '，' + r.seconds + ' 秒音频，用时 ' + r.elapsed + ' 秒',
+        minutesPath: r.minutesPath || '',
+        sentences: r.sentences,
+        speakers: r.speakers,
+      }
+    }),
+  }))
+
   ctx.tools.register(defineTool({
     name: 'meeting_minutes',
     description: '生成会议纪要：有 LLM 时输出"决议/待办/风险/未决"，没有则做抽取式摘要。可随时调用，取最近 N 句。',

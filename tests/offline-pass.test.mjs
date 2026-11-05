@@ -49,9 +49,32 @@ test('超大录音跳过云端文件识别', () => {
 
 test('离线重转写有总超时，超时后仍会用实时纪要继续', () => {
   assert.match(src, /offlineTimeoutMs/, '缺少离线超时配置')
-  assert.match(src, /withTimeout\(\s*\n?\s*runOfflinePass/, 'runOfflinePass 没有包超时')
+  // 现在调用的是后台执行器（内部失败会回落 runOfflinePass），两者都必须被超时包裹
+  assert.match(src, /withTimeout\(\s*\n?\s*runOfflineInBackground\(session\.dir\)/, '后台执行器没有包超时')
   const at = src.indexOf('function withTimeout(')
   assert.ok(at > 0, '缺少 withTimeout 实现')
+})
+
+test('会后重转写优先交给后台 dsh 进程（节约主进程资源）', () => {
+  const at = src.indexOf('async function runOfflineInBackground')
+  assert.ok(at > 0, '缺少后台执行器')
+  const seg = src.slice(at, at + 1200)
+  assert.match(seg, /runDshTask\(/, '没有起独立 dsh 进程')
+  assert.match(seg, /meeting_offline_pass/, '后台任务应调用本插件的重转写工具')
+  assert.match(seg, /return runOfflinePass\(dir\)/, '后台失败时要回落内联执行')
+
+  // 该工具必须真的注册了，否则后台进程无从调用
+  assert.match(src, /name: 'meeting_offline_pass'/, '缺少 meeting_offline_pass 工具')
+})
+
+test('音频只保留一个文件：转 wav 时流式拷贝并删掉 pcm', () => {
+  const sessionSrc = readFileSync(new URL('../lib/session.js', import.meta.url), 'utf8')
+  const at = sessionSrc.indexOf('async finalizeRecording')
+  assert.ok(at > 0, '找不到 finalizeRecording')
+  const seg = sessionSrc.slice(at, at + 1600)
+  assert.match(seg, /pipeline\(createReadStream\(pcmPath\)/, '应流式拷贝而不是 readFile')
+  assert.equal(/await readFile\(pcmPath\)/.test(seg), false, '又改回整份读入了')
+  assert.match(seg, /unlink\(pcmPath\)/, '转完应删除 pcm（避免磁盘两份）')
 })
 
 test('readWavHeader 只读头部且算得对', () => {
