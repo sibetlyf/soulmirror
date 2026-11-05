@@ -16,6 +16,10 @@ config.local.json
 tools/whisper/models/*.bin
 tools/whisper/*.zip
 *.exe
+# 例外：mbridge.exe 是唯一"装完就得能用"的运行时二进制。
+# 它由 tools/meeting-bridge.cs 用系统自带 csc 编译；不入库时别人的机器上就没有它，
+# 采集会 spawn 失败（历史上还把宿主打崩过）。改了 .cs 记得 buildBridge({force:true}) 重编并一起提交。
+!tools/mbridge.exe
 # whisper 本地运行时（可选能力，不入库）
 tools/whisper/Release/
 tools/whisper/models/
