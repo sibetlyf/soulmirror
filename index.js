@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 
-import { bridge, listDevices, toolsDir, micUsage, defaultRenderDevice, meetingMicActive } from './lib/bridge.js'
+import { bridge, ensureBridge, listDevices, toolsDir, micUsage, defaultRenderDevice, meetingMicActive } from './lib/bridge.js'
 import {
   listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
   ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect, shotWindow,
@@ -678,6 +678,15 @@ export function apply(ctx, config) {
             lastPushed,
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
+          // 采集组件是否就绪：别人的机器上可能没编译出 mbridge.exe
+          bridge: (function () {
+            try {
+              const r = ensureBridge()
+              return { ok: !!r.ok, path: r.path || '', error: r.error || '' }
+            } catch (e) {
+              return { ok: false, path: '', error: e.message }
+            }
+          })(),
           depsAutoInstall: !!cfg.depsAutoInstall,
           sessionGate: (typeof gateStats === 'function' ? gateStats() : null),
           brainModel,
