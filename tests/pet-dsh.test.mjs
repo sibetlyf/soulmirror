@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   toWorkStatus, shouldPush, createPetClient, WORK_STATES,
+  derivePetState, PET_MENU_ITEMS, menuAction,
 } from '../lib/pet-dsh.js'
 
 test('会议助手的状态映射到 dsh-pet 的合法档位', () => {
@@ -72,25 +73,42 @@ test('非法档位直接抛错，不打接口', async () => {
   assert.equal(fetchImpl.calls.length, 0)
 })
 
-test('取锁返回 lockId，broadcast 带上它', async () => {
+test('取锁返回 lockId，且 surface 是查询参数（上游必填）', async () => {
   const fetchImpl = fakeFetch([
     { status: 200, body: { lockId: 'L1' } },
     { status: 200, body: { ok: true } },
   ])
   const c = createPetClient({ fetchImpl })
-  const l = await c.lock('default')
+  const l = await c.lock('main')
   assert.equal(l.lockId, 'L1')
-  await c.broadcast('我在，你说。', { lockId: l.lockId, pet: 'default' })
-  assert.match(fetchImpl.calls[1].url, /lock=L1/)
-  assert.deepEqual(fetchImpl.calls[1].body, { text: '我在，你说。' })
+  assert.match(fetchImpl.calls[0].url, /pet=main/)
+  assert.match(fetchImpl.calls[0].url, /surface=web/, '缺 surface 上游会 bad-request')
+})
+
+test('broadcast 的时长字段是 duration（不是 durationMs）', async () => {
+  const fetchImpl = fakeFetch([{ status: 200, body: { ok: true } }])
+  const c = createPetClient({ fetchImpl })
+  await c.broadcast('我在，你说。', { lockId: 'L1', pet: 'main', duration: 6000 })
+  assert.match(fetchImpl.calls[0].url, /lock=L1/)
+  assert.deepEqual(fetchImpl.calls[0].body, { text: '我在，你说。', duration: 6000 })
+})
+
+test('释放锁把 lockId 放在请求体里', async () => {
+  const fetchImpl = fakeFetch([{ status: 200, body: { ok: true } }])
+  const c = createPetClient({ fetchImpl })
+  const r = await c.release('L1', 'main')
+  assert.equal(r.ok, true)
+  assert.match(fetchImpl.calls[0].url, /lock\/release/)
+  assert.deepEqual(fetchImpl.calls[0].body, { lockId: 'L1' })
 })
 
 test('broadcast 缺锁时能识别 lock-required', async () => {
-  const fetchImpl = fakeFetch([{ status: 409, body: { error: 'lock-required' } }])
+  const fetchImpl = fakeFetch([{ status: 409, body: { reason: 'lock-required', message: '需要占用锁' } }])
   const c = createPetClient({ fetchImpl })
   const r = await c.broadcast('你好')
   assert.equal(r.ok, false)
   assert.equal(r.lockRequired, true)
+  assert.match(r.error, /占用锁/)
 })
 
 test('桌宠没装时 available 返回 false 而不是抛错', async () => {
@@ -150,4 +168,70 @@ test('清除菜单项幂等', async () => {
   assert.equal(r.ok, true)
   assert.equal(r.removed, 3)
   assert.match(fetchImpl.calls[0].url, /owner=soulmirror/)
+})
+
+// ── 状态推导（替代原来的自建窗口）─────────────────────────
+const NOW = Date.parse('2026-11-05T04:00:00Z')
+
+test('采集中推导为在听，并带句数', () => {
+  const r = derivePetState({ session: { capturing: true, lines: 12 }, meeting: { title: '周会' } }, { now: NOW })
+  assert.equal(r.key, 'listening')
+  assert.match(r.text, /12 句/)
+  assert.equal(r.hint, '周会')
+})
+
+test('刚说过话推导为说话，20 秒后回到在听', () => {
+  const fresh = derivePetState({ session: { capturing: true }, replyState: { spoken: '我在，你说。', at: NOW - 2000 } }, { now: NOW })
+  assert.equal(fresh.key, 'speaking')
+  const stale = derivePetState({ session: { capturing: true }, replyState: { spoken: '我在', at: NOW - 60000 } }, { now: NOW })
+  assert.equal(stale.key, 'listening')
+})
+
+test('会后整理优先于采集，且分阶段', () => {
+  assert.equal(derivePetState({ session: { capturing: true }, postMeeting: { phase: 'offline' } }, { now: NOW }).text, '重转写中')
+  const done = derivePetState({ postMeeting: { phase: 'done', sentences: 42, speakers: 3 } }, { now: NOW })
+  assert.equal(done.key, 'idle')
+  assert.match(done.text, /42 句/)
+  assert.match(done.text, /3 位/)
+  assert.equal(derivePetState({ postMeeting: { phase: 'error', error: '识别失败' } }, { now: NOW }).key, 'error')
+})
+
+test('出错会盖过安静状态', () => {
+  const r = derivePetState({ lastSpeakError: { message: '未配置语音合成 Key' } }, { now: NOW })
+  assert.equal(r.key, 'error')
+  assert.match(r.text, /语音合成/)
+})
+
+test('空状态推导为待命', () => {
+  assert.equal(derivePetState({}, { now: NOW }).key, 'idle')
+})
+
+test('推导结果能直接喂给 toWorkStatus', () => {
+  for (const status of [
+    { session: { capturing: true, lines: 3 } },
+    { replyState: { spoken: 'x', at: NOW } },
+    { postMeeting: { phase: 'offline' } },
+    { lastLlmError: { message: 'boom' } },
+    {},
+  ]) {
+    const st = derivePetState(status, { now: NOW })
+    const ws = toWorkStatus(st)
+    assert.ok(ws.state === null || WORK_STATES.includes(ws.state))
+  }
+})
+
+// ── 菜单 ────────────────────────────────────────────────
+test('菜单项都是唯一的，且都能翻译成动作', () => {
+  assert.equal(new Set(PET_MENU_ITEMS).size, PET_MENU_ITEMS.length)
+  for (const label of PET_MENU_ITEMS) {
+    assert.notEqual(menuAction(label).type, 'unknown', label + ' 没有对应动作')
+  }
+})
+
+test('菜单动作映射正确', () => {
+  assert.deepEqual(menuAction('开始录音'), { type: 'auto', action: 'start' })
+  assert.deepEqual(menuAction('结束录音（会后整理）'), { type: 'auto', action: 'stop' })
+  assert.deepEqual(menuAction('切换 Agent 发言'), { type: 'toggle', target: 'reply' })
+  assert.deepEqual(menuAction('切换 建议卡片'), { type: 'toggle', target: 'advice' })
+  assert.equal(menuAction('不存在的项').type, 'unknown')
 })

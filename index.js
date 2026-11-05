@@ -48,8 +48,7 @@ import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advic
 import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
-import { petStateFromStatus, petMenuFromStatus } from './lib/pet-state.js'
-import { createPetClient, toWorkStatus, shouldPush } from './lib/pet-dsh.js'
+import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
 import { resolveDefaultModel } from './lib/model-resolve.js'
 import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd, detectKnowledgeCwd } from './lib/workspace.js'
@@ -308,7 +307,14 @@ export function apply(ctx, config) {
     // 转写上下文：默认不自动送进会话（每送一次都是一轮真实对话，会产生费用）
     // agent 的工作目录：留空则自动对齐知识库（能直接看文档/制品）
     // 桌面宠物：可选。用一个小窗口显示会议助手的状态，并可直接操作。
-    pet: { enabled: Boolean(config.pet?.enabled), url: String(config.pet?.url || ''), x: Number(config.pet?.x || 0), y: Number(config.pet?.y || 0) },
+    // 桌面宠物：可选。对接 dsh-pet（不自建窗口），它没装/没跑时安静降级。
+    pet: {
+      enabled: config.pet?.enabled !== false,
+      sayInBubble: config.pet?.sayInBubble !== false,
+      menu: config.pet?.menu !== false,
+      petName: String(config.pet?.petName || ''),
+      base: String(config.pet?.base || ''),
+    },
     workspace: { cwd: String(config.workspace?.cwd || '') },
     context: { autoInject: false, everyMs: 60000, maxLines: 20, maxChars: 4000, ...(config.context || {}) },
     // 建议卡片：给"人"看的，自动生成、可关
@@ -649,10 +655,10 @@ export function apply(ctx, config) {
           lastSpeakInfo,
           postMeeting,
           pet: {
-            running: !!petProc,
-            enabled: !!cfg.pet.enabled,
-            provider: cfg.pet.provider || 'builtin',
-            dshPetAvailable: probeCache.dshPet === true,
+            enabled: cfg.pet.enabled !== false,
+            provider: 'dsh-pet',
+            available: petAvail,
+            menu: petMenuReady,
             lastPushed,
           },
           brainModel,
@@ -1243,20 +1249,31 @@ export function apply(ctx, config) {
         const r = await joinTool.execute({ code, app: app.name, displayName: cfg.userName || '', confirm: true })
         return json(200, { ...r, code, app: app.name })
       }
-      // 桌面宠物：GET 取当前表情与菜单状态，POST 启停
+      // 桌面宠物（对接 dsh-pet）：GET 看状态与可用性，POST 开关联动
       if (sub === 'pet') {
         if (req.method === 'POST') {
           const bufPet = []
           for await (const chunk of req) bufPet.push(chunk)
           const bodyPet = JSON.parse(Buffer.concat(bufPet).toString('utf8') || '{}')
-          if (bodyPet.enabled === false) { stopPet(); return json(200, { ok: true, running: false }) }
-          if (bodyPet.enabled === true) {
-            const rPet = await startPet()
-            return json(200, { ok: rPet.ok, running: !!petProc, error: rPet.error || '' })
+          if (bodyPet.enabled !== undefined) {
+            cfg.pet.enabled = !!bodyPet.enabled
+            try { savePersisted({ pet: cfg.pet }) } catch { /* ignore */ }
+            if (cfg.pet.enabled) await ensurePetMenu()
           }
+          if (bodyPet.action === 'push') await pushWorkStatus(true)
+          if (bodyPet.action === 'menu') await ensurePetMenu(true)
+          if (bodyPet.say) await pushSay(String(bodyPet.say))
         }
-        const sPet = petState()
-        return json(200, { ok: true, running: !!petProc, enabled: !!cfg.pet.enabled, ...sPet })
+        return json(200, {
+          ok: true,
+          enabled: cfg.pet.enabled !== false,
+          provider: 'dsh-pet',
+          available: await probeDshPet(),
+          menuRegistered: petMenuReady,
+          state: derivePetState(petStatusSnapshot()),
+          workStatus: toWorkStatus(derivePetState(petStatusSnapshot())),
+          lastPushed,
+        })
       }
 
       return json(404, { error: 'not found' })
@@ -1808,114 +1825,161 @@ export function apply(ctx, config) {
     }
   }
 
-    // ── 桌面宠物 ──────────────────────────────────────────────
-    // 可选功能：一个独立的小窗口显示状态、并提供常用操作。
-    // 窗口本身是 tools/pet.exe（WinForms，csc 编译，零依赖），这里只负责拉起与关闭。
-    let petProc = null
 
-    function petState() {
-    try {
-    return {
-    state: petStateFromStatus({
-    session, meeting, reply: cfg.reply, advice: cfg.advice,
-    replyState, adviceState, lastSpeakError, lastSpeakInfo, lastLlmError,
-    postMeeting,
-    }),
-    menu: petMenuFromStatus({ session, reply: cfg.reply, advice: cfg.advice }),
-    }
-    } catch (e) { return { state: { key: 'error', face: 'error', label: '状态异常', color: '#dc2626', text: e.message, hint: '' }, menu: {} } }
-    }
-
-    // ── 与 dsh-pet 联动 ────────────────────────────────────────
-  // 用户要的是"用桌面宠物展示会议助手"，而 dsh-pet 已经能把状态变成动画，
-  // 所以这里只做状态翻译与推送，不再自己画窗口。
+  // ── 桌面宠物：对接 dsh-pet ─────────────────────────────
+  // 不自建窗口：dsh-pet 已有动画、物理、气泡与菜单，我们只推状态、投喂气泡、
+  // 注册菜单项，并在它没装/没跑时安静降级（绝不拖累会议主流程）。
   let dshPet = null
   let lastPushed = null
+  let petAvail = false
+  let petMenuReady = false
+  let petMenuLoop = null
+  // 插件卸载后要让长轮询自己停下来，否则会一直占着句柄
+  let disposed = false
 
   function petClient() {
-    if (!dshPet) dshPet = createPetClient({ base: cfg.pet.dshBase || undefined })
+    if (!dshPet) dshPet = createPetClient({ base: cfg.pet.base || undefined })
     return dshPet
   }
 
+  /** 当前 /status 快照：只取宠物推导需要的字段，避免循环依赖 */
+  function petStatusSnapshot() {
+    return {
+      session: { capturing: !!session.capturing, lines: (session.transcript || []).length },
+      meeting: meeting ? { title: meeting.display || "", app: (cfg.activeApp || "") } : null,
+      reply: cfg.reply, advice: cfg.advice,
+      replyState, adviceState, lastSpeakError, lastSpeakInfo, lastLlmError, postMeeting,
+    }
+  }
+
+  async function probeDshPet(force = false) {
+    if (!force && petAvail) return petAvail
+    try { petAvail = await petClient().available() } catch { petAvail = false }
+    return petAvail
+  }
+
+  /** 推工作状态（内部按"有没有变化"去重，不会每句都打接口） */
   async function pushWorkStatus(force = false) {
-    if (cfg.pet.provider !== 'dsh-pet') return { ok: false, skipped: 'provider' }
+    if (cfg.pet.enabled === false) return { ok: false, skipped: "disabled" }
+    if (!(await probeDshPet())) return { ok: false, skipped: "unavailable" }
     try {
-      const st = petState().state
-      const next = toWorkStatus(st)
-      if (!force && !shouldPush(lastPushed, next)) return { ok: true, skipped: 'unchanged' }
-      const c = petClient()
-      const r = await c.setWorkStatus(next)
+      const next = toWorkStatus(derivePetState(petStatusSnapshot()))
+      if (!force && !shouldPush(lastPushed, next)) return { ok: true, skipped: "unchanged" }
+      const r = await petClient().setWorkStatus(next)
       if (r.ok) lastPushed = next
       return r
-    } catch (e) {
-      return { ok: false, error: e.message }
-    }
+    } catch (e) { return { ok: false, error: e.message } }
   }
 
-  /** 让桌宠把这句话说进气泡（取锁 → 投喂 → 释放） */
+  /** 让桌宠把这句话显示在气泡里（取锁 → 投喂 → 稍后释放） */
   async function pushSay(text) {
-    if (cfg.pet.provider !== 'dsh-pet') return { ok: false, skipped: 'provider' }
-    const body = String(text || '').trim()
-    if (!body) return { ok: false, error: '没有内容' }
+    if (cfg.pet.enabled === false) return { ok: false, skipped: "disabled" }
+    if (cfg.pet.sayInBubble === false) return { ok: false, skipped: "config" }
+    if (!(await probeDshPet())) return { ok: false, skipped: "unavailable" }
+    const body = String(text || "").trim()
+    if (!body) return { ok: false, error: "没有内容" }
     try {
       const c = petClient()
-      const l = await c.lock(cfg.pet.petName || '')
-      if (!l.ok) {
-        // 拿不到锁就直接投喂一次，让上层的 lock-required 明确暴露出来
-        return await c.broadcast(body, { pet: cfg.pet.petName || '' })
-      }
-      const r = await c.broadcast(body, { lockId: l.lockId, pet: cfg.pet.petName || '' })
-      setTimeout(() => { c.release(l.lockId, cfg.pet.petName || '').catch(() => {}) }, 6000)
+      const petName = cfg.pet.petName || ""
+      const l = await c.lock(petName)
+      const r = await c.broadcast(body, { lockId: l.lockId, pet: petName })
+      if (l.lockId) setTimeout(() => { c.release(l.lockId, petName).catch(() => {}) }, 8000)
       return r
-    } catch (e) {
-      return { ok: false, error: e.message }
-    }
+    } catch (e) { return { ok: false, error: e.message } }
   }
 
-  async function startPet() {
-    if (petProc) return { ok: true, already: true, pid: petProc.pid }
-    const exe = join(dirname(fileURLToPath(import.meta.url)), 'tools', 'pet.exe')
-    if (!existsSync(exe)) return { ok: false, error: '找不到 tools/pet.exe，请先编译（csc /target:winexe tools/pet.cs）' }
-    const { spawn } = await import("node:child_process")
-    const port = ctx.webServer?.port || 3080
-    const url = cfg.pet.url || ('http://127.0.0.1:' + port)
-    petProc = spawn(exe, ["--url=" + url], { detached: false, stdio: "ignore" })
-    petProc.on("exit", () => { petProc = null })
-    cfg.pet.enabled = true
-    try { savePersisted({ pet: cfg.pet }) } catch { /* ignore */ }
-    logger?.info?.('[soulmirror] 桌面宠物已启动 pid=' + petProc.pid)
-    return { ok: true, pid: petProc.pid, url }
-    }
+  /** 注册右键菜单，并起一条长轮询把点击接回来 */
+  async function ensurePetMenu(force = false) {
+    if (cfg.pet.enabled === false) return { ok: false, skipped: "disabled" }
+    if (process.env.SOULMIRROR_TEST === "1") return { ok: false, skipped: "test-env" }
+    if (cfg.pet.menu === false) return { ok: false, skipped: "config" }
+    if (!(await probeDshPet(true))) return { ok: false, skipped: "unavailable" }
+    try {
+      const c = petClient()
+      if (force || !petMenuReady) {
+        const r = await c.registerMenu({ owner: "soulmirror", labels: PET_MENU_ITEMS })
+        petMenuReady = !!r.ok
+        if (!r.ok) return r
+      }
+      if (!petMenuLoop) {
+        petMenuLoop = true
+        const loop = async () => {
+          while (petMenuLoop && !disposed) {
+            try {
+              const ev = await c.pollMenu({ owner: "soulmirror", waitMs: 25000 })
+              if (!ev.ok) { await sleep(5000); continue }
+              for (const label of ev.clicked) await handlePetMenu(label)
+            } catch { await sleep(5000) }
+          }
+        }
+        loop().catch(() => { petMenuLoop = null })
+      }
+      await pushWorkStatus(true)
+      return { ok: true }
+    } catch (e) { return { ok: false, error: e.message } }
+  }
 
-    function stopPet() {
-    if (petProc) { try { petProc.kill() } catch { /* ignore */ } petProc = null }
-    cfg.pet.enabled = false
-    try { savePersisted({ pet: cfg.pet }) } catch { /* ignore */ }
-    return { ok: true }
+  /** 菜单点击 → 会议助手动作 */
+  async function handlePetMenu(label) {
+    const act = menuAction(label)
+    logger?.info?.("[soulmirror] 桌宠菜单：" + label + " → " + act.type)
+    if (act.type === "auto") {
+      if (act.action === "start") { armed = true; cfg.enabled = true }
+      if (act.action === "stop") { armed = false; cfg.enabled = false }
+      try { await session[act.action === "start" ? "startCapture" : "stopCapture"]() } catch { /* ignore */ }
+      await pushWorkStatus(true)
+      return
     }
+    if (act.type === "toggle") {
+      if (act.target === "reply") cfg.reply.enabled = !cfg.reply.enabled
+      if (act.target === "advice") cfg.advice.enabled = !cfg.advice.enabled
+      try { savePersisted({ reply: cfg.reply, advice: cfg.advice }) } catch { /* ignore */ }
+      await pushWorkStatus(true)
+      return
+    }
+    if (act.type === "open") { logger?.info?.("[soulmirror] 桌宠请求打开面板") }
+  }
 
-  // ── 状态 ────────────────────────────────────────────────────────────
+  // 用 unref 的定时器：菜单长轮询的等待不该阻止进程退出（测试里会直接挂住）
+  const sleep = (ms) => new Promise((r) => {
+    const h = setTimeout(r, ms)
+    if (h && typeof h.unref === 'function') h.unref()
+  })
+
   ctx.tools.register(defineTool({
     name: 'meeting_pet',
-    description: '桌面宠物：可选的小窗口，实时显示会议助手的状态（在听/说话/整理中/出错），并可直接开始录音、结束录音、切换 Agent 与建议开关。action=start 打开，stop 关闭，status 查看当前表情与状态。',
+    description: '桌面宠物（对接 dsh-pet）：把会议助手的状态推给桌宠（在听/说话/整理中/出错），并可在桌宠右键菜单里操作录音与开关。action=status 看状态，push 立即推一次，menu 重新注册菜单，say 让它说一句。',
     parameters: {
-      action: { type: 'string', required: true, description: 'start | stop | status' },
+      action: { type: 'string', required: true, description: 'status | push | menu | say' },
+      text: { type: 'string', description: 'action=say 时要说的话' },
     },
     output: OUT(),
     execute: wrap('meeting_pet', async (a) => {
       const action = String(a.action || '').trim()
-      if (action === 'start') {
-        const r = await startPet()
-        if (!r.ok) return { ok: false, result: r.error }
-        return { ok: true, result: r.already ? '桌面宠物已在运行' : ('桌面宠物已打开（pid ' + r.pid + '）') }
-      }
-      if (action === 'stop') {
-        stopPet()
-        return { ok: true, result: '桌面宠物已关闭' }
-      }
+      const avail = await probeDshPet(true)
       if (action === 'status') {
-        const s = petState()
-        return { ok: true, result: s.state.label + (s.state.text ? '：' + s.state.text : '') + '（' + (petProc ? '运行中' : '未运行') + '）', ...s }
+        const st = derivePetState(petStatusSnapshot())
+        return {
+          ok: true,
+          result: (avail ? '桌宠在线' : '桌宠未安装或未运行') + ' · ' + st.label + (st.text ? '：' + st.text : ''),
+          available: avail,
+          state: st,
+          workStatus: toWorkStatus(st),
+          menuRegistered: petMenuReady,
+          lastPushed,
+        }
+      }
+      if (action === 'push') {
+        const r = await pushWorkStatus(true)
+        return { ok: !!r.ok, result: r.ok ? ('已推送：' + JSON.stringify(lastPushed)) : ('推送失败：' + (r.error || r.skipped)) }
+      }
+      if (action === 'menu') {
+        const r = await ensurePetMenu(true)
+        return { ok: !!r.ok, result: r.ok ? '菜单已注册（右键「更多」里可见）' : ('注册失败：' + (r.error || r.skipped)) }
+      }
+      if (action === 'say') {
+        const r = await pushSay(String(a.text || ''))
+        return { ok: !!r.ok, result: r.ok ? '已让它开口' : ('发言失败：' + (r.error || r.skipped)) }
       }
       return { ok: false, result: '未知 action：' + action }
     }),
@@ -3982,7 +4046,10 @@ export function apply(ctx, config) {
   // 恢复上次的开关状态：上次开着就继续开，上次关着就保持待命
   if (cfg.enabled === true) armed = true
   // 桌面宠物是可选项：上次开着就自动恢复
-  if (cfg.pet.enabled === true) startPet().catch((e) => logger?.warn?.('[soulmirror] 宠物启动失败: ' + e.message))
+  // 桌面宠物是可选项：开着就在启动时注册菜单并推一次状态
+  if (cfg.pet.enabled !== false) {
+    ensurePetMenu().catch((e) => logger?.warn?.('[soulmirror] 桌宠联动失败: ' + e.message))
+  }
   // 只在总开关打开时才轮询窗口，关闭时完全不碰桌面
   if (cfg.enabled && cfg.autoWatch && process.env.SOULMIRROR_TEST !== '1') lifecycle.start()
 
