@@ -50,6 +50,7 @@ import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candi
 import { detectTrigger } from './lib/trigger-rules.js'
 import { createSessionGate, keyOf } from './lib/session-gate.js'
 import { isModelCommentary, isSelfEcho, sanitizeCorrection } from './lib/echo-guard.js'
+import { resolveProfileDir } from './lib/profile-path.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
 import { checkOptionalDeps, featureAllowed, featureGateMessage, installPlugin } from './lib/deps-optional.js'
 import { derivePetState, toWorkStatus, shouldPush, createPetClient, PET_MENU_ITEMS, menuAction } from './lib/pet-dsh.js'
@@ -322,6 +323,9 @@ export function apply(ctx, config) {
     },
     workspace: { cwd: String(config.workspace?.cwd || '') },
     // 入会总超时：UI 探测步骤多，卡住时必须自己认输而不是让用户干等
+    // 可选插件缺失时是否自动下载安装：默认关闭
+    // （会联网、会改 profile 依赖，必须用户显式开启）
+    depsAutoInstall: config.deps?.autoInstall === true,
     joinTimeoutMs: Number(config.joinTimeoutMs) || 20000,
     context: { autoInject: false, everyMs: 60000, maxLines: 20, maxChars: 4000, ...(config.context || {}) },
     // 建议卡片：给"人"看的，自动生成、可关
@@ -672,6 +676,7 @@ export function apply(ctx, config) {
             lastPushed,
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
+          depsAutoInstall: !!cfg.depsAutoInstall,
           sessionGate: (typeof gateStats === 'function' ? gateStats() : null),
           brainModel,
           world: (() => { try { return living.snapshot() } catch { return null } })(),
@@ -1872,10 +1877,25 @@ export function apply(ctx, config) {
   let depsCheckedAt = 0
 
   function profileDirNow() {
-    const prof = process.env.DSH_PROFILE || ''
-    const home = process.env.USERPROFILE || process.env.HOME || ''
-    if (!prof || !home) return ''
-    return join(home, '.dsh', 'profiles', prof)
+    try {
+      return resolveProfileDir({
+        selfUrl: import.meta.url,
+        env: process.env,
+        homeDir: process.env.USERPROFILE || process.env.HOME || '',
+        exists: existsSync,
+        join,
+      })
+    } catch {
+      return ''
+    }
+  }
+
+  /** 当前 profile 名（从目录反推，环境变量可能为空） */
+  function profileNameNow() {
+    const dir = profileDirNow()
+    if (!dir) return ''
+    const m = dir.split(/[\\/]+/).filter(Boolean)
+    return m[m.length - 1] || ''
   }
 
   function refreshOptionalDeps() {
@@ -1892,8 +1912,28 @@ export function apply(ctx, config) {
   /** 这个能力现在允许启动吗（没装插件就不启动） */
   function gateStats() { return gateStatsRef ? gateStatsRef() : null }
 
+  /** 每个依赖本次启动只自动装一次，失败不重试（避免反复联网） */
+  const autoInstallTried = new Set()
+
   function gate(key) {
-    return featureGateMessage(key, optionalDeps.length ? optionalDeps : refreshOptionalDeps())
+    const deps = optionalDeps.length ? optionalDeps : refreshOptionalDeps()
+    const g = featureGateMessage(key, deps)
+    // 缺插件 + 用户开了自动安装 → 后台装一次，装完刷新状态
+    if (!g.allowed && cfg.depsAutoInstall && !autoInstallTried.has(key)) {
+      const hit = deps.find((d) => d.key === key)
+      const prof = profileNameNow()
+      if (hit && hit.pkg && prof) {
+        autoInstallTried.add(key)
+        logger?.info?.('[soulmirror] 自动安装缺失插件：' + hit.pkg + '（profile=' + prof + '）')
+        installPlugin({ pkg: hit.pkg, profile: prof })
+          .then((r) => {
+            refreshOptionalDeps()
+            logger?.[r.ok ? 'info' : 'warn']?.('[soulmirror] 自动安装' + (r.ok ? '成功' : '失败：' + r.error) + ' → ' + hit.pkg)
+          })
+          .catch(() => {})
+      }
+    }
+    return g
   }
 
   let petAvail = false
