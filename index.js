@@ -1251,22 +1251,6 @@ export function apply(ctx, config) {
         const r = await joinTool.execute({ code, app: app.name, displayName: cfg.userName || '', confirm: true })
         return json(200, { ...r, code, app: app.name })
       }
-      // 一句话入口：把自然语言交给会议会话（语音、桌宠、脚本都走这里）
-      if (sub === 'run' && req.method === 'POST') {
-        const bufRun = []
-        for await (const chunk of req) bufRun.push(chunk)
-        const bodyRun = JSON.parse(Buffer.concat(bufRun).toString('utf8') || '{}')
-        const textRun = String(bodyRun.text || bodyRun.request || '').trim()
-        if (!textRun) return json(400, { ok: false, error: '缺少 text' })
-        try {
-          const rRun = await runInMeetingSession(textRun, { timeoutMs: cfg.twin.timeoutMs })
-          const out = String(rRun.text || rRun.error || '').trim()
-          if (out) { try { await bubbleByPriority({ speaking: out.slice(0, 80) }) } catch { /* ignore */ } }
-          return json(200, { ok: !!rRun.ok, text: out, sessionId: rRun.sessionId || '', error: rRun.error || '' })
-        } catch (e) {
-          return json(200, { ok: false, error: e.message })
-        }
-      }
 
       // 桌面宠物（对接 dsh-pet）：GET 看状态与可用性，POST 开关联动
       if (sub === 'pet') {
@@ -2000,7 +1984,10 @@ export function apply(ctx, config) {
     execute: wrap('meeting_run', async (a) => {
       const request = String(a.request || '').trim()
       if (!request) return { ok: false, result: '没有内容' }
-      const r = await runInMeetingSession(request, { timeoutMs: cfg.twin.timeoutMs })
+      // 语义：新建一个 DSH 对话，把用户原话作为第一句投进去。
+      // soulmirror 是 DSH 的插件，不是独立应用——所以不自己造入口，
+      // 而是复用 DSH 的会话能力：新对话里 agent 会用本插件的工具完成任务。
+      const r = await newConversation(request)
       const text = String(r.text || r.error || '').trim()
       if (text) {
         try { await bubbleByPriority({ speaking: text.slice(0, 80) }) } catch { /* ignore */ }
@@ -2703,6 +2690,31 @@ export function apply(ctx, config) {
    * 在会议会话里跑一轮：优先用宿主内的 sessionController（会话在界面上可见），
    * 拿不到再回退到 headless 子进程。
    */
+  /**
+   * 新建一个 DSH 对话并投递第一句。
+   *
+   * 为什么不复用会议会话：用户说"帮我约个会"时，他期待的是**一个能继续追问的对话**，
+   * 而不是塞进那条长期复用的会议会话里（那里已经有几十轮任务历史）。
+   * 新对话的 cwd 与会议会话一致（知识库目录），所以照样能看到文档与制品。
+   */
+  async function newConversation(text, { title = '' } = {}) {
+    const controller = getController(ctx)
+    if (!controller) return { ok: false, error: '宿主没有 sessionController' }
+    const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
+    const cwd = ws.agentCwd || ws.dir
+    try {
+      const sessionId = await createSession(ctx, {
+        cwd,
+        title: title || ('会议助手 · ' + String(text || '').slice(0, 20)),
+      })
+      logger?.info?.('[soulmirror] 已新建对话 ' + sessionId + '，首句：' + String(text).slice(0, 40))
+      const r = await promptSession(ctx, sessionId, text, { timeoutMs: cfg.twin.timeoutMs })
+      return { ok: r.ok, text: r.text, error: r.error, sessionId, via: 'new-conversation' }
+    } catch (e) {
+      return { ok: false, error: e.message, sessionId: '' }
+    }
+  }
+
   async function runInMeetingSession(prompt, { title, timeoutMs, onEvent } = {}) {
     const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
     // 会议会话是长期复用的，历史里还留着之前的任务。每轮都明确“只做这一条”，
