@@ -1,4 +1,4 @@
-> ⚠️ **已被 [DESIGN-v4.md](DESIGN-v4.md) 取代**：ASR 改回云端实时流式，3.0 的分段器与本地 SenseVoice 方案不再实施。
+﻿> ⚠️ **已被 [DESIGN-v4.md](DESIGN-v4.md) 取代**：ASR 改回云端实时流式，3.0 的分段器与本地 SenseVoice 方案不再实施。
 
 # SoulMirror 3.0 设计方案（生产级 · 可离线 · 无需会议软件即可验证）
 
