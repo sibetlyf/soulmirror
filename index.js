@@ -12,7 +12,7 @@
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs'
-import { appendFile, mkdir, writeFile } from 'node:fs/promises'
+import { appendFile, mkdir, writeFile, openAsBlob } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
@@ -38,7 +38,7 @@ import { saveMinutes } from './lib/minutes-file.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
-import { readWavPcm, transcribeOffline, buildOfflineMinutes } from './lib/offline-asr.js'
+import { readWavPcm, readWavHeader, transcribeOffline, buildOfflineMinutes } from './lib/offline-asr.js'
 import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
 import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
 import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
@@ -2881,6 +2881,23 @@ export function apply(ctx, config) {
    * 而不是塞进那条长期复用的会议会话里（那里已经有几十轮任务历史）。
    * 新对话的 cwd 与会议会话一致（知识库目录），所以照样能看到文档与制品。
    */
+  /**
+   * 给一个可能永远不返回的 Promise 加超时。
+   * 超时不取消底层工作（JS 没有通用的取消），但会让调用方先往下走——
+   * 对"会后整理"这种场景，能落盘纪要比无限等待更重要。
+   */
+  function withTimeout(promise, ms, label) {
+    let timer = null
+    const timeout = new Promise((resolve) => {
+      timer = setTimeout(() => {
+        logger?.warn?.('[soulmirror] ' + label)
+        resolve({ ok: false, error: label, timedOut: true })
+      }, ms)
+      timer.unref?.()
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+  }
+
   async function newConversation(text, { title = '' } = {}) {
     const controller = getController(ctx)
     if (!controller) return { ok: false, error: '宿主没有 sessionController' }
@@ -4209,16 +4226,25 @@ export function apply(ctx, config) {
     try { pushWorkStatus(true).catch(() => {}) } catch { /* ignore */ }
     const t0 = Date.now()
     try {
-      const { seconds } = readWavPcm(wav)
+      const { seconds } = readWavHeader(wav)   // 只读头，不读整份 PCM
       logger?.info?.('[soulmirror] 会后重转写开始（云端文件识别 + 说话人分离）：' + Math.round(seconds) + ' 秒音频')
 
       // 优先用云端文件识别：能分人、断句更准
       let lines = []
       let mode = 'file'
       try {
+        // 超大录音跳过云端文件识别：它要整份上传，几十分钟的会议代价高、也更容易失败。
+        // 超过 300MB（约 2.5 小时 16k 单声道）直接走本地重放，内存有界。
+        const wavBytes = (() => { try { return statSync(wav).size } catch { return 0 } })()
+        if (wavBytes > 300 * 1024 * 1024) {
+          logger?.warn?.('[soulmirror] 录音 ' + Math.round(wavBytes / 1048576) + 'MB 过大，跳过云端文件识别，改用本地重放')
+          throw new Error("录音过大（" + Math.round(wavBytes / 1048576) + "MB），跳过文件识别")
+        }
         const r = await transcribeFileWithSpeakers({
           apiKey: key,
-          file: readFileSync(wav),
+          // 用 openAsBlob 从磁盘流式上传：readFileSync 会额外占一整份音频，再被 Blob 复制一次，
+          // 长会议（几十分钟）峰值就是几百 MB，实测曾把 4GB 堆撑爆。
+          file: await openAsBlob(wav, { type: 'audio/wav' }),
           fileName: 'meeting.wav',
           languageHints: ['zh', 'en'],
         })
@@ -4241,8 +4267,10 @@ export function apply(ctx, config) {
       }
       const elapsed = Math.round((Date.now() - t0) / 1000)
       logger?.info?.('[soulmirror] 离线转写完成：' + lines.length + ' 句，耗时 ' + elapsed + ' 秒')
-      setPostMeeting({ phase: 'minutes', sentences: lines.length, speakers: speakers })
+      // 先算 speakers 再用：之前 setPostMeeting 引用了下一行才声明的 const，
+      // 每次离线转写成功都以 ReferenceError 收尾 —— 表现就是"转完了但纪要/入库没做"。
       const speakers = new Set(lines.map((x) => x.speaker).filter(Boolean)).size
+      setPostMeeting({ phase: 'minutes', sentences: lines.length, speakers })
       try { saveMeta(dir, { speakers, lines: lines.length, offlineAt: new Date().toISOString() }) } catch { /* ignore */ }
       return { ok: true, sentences: lines.length, speakers, mode, seconds: Math.round(seconds), elapsed, md, minutesPath: savedPath }
     } catch (e) {
@@ -4304,7 +4332,15 @@ export function apply(ctx, config) {
 
     // 1.5) 会后离线重转写：用整场录音补全实时那条线可能漏掉的句子
     try {
-      const off = await runOfflinePass(session.dir)
+      // 总超时：离线重转写涉及"整份上传 + 云端排队 + 下载结果"，
+      // 网络或服务端变慢时可能拖很久。卡住必须自己认输，
+      // 否则用户看到的是"转文字一直不动"，最后什么都没落盘。
+      const offlineTimeoutMs = Math.max(60000, Number(cfg.offlineTimeoutMs) || 10 * 60 * 1000)
+      const off = await withTimeout(
+        runOfflinePass(session.dir),
+        offlineTimeoutMs,
+        '离线重转写超时（' + Math.round(offlineTimeoutMs / 60000) + ' 分钟）',
+      )
       if (off.ok) {
         results.offline = '会后重转写：' + off.sentences + ' 句' +
           (off.speakers ? '（' + off.speakers + ' 位说话人）' : '') +
