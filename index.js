@@ -1592,9 +1592,8 @@ export function apply(ctx, config) {
     const item = { t: new Date().toISOString(), text: clean, role: 'assistant', reason }
     session.transcript.push(item)
     session.partial = ''
-    if (session.dir) {
-      appendFile(join(session.dir, 'transcript.jsonl'), JSON.stringify(item) + '\n', 'utf8').catch(() => {})
-    }
+    // 走账本统一入口：保证"只增不改 + replaces 标记"的规则只有一处实现
+    if (session.dir) session._appendTranscript?.(item)
     return item
   }
   // 麦克风状态：UIA 读不到腾讯会议的静音态，只能自己记账
