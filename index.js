@@ -16,6 +16,7 @@ import {appendFile, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
+import v8 from 'node:v8'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -710,6 +711,21 @@ export function apply(ctx, config) {
             lastPushed,
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
+          // 内存水位与"可能无限增长"的计数器：崩溃前看一眼就知道是谁在涨
+          mem: (function () {
+            try {
+              const m = process.memoryUsage()
+              return {
+                heapMb: Math.round(m.heapUsed / 1048576),
+                rssMb: Math.round(m.rss / 1048576),
+                peakMb: memPeakMb,
+                recent: memHistory.slice(-6),
+                transcriptLines: (session.transcript || []).length,
+                judgementTurns: judgementTurns,
+                gate: (typeof gateStats === 'function' ? gateStats() : null),
+              }
+            } catch { return null }
+          })(),
           // 采集组件是否就绪：别人的机器上可能没编译出 mbridge.exe
           bridge: (function () {
             try {
@@ -3282,11 +3298,28 @@ export function apply(ctx, config) {
      */
     let judgementSessionId = ''
     let judgementBusyUntil = 0
+    let judgementTurns = 0
+    let judgementAt = 0
+    /**
+     * 判定会话需要**定期轮换**。
+     *
+     * 它是普通 DSH 会话：每一轮问答都会留在会话历史里（进程内常驻）。
+     * 一场会里逐句纠错 + 候选词 + 建议，很容易累积几百轮，
+     * 而 DSH 会把这些历史保留在内存里 —— 长时间运行就是持续增长。
+     * 所以每 200 轮或 45 分钟换一个新会话：旧的自然被回收。
+     */
     async function ensureJudgementSession() {
-      if (judgementSessionId) return judgementSessionId
+      const stale = judgementSessionId && (
+        judgementTurns >= (Number(cfg.judgementMaxTurns) || 200) ||
+        (judgementAt && Date.now() - judgementAt > (Number(cfg.judgementMaxAgeMs) || 45 * 60 * 1000))
+      )
+      if (judgementSessionId && !stale) return judgementSessionId
+      if (stale) logger?.info?.('[soulmirror] 判定会话轮换（已用 ' + judgementTurns + ' 轮）')
       const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
       const cwd = ws.agentCwd || ws.dir
       judgementSessionId = await createSession(ctx, { cwd, title: '会议助手 · 判定（内部）' })
+      judgementTurns = 0
+      judgementAt = Date.now()
       logger?.info?.('[soulmirror] 判定会话已就绪：' + judgementSessionId)
       return judgementSessionId
     }
@@ -3302,6 +3335,7 @@ export function apply(ctx, config) {
           const sid = await ensureJudgementSession()
           const r = await promptSession(ctx, sid, prompt, { timeoutMs: Math.min(120000, cfg.twin.timeoutMs || 120000) })
           judgementBusyUntil = Date.now()
+          judgementTurns += 1
           if (!r.ok) throw new Error(r.error || '会话未返回结果')
           const text = String(r.text || '').trim()
           if (!text) throw new Error('会话返回空内容')
@@ -4623,7 +4657,31 @@ export function apply(ctx, config) {
     } catch { /* ignore */ }
   }
   // 预算守护：超限就停采集并明确告知（不偷偷继续花钱）
+  // 每拍记录内存水位，便于事后判断"什么时候开始涨"
+  let memPeakMb = 0
+  let memHistory = []
+  function memSnapshot() {
+    try {
+      const m = process.memoryUsage()
+      const heapMb = Math.round(m.heapUsed / 1048576)
+      if (heapMb > memPeakMb) memPeakMb = heapMb
+      memHistory.push(heapMb)
+      if (memHistory.length > 40) memHistory = memHistory.slice(-40)
+      return { heapMb, rssMb: Math.round(m.rss / 1048576), externalMb: Math.round(m.external / 1048576) }
+    } catch { return { heapMb: 0, rssMb: 0, externalMb: 0 } }
+  }
+
   const budgetGuard = setInterval(() => {
+    const mem = memSnapshot()
+    // 内存接近上限：优雅停止，而不是让 V8 抛 FATAL ERROR 把宿主带走
+    const heapLimitMb = Math.round(v8.getHeapStatistics().heap_size_limit / 1048576)
+    const memLimitMb = Number(cfg.memLimitMb) || Math.round(heapLimitMb * 0.8)
+    if (session.capturing && mem.heapMb >= memLimitMb) {
+      logger?.warn?.('[soulmirror] 内存接近上限（' + mem.heapMb + 'MB / 阈值 ' + memLimitMb + 'MB），停止采集以保护宿主')
+      session.lastError = '内存接近上限（' + mem.heapMb + 'MB），已停止采集以保护 DSH 主进程。录音与转写都已落盘，重启后可继续整理。'
+      session.stopCapture?.().catch?.(() => {})
+      return
+    }
     if (!session.capturing) return
     if (budget.overBudget()) {
       logger?.warn?.('[soulmirror] 已达识别预算 ' + budget.limitMinutes + ' 分钟，自动停止采集')
