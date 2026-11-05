@@ -1270,7 +1270,13 @@ export function apply(ctx, config) {
       // 可选依赖：GET 体检，POST 一键安装（用 DSH 自己的 plugin add）
       if (sub === 'deps') {
         if (req.method === 'GET') {
-          return json(200, { ok: true, profile: process.env.DSH_PROFILE || '', profileDir: profileDirNow(), deps: refreshOptionalDeps(), checkedAt: depsCheckedAt })
+          const prof = profileNameNow()
+          const deps = refreshOptionalDeps().map((d) => ({
+            ...d,
+            // 把命令直接算好给界面：用户可能想自己在终端里装（这是唯一一定有效的兜底）
+            command: 'dsh plugin --profile ' + (prof || 'web') + ' add ' + d.pkg,
+          }))
+          return json(200, { ok: true, profile: prof, profileDir: profileDirNow(), deps, checkedAt: depsCheckedAt, autoInstall: !!cfg.depsAutoInstall })
         }
         const bufDep = []
         for await (const chunk of req) bufDep.push(chunk)
@@ -1281,7 +1287,15 @@ export function apply(ctx, config) {
         if (!prof) return json(400, { ok: false, error: '拿不到当前 profile，无法安装' })
         const r = await installPlugin({ pkg, profile: prof })
         refreshOptionalDeps()
-        return json(200, { ok: r.ok, pkg, profile: prof, output: r.output.slice(-1200), error: r.error, deps: optionalDeps })
+        return json(200, {
+          ok: r.ok,
+          pkg,
+          profile: prof,
+          command: 'dsh plugin --profile ' + prof + ' add ' + pkg,
+          output: r.output.slice(-1200),
+          error: r.error,
+          deps: optionalDeps.map((d) => ({ ...d, command: 'dsh plugin --profile ' + prof + ' add ' + d.pkg })),
+        })
       }
 
       // 桌面宠物（对接 dsh-pet）：GET 看状态与可用性，POST 开关联动

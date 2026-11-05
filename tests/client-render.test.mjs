@@ -157,7 +157,7 @@ test('DevicePicker 能渲染', () => {
 
 test('所有导出的面板组件都能在默认 props 下渲染', () => {
   const { exp } = loadClient()
-  const names = ['PanelIcon', 'LiveDock', 'SettingsSection', 'SetupCard', 'DevicePicker', 'StatusStrip', 'AfterMeetingCard', 'PrepareCard', 'RecordsCard', 'CompactPanel', 'MeetingPage', 'Overlay']
+  const names = ['PanelIcon', 'LiveDock', 'SettingsSection', 'SetupCard', 'DepsCard', 'DevicePicker', 'StatusStrip', 'AfterMeetingCard', 'PrepareCard', 'RecordsCard', 'CompactPanel', 'MeetingPage', 'Overlay']
   for (const name of names) {
     const comp = exp.__test[name]
     assert.ok(comp, name + ' 未导出')
