@@ -35,7 +35,7 @@ import { startDashScopeAsr } from './lib/dashscope.js'
 import { DemoController } from './lib/demo.js'
 import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
-import { saveMinutes } from './lib/minutes-file.js'
+import { saveMinutes as persistMinutesFile } from './lib/minutes-file.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
@@ -85,7 +85,7 @@ import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio } from './l
 import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib/join-url.js'
 import { resolveApiKey, resolveDashScopeKey, keyInfo } from './lib/env.js'
 import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
-import { findMeeting, findMeetingInEvent, AutoJoinGate } from './lib/auto-join.js'
+import { findMeeting, findMeetingInEvent, AutoJoinGate, isUserAuthoredEvent } from './lib/auto-join.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
 import { getController, createSession, promptSession } from './lib/dsh-session.js'
@@ -267,9 +267,14 @@ export const Config = z.object({
   }),
   /** 无人值守：DSH 弹确认卡片时，超时按推荐项自动应答，避免整轮卡死。 */
   autoAnswer: z.object({
-    enabled: z.boolean().default(true),
-    /** 等多久没人答就自动选（毫秒）。 */
+    /** 默认关闭：无人值守的便利不能以"可能替人授权"为代价。 */
+    enabled: z.boolean().default(false),
+    /** 等多久没人答就自动选（毫秒）。只对问句生效，权限审批永不接管。 */
     timeoutMs: z.number().default(5000),
+    /** 必须限定会话：只有这个 sessionId 的问句才接管。 */
+    onlyForSessionId: z.string().default(''),
+    /** 或按前缀限定（例如会议会话的 id 前缀）。 */
+    onlyForSessionPrefix: z.string().default(''),
   }),
   /** 会后写回知识库（通过 DSH 的 knowledge 工具完成）。 */
   knowledge: z.object({
@@ -368,7 +373,7 @@ export function apply(ctx, config) {
     },
     brain: { baseUrl: '', provider: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, gate: 'llm', ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, autoSession: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
-    autoAnswer: { enabled: true, timeoutMs: 5000, ...(config.autoAnswer || {}) },
+    autoAnswer: { enabled: false, timeoutMs: 5000, onlyForSessionId: '', onlyForSessionPrefix: '', ...(config.autoAnswer || {}) },
     knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
     apps: Array.isArray(config.apps) && config.apps.length
@@ -1229,15 +1234,15 @@ export function apply(ctx, config) {
           lifecycle.stop()
           const stoppedDir = session.dir || ''
           const hadAudio = !!session.capturing
-          try { await session.stopCapture() } catch { /* ignore */ }
           logger?.info?.('[soulmirror] 已关闭会议功能（disarmed），不再自动操作')
           // 用户点"结束录音"= 这场会开完了：直接开始会后整理（离线重转写 + 纪要 + 知识库）
           if (hadAudio && stoppedDir) {
-            setPostMeeting({ phase: 'stopping', dir: stoppedDir, error: '' })
-            finalizeMeeting({ speak: false, writeKnowledge: true })
-              .then((r) => {
-                setPostMeeting({ phase: 'done', minutesPath: (r && r.minutes) || postMeeting.minutesPath })
-                logger?.info?.('[soulmirror] 结束后整理完成：' + JSON.stringify(r).slice(0, 160))
+            // 统一入口：停采 + 去抖 + 整理都在 stopAndOrganize 里
+            stopAndOrganize('结束录音', { wasCapturing: hadAudio })
+              .then((o) => {
+                // 状态由 stopAndOrganize 自维护（stopping→done/error），这里只记日志，
+                // 否则会用错字段把 done 覆盖成空的纪要路径
+                logger?.info?.('[soulmirror] 结束后整理：' + (o.organized ? '已开始/完成' : (o.reason || '跳过')))
               })
               .catch((e) => setPostMeeting({ phase: 'error', error: e.message }))
           }
@@ -2852,13 +2857,13 @@ export function apply(ctx, config) {
     parameters: {},
     output: OUT(),
     execute: wrap('meeting_capture_stop', async () => {
-      const r = await session.stopCapture()
-      // 停止即整理：工具停止过去不会生成纪要，这是缺口
-      const o = await stopAndOrganize('手动停止采集')
+      // 只调一个入口：由 stopAndOrganize 负责"停采 + 整理"。
+      // 过去这里先 stopCapture()，导致它内部的 wasCapturing 已是 false，整理被静默跳过。
+      const o = await stopAndOrganize('手动停止采集', { wasCapturing: true })
       const tail = o.organized
         ? '；已开始会后整理（纪要生成中）'
         : (o.reason ? '；' + o.reason : '')
-      return { ok: true, result: `已停止，共 ${r.chunks} 片，目录 ${r.dir || '-'}` + tail }
+      return { ok: true, result: `已停止，共 ${o.chunks || 0} 片，目录 ${o.dir || '-'}` + tail }
     }),
   }))
 
@@ -3787,10 +3792,10 @@ export function apply(ctx, config) {
     execute: wrap('meeting_agent_stop', async () => {
       agent.running = false
       armed = false
-      await session.stopCapture()
       // 停止大脑 = 这场会不听了：同样要整理，否则用户拿不到纪要
-      const o = await stopAndOrganize('停止会议大脑')
-      return { ok: true, result: `已停止：听过 ${brain.stats.seen} 句，触发 ${brain.stats.triggered} 次，播报 ${agent.spoken} 次` }
+      const o = await stopAndOrganize('停止会议大脑', { wasCapturing: true })
+      const tail2 = o.organized ? '；已开始会后整理' : (o.reason ? '；' + o.reason : '')
+      return { ok: true, result: `已停止：听过 ${brain.stats.seen} 句，触发 ${brain.stats.triggered} 次，播报 ${agent.spoken} 次` + tail2 }
     }),
   }))
 
@@ -4622,7 +4627,7 @@ export function apply(ctx, config) {
       setPostMeeting({ phase: 'minutes', sentences: texts.length, dir })
       const md = await buildOfflineMinutes({ sentences: texts, completer })
       if (!md) return { ok: false, error: '纪要生成失败（模型没返回内容）' }
-      const saved = await saveMinutes(join(dir, 'minutes.md'), md)
+      const saved = await persistMinutesFile(join(dir, 'minutes.md'), md)
       logger?.info?.('[soulmirror] 已从账本补出纪要：' + dir + '（' + texts.length + ' 句）')
 
       // 能写知识库就顺手写：失败不影响本地纪要
@@ -4636,7 +4641,9 @@ export function apply(ctx, config) {
             title: '补整理 · ' + (require('node:path').basename(dir)),
             markdown: md, type: 'decision', group: '会议纪要',
           })
-          knowledge = r.ok ? '已写入知识库' : '写库失败：' + (r.error || r.status || '')
+          knowledge = r.ok
+            ? '已写入知识库（' + String(r.id || 'ok').slice(0, 8) + '）'
+            : '未写入：' + (r.error || r.status || '') + (r.note ? '（' + r.note + '）' : '')
         }
       } catch { /* ignore */ }
 
@@ -4763,7 +4770,7 @@ export function apply(ctx, config) {
       const md = await buildOfflineMinutes({ sentences: lines.map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text })), completer })
       let savedPath = ''
       if (md) {
-        const saved = await saveMinutes(join(dir, 'minutes.md'), md)
+        const saved = await persistMinutesFile(join(dir, 'minutes.md'), md)
         savedPath = saved.path
       }
       const elapsed = Math.round((Date.now() - t0) / 1000)
@@ -4812,11 +4819,15 @@ export function apply(ctx, config) {
    * @param {string} reason 记录原因：手动停止 / 离开会议 / 停止大脑 / 窗口关闭
    * @returns {Promise<{organized: boolean, reason: string, error?: string, dir?: string}>}
    */
-  async function stopAndOrganize(reason = '手动停止') {
+  async function stopAndOrganize(reason = '手动停止', opts = {}) {
     const dir = session.dir || ''
-    const wasCapturing = !!session.capturing
-    try { await session.stopCapture() } catch { /* 已经停了也无所谓 */ }
-    if (!wasCapturing || !dir) return { organized: false, reason, dir }
+    // 调用方可能在进入这里之前就已经停过采集（那会让 wasCapturing 为 false，
+    // 整理被直接跳过——用户以为"停止即整理"，实际什么都没生成）。
+    // 所以允许调用方显式声明"进来之前还在采集"，并且统一由本函数负责停采。
+    const wasCapturing = opts.wasCapturing == null ? !!session.capturing : !!opts.wasCapturing
+    let stopResult = null
+    try { stopResult = await session.stopCapture() } catch { /* 已经停了也无所谓 */ }
+    if (!wasCapturing || !dir) return { organized: false, reason, dir, chunks: (stopResult && stopResult.chunks) || 0 }
     if (Date.now() - lastFinalizedAt < 60000 || finalizing) {
       return { organized: false, reason: reason + '（刚刚整理过）', dir }
     }
@@ -4849,12 +4860,12 @@ export function apply(ctx, config) {
     if (md) {
       try {
         if (session.dir) {
-          const r = await saveMinutes(join(session.dir, 'minutes.md'), md)
+          const r = await persistMinutesFile(join(session.dir, 'minutes.md'), md)
           results.minutes = r.path
           if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
         }
         const ws = ensureMeetingWorkspace()
-        if (ws.dir) await saveMinutes(join(ws.dir, 'minutes.md'), md)
+        if (ws.dir) await persistMinutesFile(join(ws.dir, 'minutes.md'), md)
       } catch { /* ignore */ }
     }
 
@@ -4934,12 +4945,18 @@ export function apply(ctx, config) {
         if (kd.host && port) {
           const origin = 'http://127.0.0.1:' + port
           const r = await writeViaHostApi({ port, origin, title, markdown: md, type: 'decision', group: '会议纪要' })
-          if (r.ok) {
+          if (r.ok && r.committed !== false) {
             results.knowledge = '已写入知识库（' + (r.id || 'ok').toString().slice(0, 8) + '）'
             addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
           } else {
-            results.knowledge = '写入失败：' + (r.error || r.status || '') + '（' + origin + '/knowledge-local/v1/entries）'
-            logger?.warn?.('[soulmirror] 知识库写入失败：' + JSON.stringify(r).slice(0, 200))
+            // 不谎报：本地已存 / 已入队 / 未确认 要分开说
+            const parts = []
+            if (r.localSaved) parts.push('纪要已存本地')
+            if (r.archiveQueued) parts.push('归档已入队')
+            results.knowledge = '未确认写入：' + (r.error || r.status || '') +
+              (parts.length ? '（' + parts.join('，') + '）' : '') +
+              (r.note ? '；' + r.note : '')
+            logger?.warn?.('[soulmirror] 知识库未确认写入：' + JSON.stringify(r).slice(0, 200))
           }
         } else {
           results.knowledge = '跳过（宿主没装知识库或拿不到端口）'
@@ -5141,11 +5158,13 @@ export function apply(ctx, config) {
     }
   }
 
-  async function saveMinutes() {
+  // 注意：不能叫 saveMinutes —— 会遮蔽导入的同名文件写入函数，
+  // 导致 saveMinutes(path, md) 变成递归调用自己（纪要保持不落盘、会后整理卡死）。
+  async function saveCurrentMinutes() {
     const md = await buildMinutes()
     if (!md || !session.dir) return ''
     try {
-      const r = await saveMinutes(join(session.dir, 'minutes.md'), md)
+      const r = await persistMinutesFile(join(session.dir, 'minutes.md'), md)
       if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
       return r.path
     } catch { return '' }
@@ -5178,11 +5197,10 @@ export function apply(ctx, config) {
         const wasCapturing = !!session.capturing
         agent.running = false
         if (!wasCapturing) return
-        await session.stopCapture().catch(() => {})
         try {
           // 纪要写本地；知识库回写与发言属于"对外动作"，未开启时不做
-          const r = await finalizeMeeting({ speak: false, writeKnowledge: true })
-          logger?.info?.('[soulmirror] 会议结束：' + JSON.stringify(r).slice(0, 200))
+          const o = await stopAndOrganize('离开会议', { wasCapturing })
+          logger?.info?.('[soulmirror] 会议结束：' + JSON.stringify(o.result || o).slice(0, 200))
         } catch (e) {
           logger?.warn?.('[soulmirror] 会议收尾失败: ' + e.message)
         }
@@ -5421,7 +5439,7 @@ export function apply(ctx, config) {
         try {
           // 工具产出的是"最近 N 句的摘要"，绝不能覆盖完整纪要，
           // 所以写到独立的 minutes-live.md
-          await saveMinutes(join(session.dir, 'minutes-live.md'), out, { keepHistory: false })
+          await persistMinutesFile(join(session.dir, 'minutes-live.md'), out, { keepHistory: false })
         } catch { /* ignore */ }
       }
       return { ok: true, result: out }
@@ -6045,8 +6063,10 @@ export function apply(ctx, config) {
     const offAutoJoin = ctx.on("session/event", (session, event) => {
       if (!cfg.autoJoin || cfg.autoJoin.enabled === false) return
       if (!event || !event.type) return
-      // 只关心"进来的内容"，跳过我们自己发出去的助手消息
-      if (/^assistant\//.test(event.type)) return
+      // 安全边界：只认**用户本人**的输入。
+      // 原来只跳过 assistant/*，于是工具结果、引用材料、别的会话内容里
+      // 只要出现会议链接就会被当成"用户要入会"——等于让外部内容替用户按键。
+      if (!isUserAuthoredEvent(event)) return
       const hit = findMeetingInEvent(event)
       if (!hit) return
       const sid = String((session && session.id) || "")
