@@ -26,8 +26,11 @@ test('主 README 保持精简（只放理念/功能/要求）', () => {
 
 test('主 README 必须包含四块核心内容与文档入口', () => {
   const t = read('README.md')
-  assert.match(t, /禅 · 与魂|禅境/, '缺少设计理念')
-  assert.match(t, /魂/, '缺少"魂"这一层（用户明确要求介绍 soul 如何复刻灵魂）')
+  assert.match(t, /三源|禅|哲学/, '缺少设计理念')
+  assert.match(t, /魂/, '缺少"魂"这一层')
+  assert.match(t, /道家/, '理念应融入中国古典哲学')
+  assert.match(t, /日本禅|間|侘寂/, '理念应融入日本禅学')
+  assert.match(t, /德雷福斯|塞尔|达马西奥|延展心智/, '理念应融入现代 AI 哲学')
   assert.match(t, /它做什么|功能/, '缺少功能简介')
   assert.match(t, /运行所需|必需/, '缺少所需插件/环境')
   assert.match(t, /文档地图/, '缺少文档入口')
@@ -98,4 +101,26 @@ test('灵魂文档存在且讲清了四根柱子', () => {
   // 必须写清哪些自动、哪些手动（避免读成"全自动"）
   assert.match(s, /自动跑|需要叫它/, '应说明自动/手动的边界')
   assert.match(s, /soul_belief/, '应给出信念工具用法')
+})
+
+test('三源哲学必须给出概念到代码的对照（不许只写诗）', () => {
+  const p = join(root, 'docs', 'philosophy.md')
+  assert.ok(existsSync(p), '缺少 docs/philosophy.md')
+  const s = readFileSync(p, 'utf8')
+
+  // 三源各自的代表概念都要出现
+  for (const k of ['庄子', '老子', '易', '王阳明', '間', '侘寂', '初心', '海德格尔', '德雷福斯', '达马西奥', '塞尔', '维特根斯坦']) {
+    assert.ok(s.includes(k), '三源论述缺少：' + k)
+  }
+
+  // 必须能对回真实机制，而不是空谈
+  for (const k of ['observe', '0.5', 'seed', '光原', '火山', 'replaces', 'transcript.jsonl']) {
+    assert.ok(s.includes(k), '论述缺少可对回代码的锚点：' + k)
+  }
+
+  // 必须保留"它不是人"的边界声明（不可宣称有意向性）
+  assert.match(s, /没有意向性|它不是人/, '应明确边界：它没有意向性')
+
+  // 末尾要有对照表
+  assert.match(s, /三源对照|对照/, '应有概念 → 代码的对照表')
 })
