@@ -4999,10 +4999,18 @@ export function apply(ctx, config) {
                   origin: 'http://127.0.0.1:' + port,
                   name: cfg.knowledge.personaBaseName || undefined,
                   markdown: md2,
+                  profile: merged.profile,
+                  convergence: conv,
+                  // 画像太薄就不写：知识库里那篇是对外可见的印象，
+                  // 只有两三条零散信息就发出去，会让人以为它认错人了。
+                  minItems: Number(cfg.knowledge.personaMinItems) || 5,
+                  minScore: Number(cfg.knowledge.personaMinScore) || 0.2,
                 })
                 results.personaKb = kb.ok
                   ? (kb.action === 'created' ? '已建库并写入：' + kb.kbName : '已更新：' + kb.kbName)
-                  : '失败（' + (kb.stage || '?') + '）：' + kb.error
+                  : (kb.skipped
+                    ? '暂不写入（' + kb.reason + '）'
+                    : '失败（' + (kb.stage || '?') + '）：' + kb.error)
                 if (!kb.ok) logger?.warn?.('[soulmirror] 画像写库失败：' + (kb.stage || '?') + ' ' + kb.error)
               }
             } catch (e) {
