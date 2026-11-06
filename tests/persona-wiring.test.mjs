@@ -41,7 +41,7 @@ test('人格块 = 手写四层 + 自动画像，且画像带"按此判断与口�
     ]).profile
     saveProfile(dir, p)
     const block = fullPersonaBlock(dir)
-    assert.match(block, /SOUL/, '应含手写 SOUL')
+    assert.match(block, /关于她/, '身份来自灵魂卡')
     assert.match(block, /关于她/, '应含自动画像')
     assert.match(block, /按此判断与口吻/, '应明确告诉模型用她的角度')
     assert.match(block, /说话直接/, '风格必须进块')
@@ -89,7 +89,8 @@ test('没有画像时也能工作（首次会议）', () => {
   try {
     ensurePersona(dir)
     const block = fullPersonaBlock(dir)
-    assert.ok(block.length > 0, '至少应有 SOUL/IDENTITY 底色')
-    assert.equal(/关于她/.test(block), false, '还没画像时不该出现空标题')
+    assert.ok(block.length > 0, '至少应有灵魂卡底色')
+    assert.match(block, /关于她/, '首次也该有灵魂卡（用户卡 + 认知架构）')
+    assert.equal(/已知事实/.test(block), false, '还没画像时不该出现事实块')
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })

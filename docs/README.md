@@ -20,6 +20,7 @@
 | 文档 | 内容 |
 |---|---|
 | [philosophy.md](philosophy.md) | 禅 · 与魂（完整版） |
+| [linghun-reference.md](linghun-reference.md) | 借鉴 dsh-linghun：两层身份 + 三分法本体 |
 | [soul-architecture.md](soul-architecture.md) | **魂的实现**：四层人格 / 记忆 / 信念 / 情绪 + 工具 |
 | [architecture.md](architecture.md) | 分层、会话身份、目录结构 |
 | [features.md](features.md) | 能力与活数据（记忆/信念/情绪） |

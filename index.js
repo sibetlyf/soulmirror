@@ -55,6 +55,7 @@ import { classifyProbeError, buildProbeReport } from './lib/model-probe.js'
 import { scanPendingRecovery, isPendingRecovery } from './lib/recovery.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
+import { routeItem, readRules, renderRules } from './lib/tripartite.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
@@ -4930,6 +4931,18 @@ export function apply(ctx, config) {
         const items = Array.isArray(parsed) ? parsed : (parsed.items || [])
         const merged = mergeProfile(existing || emptyProfile(), items)
         saveProfile(personaDir, merged.profile)
+
+        // 三分法：技术知识 / 项目记忆 / 经验规则分开存
+        // 混在一起的后果是"三个月前的进展被当成当前状态"、"随口一句被当成规则"
+        const routed = { knowledge: 0, memory: 0, rule: 0 }
+        for (const it of items) {
+          try {
+            const r = routeItem({ dir: join(personaDir, 'ontology'), item: it })
+            if (r && r.kind) routed[r.kind] = (routed[r.kind] || 0) + 1
+          } catch { /* 单条失败不影响整体 */ }
+        }
+        results.ontology = '知识 ' + (routed.knowledge || 0) + ' 条 / 记忆 ' + (routed.memory || 0) +
+          ' 条 / 规则 ' + (routed.rule || 0) + ' 条'
         // 人类可读的 markdown 也同步追加一份（便于直接翻看）
         const bySection = (s) => items.filter((x) => x && x.section === s).map((x) => x.value)
         const r1 = appendPersonaSection(personaDir, 'user', [...bySection('identity'), ...bySection('facts')], { stamp })
