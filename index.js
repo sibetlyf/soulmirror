@@ -56,6 +56,7 @@ import { scanPendingRecovery, isPendingRecovery } from './lib/recovery.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
+import { appendWarm, appendJournal, consolidate, convergence, layersStatus } from './lib/memory-layers.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
@@ -717,6 +718,16 @@ export function apply(ctx, config) {
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
           lastModelProbe,
+          // 四层记忆与"越用越像"的进度
+          memoryLayers: (() => {
+            try {
+              const md = join(personaDir, 'memory')
+              const layers = layersStatus(md)
+              const prof = loadProfile(personaDir)
+              const conv = convergence({ profile: prof || emptyProfile(), dir: md })
+              return { ...layers, convergence: conv }
+            } catch { return null }
+          })(),
           hostPort: hostPortInfo,
           pendingRecovery,
           // 内存水位与"可能无限增长"的计数器：崩溃前看一眼就知道是谁在涨
@@ -4932,6 +4943,38 @@ export function apply(ctx, config) {
         const merged = mergeProfile(existing || emptyProfile(), items)
         saveProfile(personaDir, merged.profile)
 
+        // 四层记忆：先把本场会写进「暖态」与「流水」，再整理出「冷储」与「归档」
+        // 流水 = 原始（不筛选）；暖态 = 候选（会遗忘）；冷储 = 跨会议稳定（注入）
+        const memDir = join(personaDir, 'memory')
+        try {
+          appendJournal({
+            dir: memDir,
+            at: Date.now(),
+            title: (session.display || '会议'),
+            lines: (session.transcript || []).slice(-40)
+              .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
+              .map((x) => x.text),
+          })
+          for (const it of items) {
+            appendWarm({
+              dir: memDir,
+              text: it && it.value,
+              kind: it && it.section === 'stance' ? 'rule' : 'fact',
+              confidence: it && it.confidence,
+              at: Date.now(),
+            })
+          }
+          const cons = consolidate({ dir: memDir, now: Date.now() })
+          const conv = convergence({ profile: merged.profile, dir: memDir })
+          const layers = layersStatus(memDir)
+          results.memory = '暖态 ' + layers.warm + ' / 冷储 ' + layers.cold +
+            ' / 流水 ' + layers.journalDays + ' 天（本次晋升 ' + cons.promoted.length +
+            '、归档 ' + cons.archived + '）'
+          results.convergence = conv.score + '（' + conv.label + '）'
+        } catch (e) {
+          logger?.warn?.('[soulmirror] 记忆层写入失败：' + e.message)
+        }
+
         // 三分法：技术知识 / 项目记忆 / 经验规则分开存
         // 混在一起的后果是"三个月前的进展被当成当前状态"、"随口一句被当成规则"
         const routed = { knowledge: 0, memory: 0, rule: 0 }
@@ -5613,6 +5656,16 @@ export function apply(ctx, config) {
         acted = '呼吸：沉睡 ' + r.decay.slept + ' 条记忆，枯萎 ' + r.wither.died + ' 条信念\n\n'
       }
       const s = living.snapshot()
+      // 越用越像的进度：四层记忆 + 画像收敛度
+      let memLine = ''
+      try {
+        const md = join(personaDir, 'memory')
+        const layers = layersStatus(md)
+        const conv = convergence({ profile: loadProfile(personaDir) || emptyProfile(), dir: md })
+        memLine = '\n\n记忆四层：暖态 ' + layers.warm + ' · 冷储 ' + layers.cold +
+          ' · 归档 ' + layers.episodicDays + ' 天 · 流水 ' + layers.journalDays + ' 天' +
+          '\n像她的程度：' + Math.round(conv.score * 100) + '%（' + conv.label + '）'
+      } catch { /* ignore */ }
       const lines = [acted + '记忆：' + s.memory.total + ' 条（绽放 ' + (s.memory.bloom || 0) + ' / 清醒 ' + (s.memory.awake || 0) + ' / 沉睡 ' + (s.memory.sleep || 0) + '），平均活力 ' + s.memory.avgVitality]
       lines.push('信念：' + ['seed', 'sprout', 'sapling', 'tree'].map((k) => k + ' ' + (s.beliefs[k] || 0)).join(' · ') + ' · dead ' + (s.beliefs.dead || 0))
       if (s.council.length) lines.push('情绪议会：' + s.council.slice(0, 4).map((c) => c.emotion + '(' + c.biome + ' ' + c.score + ')').join(' · '))

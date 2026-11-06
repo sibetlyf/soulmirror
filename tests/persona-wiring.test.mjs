@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -59,7 +59,7 @@ test('模型上下文用的是 fullPersonaBlock（不是只看 markdown）', () 
 test('会后提取是五层结构化，且喂入已知画像避免重复', () => {
   const at = src.indexOf('personaAutoUpdate && md && completer')
   assert.ok(at > 0, '找不到会后人格更新')
-  const seg = src.slice(at, at + 3000)
+  const seg = src.slice(at, at + 20000)
 
   for (const s of ['identity', 'style', 'stance', 'facts', 'state']) {
     assert.ok(seg.includes(s), '提取提示词应包含分层：' + s)
@@ -79,7 +79,7 @@ test('合并结果里能看出增/强化/取代/过期四类统计', () => {
 
 test('markdown 层仍同步追加（人可以直接翻看）', () => {
   const at = src.indexOf('personaAutoUpdate && md && completer')
-  const seg = src.slice(at, at + 3000)
+  const seg = src.slice(at, at + 8000)
   assert.match(seg, /appendPersonaSection\(personaDir, 'user'/, '应继续追加 user')
   assert.match(seg, /appendPersonaSection\(personaDir, 'state'/, '应继续追加 state')
 })
