@@ -2725,7 +2725,8 @@ export function apply(ctx, config) {
       if (a.confirm !== true) return { ok: false, result: '拒绝：请传 confirm=true。' }
       const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
       const opts = meetingOpts(app)
-      await session.stopCapture().catch(() => undefined)
+      // 离会 = 散会：停止采集并立刻整理（过去这里只停采集，纪要要等窗口关闭才出）
+      const organized = await stopAndOrganize('离开会议')
       const steps = []
       for (const cand of ['离开会议', '离开', '结束会议']) {
         try { await click(app.title, cand, opts); steps.push('点了「' + cand + '」'); break } catch { /* next */ }
@@ -2826,7 +2827,12 @@ export function apply(ctx, config) {
     output: OUT(),
     execute: wrap('meeting_capture_stop', async () => {
       const r = await session.stopCapture()
-      return { ok: true, result: `已停止，共 ${r.chunks} 片，目录 ${r.dir || '-'}` }
+      // 停止即整理：工具停止过去不会生成纪要，这是缺口
+      const o = await stopAndOrganize('手动停止采集')
+      const tail = o.organized
+        ? '；已开始会后整理（纪要生成中）'
+        : (o.reason ? '；' + o.reason : '')
+      return { ok: true, result: `已停止，共 ${r.chunks} 片，目录 ${r.dir || '-'}` + tail }
     }),
   }))
 
@@ -3753,6 +3759,8 @@ export function apply(ctx, config) {
       agent.running = false
       armed = false
       await session.stopCapture()
+      // 停止大脑 = 这场会不听了：同样要整理，否则用户拿不到纪要
+      const o = await stopAndOrganize('停止会议大脑')
       return { ok: true, result: `已停止：听过 ${brain.stats.seen} 句，触发 ${brain.stats.triggered} 次，播报 ${agent.spoken} 次` }
     }),
   }))
@@ -4736,6 +4744,42 @@ export function apply(ctx, config) {
   let minutesRuns = 0
   let minutesKey = ''
   let minutesKeyRuns = 0
+  /**
+   * 停止采集并立即开始会后整理。
+   *
+   * 为什么需要它：以前只有两条路径会生成纪要 ——
+   *   ① 界面点「结束录音」（/auto action=stop）
+   *   ② 会议窗口关闭（lifecycle.onExit）
+   * 而 meeting_capture_stop / meeting_agent_stop / meeting_leave 这些**工具**
+   * 只停采集、不整理，于是就出现"停了但没纪要"。
+   *
+   * 现在所有停止路径都调用这里；finalizeMeeting 自身有 60 秒去抖 + 进行中互斥，
+   * 所以重复调用是安全的（不会重复生成、不会重复写库）。
+   *
+   * @param {string} reason 记录原因：手动停止 / 离开会议 / 停止大脑 / 窗口关闭
+   * @returns {Promise<{organized: boolean, reason: string, error?: string, dir?: string}>}
+   */
+  async function stopAndOrganize(reason = '手动停止') {
+    const dir = session.dir || ''
+    const wasCapturing = !!session.capturing
+    try { await session.stopCapture() } catch { /* 已经停了也无所谓 */ }
+    if (!wasCapturing || !dir) return { organized: false, reason, dir }
+    if (Date.now() - lastFinalizedAt < 60000 || finalizing) {
+      return { organized: false, reason: reason + '（刚刚整理过）', dir }
+    }
+    setPostMeeting({ phase: 'stopping', dir, error: '' })
+    logger?.info?.('[soulmirror] 停止采集（' + reason + '），开始会后整理')
+    try {
+      const r = await finalizeMeeting({ speak: false, writeKnowledge: true })
+      setPostMeeting({ phase: 'done', minutesPath: (r && r.minutes) || postMeeting.minutesPath })
+      return { organized: true, reason, dir, result: r }
+    } catch (e) {
+      setPostMeeting({ phase: 'error', error: e.message, dir })
+      logger?.warn?.('[soulmirror] 会后整理失败：' + e.message)
+      return { organized: false, reason, dir, error: e.message }
+    }
+  }
+
   async function finalizeMeeting({ speak = false, writeKnowledge = true } = {}) {
     if (finalizing) return { skipped: '正在收尾中' }
     if (Date.now() - lastFinalizedAt < 60000) return { skipped: '刚刚收尾过' }
