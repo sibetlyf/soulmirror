@@ -26,11 +26,11 @@ test('主 README 保持精简（只放理念/功能/要求）', () => {
 
 test('主 README 必须包含四块核心内容与文档入口', () => {
   const t = read('README.md')
-  assert.match(t, /三源|禅|哲学/, '缺少设计理念')
-  assert.match(t, /魂/, '缺少"魂"这一层')
-  assert.match(t, /道家/, '理念应融入中国古典哲学')
-  assert.match(t, /日本禅|間|侘寂/, '理念应融入日本禅学')
-  assert.match(t, /德雷福斯|塞尔|达马西奥|延展心智/, '理念应融入现代 AI 哲学')
+  assert.match(t, /名字就是设计|名字/, '理念应从项目名出发')
+  assert.match(t, /Soul/, '应拆解名字里的 Soul')
+  assert.match(t, /Mirror/, '应拆解名字里的 Mirror')
+  assert.match(t, /镜/, '应有"镜"这一侧')
+  assert.match(t, /魂/, '应有"魂"这一侧')
   assert.match(t, /它做什么|功能/, '缺少功能简介')
   assert.match(t, /运行所需|必需/, '缺少所需插件/环境')
   assert.match(t, /文档地图/, '缺少文档入口')
@@ -103,24 +103,33 @@ test('灵魂文档存在且讲清了四根柱子', () => {
   assert.match(s, /soul_belief/, '应给出信念工具用法')
 })
 
-test('三源哲学必须给出概念到代码的对照（不许只写诗）', () => {
+test('理念从名字出发：镜与魂各自解释功能，且不靠哲学家撑场面', () => {
   const p = join(root, 'docs', 'philosophy.md')
   assert.ok(existsSync(p), '缺少 docs/philosophy.md')
   const s = readFileSync(p, 'utf8')
 
-  // 三源各自的代表概念都要出现
-  for (const k of ['庄子', '老子', '易', '王阳明', '間', '侘寂', '初心', '海德格尔', '德雷福斯', '达马西奥', '塞尔', '维特根斯坦']) {
-    assert.ok(s.includes(k), '三源论述缺少：' + k)
+  // 必须拆解名字
+  assert.match(s, /Soul\s*\n?\s*\s*Mirror|Soul.*Mirror/s, '应从 Soul + Mirror 拆解')
+  assert.match(s, /镜照人，魂生念/, '缺少名字层面的核心表述')
+
+  // 两半都要点到关键功能
+  for (const k of ['环回采集', '实时转写', '账本', '缺口', '恢复']) {
+    assert.ok(s.includes(k), '镜的一侧缺少功能：' + k)
+  }
+  for (const k of ['四层人格', '记忆', '信念', '情绪', '分寸', '一期一会', '初心']) {
+    assert.ok(s.includes(k), '魂的一侧缺少功能：' + k)
   }
 
-  // 必须能对回真实机制，而不是空谈
-  for (const k of ['observe', '0.5', 'seed', '光原', '火山', 'replaces', 'transcript.jsonl']) {
-    assert.ok(s.includes(k), '论述缺少可对回代码的锚点：' + k)
+  // 必须能对回代码
+  for (const k of ['transcript.jsonl', 'replaces', '0.5', 'seed', 'shouldReuseDir', 'echo-guard']) {
+    assert.ok(s.includes(k), '论述缺少代码锚点：' + k)
   }
 
-  // 必须保留"它不是人"的边界声明（不可宣称有意向性）
-  assert.match(s, /没有意向性|它不是人/, '应明确边界：它没有意向性')
+  // 不许再引哲学家名字（用户明确要求）
+  const banned = ['庄子', '老子', '王阳明', '海德格尔', '德雷福斯', '达马西奥', '塞尔', '维特根斯坦']
+  const found = banned.filter((x) => s.includes(x))
+  assert.deepEqual(found, [], '不应再引用哲学家：' + found.join('、'))
 
-  // 末尾要有对照表
-  assert.match(s, /三源对照|对照/, '应有概念 → 代码的对照表')
+  // 边界声明仍在
+  assert.match(s, /没有意向性|留白|不侵入/, '应保留边界声明')
 })
