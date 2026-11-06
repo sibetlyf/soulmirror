@@ -53,6 +53,7 @@ import { createSessionGate, keyOf } from './lib/session-gate.js'
 import { isModelCommentary, isSelfEcho, sanitizeCorrection } from './lib/echo-guard.js'
 import { classifyProbeError, buildProbeReport } from './lib/model-probe.js'
 import { scanPendingRecovery, isPendingRecovery } from './lib/recovery.js'
+import { scanAudioLevels, extractRangeToWav, planOfflineUpload, explainOfflineError } from './lib/offline-audio.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -4715,18 +4716,42 @@ export function apply(ctx, config) {
           logger?.warn?.('[soulmirror] 录音 ' + Math.round(wavBytes / 1048576) + 'MB 过大，跳过云端文件识别，改用本地重放')
           throw new Error("录音过大（" + Math.round(wavBytes / 1048576) + "MB），跳过文件识别")
         }
+
+        // 先看有没有人声：整段静音上传只会换来 SUCCESS_WITH_NO_VALID_FRAGMENT（白花流量）
+        let uploadWav = wav
+        try {
+          const scan = await scanAudioLevels(wav)
+          const plan = planOfflineUpload(scan)
+          logger?.info?.('[soulmirror] 录音体检：' + Math.round(scan.durationSec) + ' 秒，静音占比 ' +
+            Math.round(scan.silentRatio * 100) + '%，峰值 ' + scan.peakRms + ' → ' + plan.reason)
+          if (plan.action === 'skip') {
+            setPostMeeting({ phase: 'error', error: '跳过云端重转写：' + plan.reason, dir })
+            return { ok: false, error: plan.reason }
+          }
+          if (plan.action === 'trim') {
+            const cut = join(dir, 'audio-offline.wav')
+            const r2 = await extractRangeToWav({ src: wav, dst: cut, startSec: plan.startSec, endSec: plan.endSec })
+            uploadWav = cut
+            logger?.info?.('[soulmirror] 已裁出有声区间 ' + r2.seconds + ' 秒（' +
+              Math.round(r2.bytes / 1048576) + 'MB），准备上传')
+          }
+        } catch (e) {
+          logger?.warn?.('[soulmirror] 录音体检失败，按整段上传：' + e.message)
+        }
         const r = await transcribeFileWithSpeakers({
           apiKey: key,
           // 用 openAsBlob 从磁盘流式上传：readFileSync 会额外占一整份音频，再被 Blob 复制一次，
           // 长会议（几十分钟）峰值就是几百 MB，实测曾把 4GB 堆撑爆。
-          file: await openAsBlob(wav, { type: 'audio/wav' }),
+          // 优先传裁好的有声区间（省流量、也更容易识别成功）
+          file: await openAsBlob(uploadWav, { type: 'audio/wav' }),
           fileName: 'meeting.wav',
           languageHints: ['zh', 'en'],
         })
         lines = (r.sentences || []).filter((x) => x.text)
       } catch (e) {
         // 云端失败就退回本地快速重放（至少不丢功能）
-        logger?.warn?.('[soulmirror] 云端文件识别失败，回退到本地重放：' + e.message)
+        const why = explainOfflineError(e.message)
+        logger?.warn?.('[soulmirror] 云端文件识别失败（' + why + '），回退到本地重放：' + String(e.message).slice(0, 200))
         mode = 'replay'
         const { pcm } = readWavPcm(wav)
         const r2 = await transcribeOffline({ apiKey: key, model: resolveAsrModel(cfg.asr), pcm, sampleRate: 16000, speed: 4 })
@@ -4850,7 +4875,9 @@ export function apply(ctx, config) {
       // 遵循"节约资源"：会后重转写是唯一的重活（整份上传 + 云端排队），
       // 交给**独立的 dsh 子进程**跑，主进程只等结果。子进程挂了也不影响宿主。
       const off = await withTimeout(
-        runOfflineInBackground(session.dir),
+        // 默认走内联：子进程那条路要在另一个 dsh 里调到本插件工具，未经验证且容易卡到超时。
+        // 需要隔离时再显式打开 offlineViaChild。
+        cfg.offlineViaChild === true ? runOfflineInBackground(session.dir) : runOfflinePass(session.dir),
         offlineTimeoutMs,
         '离线重转写超时（' + Math.round(offlineTimeoutMs / 60000) + ' 分钟）',
       )

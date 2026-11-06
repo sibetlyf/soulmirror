@@ -49,8 +49,14 @@ test('超大录音跳过云端文件识别', () => {
 
 test('离线重转写有总超时，超时后仍会用实时纪要继续', () => {
   assert.match(src, /offlineTimeoutMs/, '缺少离线超时配置')
-  // 现在调用的是后台执行器（内部失败会回落 runOfflinePass），两者都必须被超时包裹
-  assert.match(src, /withTimeout\(\s*\n?\s*runOfflineInBackground\(session\.dir\)/, '后台执行器没有包超时')
+  // 现在调用是三选一（默认内联、可选子进程），都必须被超时包裹。
+  // 注意 withTimeout( 与表达式之间夹着注释，所以用窗口断言而不是跨行正则。
+  const callAt = src.indexOf('const off = await withTimeout(')
+  assert.ok(callAt > 0, '找不到离线调用')
+  const callSeg = src.slice(callAt, callAt + 600)
+  assert.match(callSeg, /offlineViaChild === true/, '应支持子进程开关')
+  assert.match(callSeg, /: runOfflinePass\(session\.dir\)/, '默认应走内联')
+  assert.match(callSeg, /offlineTimeoutMs/, '应传超时')
   const at = src.indexOf('function withTimeout(')
   assert.ok(at > 0, '缺少 withTimeout 实现')
 })
