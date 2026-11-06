@@ -54,6 +54,7 @@ import { isModelCommentary, isSelfEcho, sanitizeCorrection } from './lib/echo-gu
 import { classifyProbeError, buildProbeReport } from './lib/model-probe.js'
 import { scanPendingRecovery, isPendingRecovery } from './lib/recovery.js'
 import { scanAudioLevels, extractRangeToWav, planOfflineUpload, explainOfflineError } from './lib/offline-audio.js'
+import { captureVerdict } from './lib/capture-guard.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -4860,9 +4861,32 @@ export function apply(ctx, config) {
     // 记录会议结束信息（回看要用）
     try {
       const startedMs = Date.parse(loadMeta(session.dir)?.startedAt || '') || Date.now()
+      // 采集信息写进 meta：以后"这段录音为什么是空的"能直接查，不用猜
+      let captureInfo = null
+      try {
+        const durSec = Math.max(0, Math.round((Date.now() - startedMs) / 1000))
+        const verdict = captureVerdict({
+          bytes: session.bytes || 0,
+          silentSec: session.silentSec || 0,
+          durationSec: durSec,
+        })
+        captureInfo = {
+          device: session.deviceLabel || cfg.devices.capture || '(系统默认)',
+          captureAuto: cfg.devices.captureAuto !== false,
+          bytes: session.bytes || 0,
+          silentSec: session.silentSec || 0,
+          durationSec: durSec,
+          silentRatio: verdict.silentRatio,
+          verdict: verdict.verdict || '',
+          diagnosis: session.captureDiagnosis || null,
+        }
+        if (verdict.verdict) logger?.warn?.('[soulmirror] 采集判定：' + verdict.verdict)
+      } catch { /* ignore */ }
+
       saveMeta(session.dir, {
         endedAt: new Date().toISOString(),
         durationMin: Math.max(1, Math.round((Date.now() - startedMs) / 60000)),
+        ...(captureInfo ? { capture: captureInfo } : {}),
       })
     } catch { /* ignore */ }
 
