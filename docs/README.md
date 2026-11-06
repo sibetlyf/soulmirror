@@ -37,6 +37,9 @@
 | [design-history.md](design-history.md) | v2 / v3 / v4 设计演进摘要，保留当时的取舍 |
 | [archive/](archive/README.md) | 三份原始设计文档全文（存档，描述当时状态） |
 
+| [versioning.md](versioning.md) | 版本策略：插件版本 / 存储格式版本 / 升级回退 |
+| [release.md](release.md) | 验证矩阵：哪些真机验过、哪些只有单测 |
+
 ## 代码级文档
 
 - [../lib/README.md](../lib/README.md) — 模块地图（谁负责什么）

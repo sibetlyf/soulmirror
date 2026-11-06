@@ -1,5 +1,7 @@
 # SoulMirror · 会议助手
 
+当前版本 **1.0.0**（存储格式 v1）· 变更见 [CHANGELOG.md](CHANGELOG.md) · 策略见 [docs/versioning.md](docs/versioning.md)
+
 > 一个会**听**、会**记**、偶尔**说话**的会议伙伴。
 > 它是 DSH 的插件，不是独立应用。
 

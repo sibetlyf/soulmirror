@@ -1,7 +1,7 @@
 {
   "name": "soulmirror",
-  "version": "0.2.1",
-  "description": "SoulMirror 会议助手：实时转写、会议识别、对话开会、可选的 Agent 自动回复、会后归档；内置演练模式，不装会议软件也能验证",
+  "version": "1.0.0",
+  "description": "SoulMirror 会议助手：实时转写、会议识别、会后纪要入库；人格管线（用户卡+认知架构+五层画像+四层记忆）越用越像本人；内置演练模式",
   "type": "module",
   "main": "index.js",
   "license": "MIT",
@@ -16,7 +16,11 @@
     "automation",
     "realtime-asr",
     "demo-mode",
-    "health-check"
+    "health-check",
+    "persona",
+    "soul",
+    "memory-layers",
+    "digital-twin-persona"
   ],
   "exports": {
     ".": {

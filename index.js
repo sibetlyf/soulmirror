@@ -58,6 +58,7 @@ import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
 import { appendWarm, appendJournal, consolidate, convergence, layersStatus } from './lib/memory-layers.js'
 import { renderPersonaDoc, syncPersonaDoc } from './lib/persona-kb.js'
+import { VERSION, STORAGE_VERSION, versionInfo } from './lib/version.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
@@ -719,6 +720,8 @@ export function apply(ctx, config) {
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
           lastModelProbe,
+          // 版本：插件版本与存储格式版本分开报（含义完全不同）
+          version: versionInfo({ dshVersion: '' }),
           // 四层记忆与"越用越像"的进度
           memoryLayers: (() => {
             try {
@@ -2077,6 +2080,11 @@ export function apply(ctx, config) {
   let optionalDeps = []
   /** 最近一次模型联通性探测结果（给面板展示，刷新后仍在） */
   let lastModelProbe = null
+  try {
+    const vi = versionInfo({ dshVersion: process.env.DSH_VERSION || '' })
+    logger?.info?.('[soulmirror] 版本 ' + vi.version + '（存储格式 v' + vi.storage +
+      '，Node ' + vi.node + '）' + (vi.compatible ? '' : ' ⚠️ ' + vi.problems.join('；')))
+  } catch { /* ignore */ }
   /** 宿主端口解析情况（0 表示没拿到，写库会跳过） */
   let hostPortInfo = null
   let gateStatsRef = null
