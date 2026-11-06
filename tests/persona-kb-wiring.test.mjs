@@ -29,8 +29,10 @@ test('写库结果如实报告（成功/失败都写进 results）', () => {
   assert.match(seg, /logger\?\.warn\?/, '失败应记日志')
 })
 
-test('可以通过配置关掉画像写库（默认开）', () => {
-  assert.match(src, /cfg\.knowledge\.personaSync !== false/, '应该是默认开启、可关闭')
+test('画像写库是可选功能：默认关，需显式打开', () => {
+  // 用户要求：这个做成可选功能，用户可以自己编辑知识库
+  assert.match(src, /cfg\.knowledge\.personaSync === true/, '默认必须是关闭的（只有显式 true 才自动写）')
+  assert.match(src, /未开启自动同步/, '关掉时要明确告诉用户"未开启"，而不是静默')
   assert.match(src, /cfg\.knowledge\.personaBaseName/, '库名应可自定义')
 })
 

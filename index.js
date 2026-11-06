@@ -59,6 +59,7 @@ import { routeItem, readRules, renderRules } from './lib/tripartite.js'
 import { appendWarm, appendJournal, consolidate, convergence, layersStatus } from './lib/memory-layers.js'
 import { renderPersonaDoc, syncPersonaDoc } from './lib/persona-kb.js'
 import { pickBackfillMeetings, slimMeetingText, buildBackfillPrompt, summarizeBackfill } from './lib/persona-backfill.js'
+import { renderSpeakerTranscript, whyNoPersona, isHerLine, choosePersonaSource, enableHint } from './lib/persona-source.js'
 import { VERSION, STORAGE_VERSION, versionInfo } from './lib/version.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
@@ -4919,6 +4920,24 @@ export function apply(ctx, config) {
     // 3) 沉淀人格（USER.md / STATE.md）
     if (cfg.personaAutoUpdate && md && completer) {
       try {
+        // 规则（用户定）：没有说话人标注的转写，不许提取人格。
+        // 否则转写里混着所有人的话，会把别人的观点记成她的立场。
+        // 择优：会后重转写带说话人分离，质量优于实时转写
+        let offlineLines = []
+        try {
+          const offPath = join(session.dir, 'transcript-offline.jsonl')
+          if (existsSync(offPath)) offlineLines = readLogText(readFileSync(offPath, 'utf8')).lines
+        } catch { /* 没有就算了 */ }
+        const src = choosePersonaSource({ offline: offlineLines, live: session.transcript || [] })
+        if (!src.lines.length) {
+          const blocked = whyNoPersona(session.transcript || [])
+          results.persona = '跳过：' + blocked + ' → ' + enableHint()
+          logger?.info?.('[soulmirror] 人格提取跳过：' + blocked)
+          throw new Error('__PERSONA_SKIPPED__')
+        }
+        const spoken = renderSpeakerTranscript(src.lines, { maxChars: 3000 })
+        if (src.source === 'offline') logger?.info?.('[soulmirror] 人格提取用会后重转写产物（' + src.speakers.length + ' 位说话人）')
+
         // 结构化提取：不只记"事实"，还要记"她怎么说话、站哪边、怎么判断"
         const existing = loadProfile(personaDir)
         const knownText = existing ? renderProfile(existing, { maxChars: 1500 }) : ''
@@ -4945,7 +4964,7 @@ export function apply(ctx, config) {
             ].join('\n'),
           },
           ...(knownText ? [{ role: 'user', content: '已知画像（避免重复）：\n' + knownText }] : []),
-          { role: 'user', content: '本场会议纪要：\n' + md.slice(0, 6000) },
+          { role: 'user', content: '本场会议转写（带说话人）：\n' + spoken.text },
         ])
         const jsonText = String(out).replace(/^```(?:json)?|```$/gm, '').trim()
         const parsed = JSON.parse(jsonText)
@@ -4983,7 +5002,11 @@ export function apply(ctx, config) {
           results.convergence = conv.score + '（' + conv.label + '）'
 
           // 人格画像 → 独立知识库（同一篇反复更新，不混进会议纪要）
-          if (cfg.knowledge.personaSync !== false) {
+          if (cfg.knowledge.personaSync !== true) results.personaKb = '未开启自动同步（可手动编辑知识库，或置 knowledge.personaSync=true）'
+          // 可选功能：默认**不**自动写知识库。
+          // 理由：那篇文档用户会自己编辑；自动覆盖会把手改的内容冲掉。
+          // 需要自动同步时显式打开 knowledge.personaSync = true。
+          if (cfg.knowledge.personaSync === true) {
             try {
               const port = resolveHostPort()
               if (!port) {
@@ -5503,6 +5526,7 @@ export function apply(ctx, config) {
     parameters: {
       action: { type: 'string', enum: ['get', 'set', 'backfill'], required: true, description: 'get 查看全部 / set 写入某一份 / backfill 用历史会议账本补出画像（只读账本，不重转写）' },
       limit: { type: 'integer', description: 'backfill 时最多回填几场会，默认 5' },
+      confirm: { type: 'boolean', description: 'backfill 必须传 true（会调用模型）' },
       which: { type: 'string', description: 'set 时必填：soul | identity | user | state' },
       text: { type: 'string', description: 'set 时的完整正文' },
     },
@@ -5517,6 +5541,14 @@ export function apply(ctx, config) {
         return { ok: true, result: parts.join('\n\n') }
       }
       if (a.action === 'backfill') {
+        // 可选功能：必须显式确认。回填会调 N 次模型，不该被顺手触发
+        if (a.confirm !== true) {
+          return {
+            ok: false,
+            result: '回填会调用模型（每场约 1 次），请确认后重试：soul_persona { action:"backfill", confirm:true, limit:5 }\n' +
+              '注意：只处理**带说话人标注**的会议；没有标注的一律跳过。',
+          }
+        }
         // 用历史账本补画像：只读 transcript.jsonl，不碰音频、不重转写
         const limit = Math.max(1, Math.min(20, Number(a.limit) || 5))
         if (!completer) return { ok: false, result: '没有可用的模型会话，无法回填' }
@@ -5550,6 +5582,9 @@ export function apply(ctx, config) {
               const texts = replay.lines
                 .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
                 .map((x) => (x.speaker ? x.speaker + '：' : '') + x.text)
+              // 没标注就不提取（用户定的规则）；这里用原始行判断，而不是拼好的文本
+              const why = whyNoPersona(replay.lines)
+              if (why) { details.push('跳过 ' + basename(it.dir) + '（' + why + '）'); continue }
               if (texts.length < 4) { details.push('跳过 ' + basename(it.dir) + '（句子太少）'); continue }
 
               const slim = slimMeetingText(texts)
