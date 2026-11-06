@@ -97,7 +97,7 @@ test('会后人话会写进 USER 与 STATE（人格会长）', () => {
   const at = src.indexOf('personaAutoUpdate && md && completer')
   assert.ok(at > 0, '找不到人格自动更新')
   // 会后更新块变长了（结构化提取 + markdown 追加），窗口要足够大
-  const seg = src.slice(at, at + 4000)
+  const seg = src.slice(at, at + 7000)
   assert.match(seg, /appendPersonaSection\(personaDir, 'user'/, '应更新 USER')
   assert.match(seg, /appendPersonaSection\(personaDir, 'state'/, '应更新 STATE')
 })

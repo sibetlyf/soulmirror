@@ -17,7 +17,7 @@ import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import v8 from 'node:v8'
-import { join, dirname } from 'node:path'
+import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
@@ -58,6 +58,7 @@ import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
 import { appendWarm, appendJournal, consolidate, convergence, layersStatus } from './lib/memory-layers.js'
 import { renderPersonaDoc, syncPersonaDoc } from './lib/persona-kb.js'
+import { pickBackfillMeetings, slimMeetingText, buildBackfillPrompt, summarizeBackfill } from './lib/persona-backfill.js'
 import { VERSION, STORAGE_VERSION, versionInfo } from './lib/version.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
@@ -5500,7 +5501,8 @@ export function apply(ctx, config) {
     name: 'soul_persona',
     description: '查看或修改四层人格文件（soul/identity/user/state）。改完即时生效，不需要重启。',
     parameters: {
-      action: { type: 'string', enum: ['get', 'set'], required: true, description: 'get 查看全部 / set 写入某一份' },
+      action: { type: 'string', enum: ['get', 'set', 'backfill'], required: true, description: 'get 查看全部 / set 写入某一份 / backfill 用历史会议账本补出画像（只读账本，不重转写）' },
+      limit: { type: 'integer', description: 'backfill 时最多回填几场会，默认 5' },
       which: { type: 'string', description: 'set 时必填：soul | identity | user | state' },
       text: { type: 'string', description: 'set 时的完整正文' },
     },
@@ -5514,6 +5516,89 @@ export function apply(ctx, config) {
         }
         return { ok: true, result: parts.join('\n\n') }
       }
+      if (a.action === 'backfill') {
+        // 用历史账本补画像：只读 transcript.jsonl，不碰音频、不重转写
+        const limit = Math.max(1, Math.min(20, Number(a.limit) || 5))
+        if (!completer) return { ok: false, result: '没有可用的模型会话，无法回填' }
+        try {
+          const root = CONFIG_DIR
+          let dirs = []
+          try {
+            dirs = readdirSync(root)
+              .filter((d) => d !== 'persona' && d !== 'workspace')
+              .map((d) => join(root, d))
+              .filter((d) => existsSync(join(d, 'transcript.jsonl')))
+          } catch { dirs = [] }
+
+          const picked = pickBackfillMeetings({
+            dirs,
+            stat: (d) => { try { const s = statSync(join(d, 'transcript.jsonl')); return { mtimeMs: s.mtimeMs, size: s.size } } catch { return null } },
+            options: { limit },
+          })
+          if (!picked.picked.length) {
+            return { ok: false, result: '没有可回填的会议（账本太小或太旧）' + (picked.skipped.length ? '；跳过 ' + picked.skipped.length + ' 场' : '') }
+          }
+
+          const stats = { meetings: 0, added: 0, reinforced: 0, superseded: 0, failed: 0 }
+          let profile = loadProfile(personaDir) || emptyProfile()
+          const details = []
+
+          for (const it of picked.picked) {
+            try {
+              const raw = await readFile(join(it.dir, 'transcript.jsonl'), 'utf8')
+              const replay = readLogText(raw)
+              const texts = replay.lines
+                .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
+                .map((x) => (x.speaker ? x.speaker + '：' : '') + x.text)
+              if (texts.length < 4) { details.push('跳过 ' + basename(it.dir) + '（句子太少）'); continue }
+
+              const slim = slimMeetingText(texts)
+              const known = renderProfile(profile, { maxChars: 1200 })
+              const out = await completer(buildBackfillPrompt({
+                meetingText: slim.text,
+                knownText: known,
+                title: basename(it.dir),
+              }))
+              const jsonText = String(out).replace(/^```(?:json)?|```$/gm, '').trim()
+              const parsed = JSON.parse(jsonText)
+              const items = Array.isArray(parsed) ? parsed : (parsed.items || [])
+              const merged = mergeProfile(profile, items)
+              profile = merged.profile
+              saveProfile(personaDir, profile)
+
+              // 同步进四层记忆（暖态），下次整理时晋升冷储
+              const memDir = join(personaDir, 'memory')
+              for (const x of items) {
+                try {
+                  appendWarm({ dir: memDir, text: x && x.value, kind: x && x.section === 'stance' ? 'rule' : 'fact', confidence: x && x.confidence, at: Date.now() })
+                } catch { /* ignore */ }
+              }
+              consolidate({ dir: memDir, now: Date.now() })
+
+              stats.meetings += 1
+              stats.added += merged.stats.added
+              stats.reinforced += merged.stats.reinforced
+              stats.superseded += merged.stats.superseded
+              details.push(basename(it.dir) + '：' + items.length + ' 条')
+            } catch (e) {
+              stats.failed += 1
+              details.push('失败 ' + basename(it.dir) + '：' + e.message)
+            }
+          }
+
+          const conv = convergence({ profile, dir: join(personaDir, 'memory') })
+          stats.convergence = conv
+          personaAt = 0
+          return {
+            ok: stats.meetings > 0,
+            result: summarizeBackfill(stats) + '\n\n' + details.join('\n'),
+            convergence: conv,
+          }
+        } catch (e) {
+          return { ok: false, result: '回填失败：' + e.message }
+        }
+      }
+
       const key = String(a.which || '').toLowerCase()
       if (!PERSONA_FILES[key]) return { ok: false, result: 'which 必须是 soul / identity / user / state' }
       const file = writePersonaFile(personaDir, key, a.text || '')
