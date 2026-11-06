@@ -55,6 +55,7 @@ import { classifyProbeError, buildProbeReport } from './lib/model-probe.js'
 import { scanPendingRecovery, isPendingRecovery } from './lib/recovery.js'
 import { scanAudioLevels, extractRangeToWav, planOfflineUpload, explainOfflineError } from './lib/offline-audio.js'
 import { captureVerdict } from './lib/capture-guard.js'
+import { createFinalizeRegistry, snapshotRun } from './lib/finalize-registry.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -2756,8 +2757,14 @@ export function apply(ctx, config) {
       if (a.confirm !== true) return { ok: false, result: '拒绝：请传 confirm=true。' }
       const app = a.app ? meetingApp(a.app) : await detectMeetingApp()
       const opts = meetingOpts(app)
-      // 离会 = 散会：停止采集并立刻整理（过去这里只停采集，纪要要等窗口关闭才出）
-      const organized = await stopAndOrganize('离开会议')
+      // 离会 = 散会：先停采，整理**不阻塞**离会。
+      // 审查指出：原来先 await 整理再点「离开」，云端重转写可能要几分钟，
+      // 用户会被卡在会议里出不去。现在整理在后台跑，离会立即执行；
+      // 状态仍可在「会后整理」卡与 /auto/state 里看到。
+      const organized = { organized: false, reason: '（后台整理中）' }
+      stopAndOrganize('离开会议', { wasCapturing: true })
+        .then((o) => logger?.info?.('[soulmirror] 离会后整理：' + (o.organized ? '完成' : (o.reason || '跳过'))))
+        .catch((e) => logger?.warn?.('[soulmirror] 离会后整理失败：' + e.message))
       const steps = []
       for (const cand of ['离开会议', '离开', '结束会议']) {
         try { await click(app.title, cand, opts); steps.push('点了「' + cand + '」'); break } catch { /* next */ }
@@ -3089,12 +3096,21 @@ export function apply(ctx, config) {
    * 超时不取消底层工作（JS 没有通用的取消），但会让调用方先往下走——
    * 对"会后整理"这种场景，能落盘纪要比无限等待更重要。
    */
-  function withTimeout(promise, ms, label) {
+  /**
+   * 超时包装。
+   *
+   * 审查指出：原来超时只结束**等待**，底层离线任务还在跑，
+   * 之后可能继续往磁盘写结果——"已超时"和"结果又冒出来"并存。
+   * 所以现在多一个 onTimeout 回调：调用方借此打上取消标记，
+   * 底层在写盘前检查它，超时后就丢弃结果。
+   */
+  function withTimeout(promise, ms, label, { onTimeout } = {}) {
     let timer = null
     const timeout = new Promise((resolve) => {
       timer = setTimeout(() => {
         logger?.warn?.('[soulmirror] ' + label)
-        resolve({ ok: false, error: label, timedOut: true })
+        try { onTimeout?.() } catch { /* 取消回调失败不影响返回 */ }
+        resolve({ ok: false, error: label, timedOut: true, cancelled: true })
       }, ms)
       timer.unref?.()
     })
@@ -4697,7 +4713,7 @@ export function apply(ctx, config) {
     }
   }
 
-  async function runOfflinePass(dir = session.dir) {
+  async function runOfflinePass(dir = session.dir, { isCancelled } = {}) {
     if (offlineBusy) return { ok: false, error: '上一次离线转写还没结束' }
     if (!dir) return { ok: false, error: '没有会议目录' }
     const wav = join(dir, 'audio.wav')
@@ -4766,6 +4782,11 @@ export function apply(ctx, config) {
         lines = (r2.sentences || []).filter((x) => x.text).map((x) => ({ ...x, speaker: '' }))
       }
 
+      // 超时后被取消：不要再用迟到的结果覆盖磁盘
+      if (typeof isCancelled === 'function' && isCancelled()) {
+        logger?.warn?.('[soulmirror] 离线重转写已超时取消，丢弃本次结果（避免迟到写入）')
+        return { ok: false, cancelled: true, error: '已取消（超时）' }
+      }
       await writeFile(join(dir, 'transcript-offline.jsonl'), lines.map((x) => JSON.stringify(x)).join('\n') + (lines.length ? '\n' : ''), 'utf8').catch(() => {})
       const md = await buildOfflineMinutes({ sentences: lines.map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text })), completer })
       let savedPath = ''
@@ -4791,8 +4812,8 @@ export function apply(ctx, config) {
   }
 
   /** 会后：纪要落盘 → 写知识库 → 沉淀人格 */
-  let finalizing = false
-  let lastFinalizedAt = 0
+  // 按会议隔离的整理注册表（替代原来的全局 finalizing + lastFinalizedAt）
+  const finalizeRegistry = createFinalizeRegistry({ debounceMs: 60000 })
   /**
    * 纪要的"同一份内容只生成一次"。
    *
@@ -4828,9 +4849,6 @@ export function apply(ctx, config) {
     let stopResult = null
     try { stopResult = await session.stopCapture() } catch { /* 已经停了也无所谓 */ }
     if (!wasCapturing || !dir) return { organized: false, reason, dir, chunks: (stopResult && stopResult.chunks) || 0 }
-    if (Date.now() - lastFinalizedAt < 60000 || finalizing) {
-      return { organized: false, reason: reason + '（刚刚整理过）', dir }
-    }
     setPostMeeting({ phase: 'stopping', dir, error: '' })
     logger?.info?.('[soulmirror] 停止采集（' + reason + '），开始会后整理')
     try {
@@ -4845,11 +4863,15 @@ export function apply(ctx, config) {
   }
 
   async function finalizeMeeting({ speak = false, writeKnowledge = true } = {}) {
-    if (finalizing) return { skipped: '正在收尾中' }
-    if (Date.now() - lastFinalizedAt < 60000) return { skipped: '刚刚收尾过' }
-    finalizing = true
-    // 先占位再干活：万一中途抛错，也不会让下一次调用立刻重来
-    lastFinalizedAt = Date.now()
+    // 按会议隔离：不同会议互不影响；同一会议同一份转写只做一次。
+    // 原来用全局 finalizing + 60s 去抖，会把"紧接着结束的第二场会"误判成重复。
+    const run = snapshotRun(session)
+    const claim = finalizeRegistry.tryBegin(run.dir, run.revision)
+    if (!claim.ok) {
+      logger?.info?.('[soulmirror] 跳过整理：' + claim.reason + '（' + run.dir + '）')
+      return { skipped: claim.reason }
+    }
+    const runDir = run.dir
     try {
     let md = await buildMinutes()
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
@@ -4859,8 +4881,8 @@ export function apply(ctx, config) {
     // 1) 落盘（会话目录 + 会议工作区）
     if (md) {
       try {
-        if (session.dir) {
-          const r = await persistMinutesFile(join(session.dir, 'minutes.md'), md)
+        if (runDir) {
+          const r = await persistMinutesFile(join(runDir, 'minutes.md'), md)
           results.minutes = r.path
           if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
         }
@@ -4871,7 +4893,7 @@ export function apply(ctx, config) {
 
     // 记录会议结束信息（回看要用）
     try {
-      const startedMs = Date.parse(loadMeta(session.dir)?.startedAt || '') || Date.now()
+      const startedMs = Date.parse(loadMeta(runDir)?.startedAt || '') || Date.now()
       // 采集信息写进 meta：以后"这段录音为什么是空的"能直接查，不用猜
       let captureInfo = null
       try {
@@ -4894,7 +4916,7 @@ export function apply(ctx, config) {
         if (verdict.verdict) logger?.warn?.('[soulmirror] 采集判定：' + verdict.verdict)
       } catch { /* ignore */ }
 
-      saveMeta(session.dir, {
+      saveMeta(runDir, {
         endedAt: new Date().toISOString(),
         durationMin: Math.max(1, Math.round((Date.now() - startedMs) / 60000)),
         ...(captureInfo ? { capture: captureInfo } : {}),
@@ -4909,12 +4931,17 @@ export function apply(ctx, config) {
       const offlineTimeoutMs = Math.max(60000, Number(cfg.offlineTimeoutMs) || 10 * 60 * 1000)
       // 遵循"节约资源"：会后重转写是唯一的重活（整份上传 + 云端排队），
       // 交给**独立的 dsh 子进程**跑，主进程只等结果。子进程挂了也不影响宿主。
+      // 超时后置位：底层若还在跑，写盘前会看到它并丢弃迟到结果
+      let offlineCancelled = false
       const off = await withTimeout(
         // 默认走内联：子进程那条路要在另一个 dsh 里调到本插件工具，未经验证且容易卡到超时。
         // 需要隔离时再显式打开 offlineViaChild。
-        cfg.offlineViaChild === true ? runOfflineInBackground(session.dir) : runOfflinePass(session.dir),
+        cfg.offlineViaChild === true
+          ? runOfflineInBackground(runDir)
+          : runOfflinePass(runDir, { isCancelled: () => offlineCancelled }),
         offlineTimeoutMs,
         '离线重转写超时（' + Math.round(offlineTimeoutMs / 60000) + ' 分钟）',
+          { onTimeout: () => { offlineCancelled = true } },
       )
       if (off.ok) {
         results.offline = '会后重转写：' + off.sentences + ' 句' +
@@ -4993,7 +5020,7 @@ export function apply(ctx, config) {
         // 择优：会后重转写带说话人分离，质量优于实时转写
         let offlineLines = []
         try {
-          const offPath = join(session.dir, 'transcript-offline.jsonl')
+          const offPath = join(runDir, 'transcript-offline.jsonl')
           if (existsSync(offPath)) offlineLines = readLogText(readFileSync(offPath, 'utf8')).lines
         } catch { /* 没有就算了 */ }
         const src = choosePersonaSource({ offline: offlineLines, live: session.transcript || [] })
@@ -5136,7 +5163,6 @@ export function apply(ctx, config) {
       } catch { /* ignore */ }
     }
 
-    lastFinalizedAt = Date.now()
     logger?.info?.('[soulmirror] 会议收尾：纪要=' + (results.minutes ? '已保存' : '空') + '，知识库=' + (results.knowledge || '跳过') + '，人格=' + (results.persona || '跳过'))
     if (speak) {
       const brief = '这场会到这里，纪要' + (results.minutes ? '已经保存' : '没生成')
@@ -5154,7 +5180,7 @@ export function apply(ctx, config) {
     }
     return results
     } finally {
-      finalizing = false
+      finalizeRegistry.end(claim.token)
     }
   }
 

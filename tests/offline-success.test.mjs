@@ -20,9 +20,10 @@ const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
 test('默认走内联执行，不再默认依赖子进程', () => {
   const at = src.indexOf('const off = await withTimeout(')
   assert.ok(at > 0, '找不到 offline 调用')
-  const seg = src.slice(at, at + 400)
+  const seg = src.slice(at, at + 900)
   assert.match(seg, /cfg\.offlineViaChild === true/, '子进程应是可选，而非常态')
-  assert.match(seg, /: runOfflinePass\(session\.dir\)/, '否则内联执行')
+  assert.match(seg, /: runOfflinePass\(runDir/, '否则内联执行（目录用不可变快照）')
+  assert.match(seg, /onTimeout/, '超时应通知取消')
 })
 
 test('上传前先体检：静音就跳过，有声区间才上传', () => {

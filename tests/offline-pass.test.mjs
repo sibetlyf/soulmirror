@@ -53,10 +53,11 @@ test('离线重转写有总超时，超时后仍会用实时纪要继续', () =>
   // 注意 withTimeout( 与表达式之间夹着注释，所以用窗口断言而不是跨行正则。
   const callAt = src.indexOf('const off = await withTimeout(')
   assert.ok(callAt > 0, '找不到离线调用')
-  const callSeg = src.slice(callAt, callAt + 600)
+  const callSeg = src.slice(callAt, callAt + 900)
   assert.match(callSeg, /offlineViaChild === true/, '应支持子进程开关')
-  assert.match(callSeg, /: runOfflinePass\(session\.dir\)/, '默认应走内联')
+  assert.match(callSeg, /: runOfflinePass\(runDir/, '默认应走内联（目录用快照）')
   assert.match(callSeg, /offlineTimeoutMs/, '应传超时')
+  assert.match(callSeg, /onTimeout/, '超时后要通知底层取消，而不是只结束等待')
   const at = src.indexOf('function withTimeout(')
   assert.ok(at > 0, '缺少 withTimeout 实现')
 })
