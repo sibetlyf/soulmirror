@@ -26,3 +26,7 @@ tools/whisper/models/
 
 # 临时脚本（调试用，别提交）
 .*.cjs
+
+# 临时探针脚本（调试用，别提交）
+*.probe-*.mjs
+.probe-*.mjs
