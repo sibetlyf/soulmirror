@@ -57,6 +57,7 @@ import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
 import { appendWarm, appendJournal, consolidate, convergence, layersStatus } from './lib/memory-layers.js'
+import { renderPersonaDoc, syncPersonaDoc } from './lib/persona-kb.js'
 import { resolveProfileDir } from './lib/profile-path.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
@@ -4971,6 +4972,35 @@ export function apply(ctx, config) {
             ' / 流水 ' + layers.journalDays + ' 天（本次晋升 ' + cons.promoted.length +
             '、归档 ' + cons.archived + '）'
           results.convergence = conv.score + '（' + conv.label + '）'
+
+          // 人格画像 → 独立知识库（同一篇反复更新，不混进会议纪要）
+          if (cfg.knowledge.personaSync !== false) {
+            try {
+              const port = resolveHostPort()
+              if (!port) {
+                results.personaKb = '跳过（拿不到宿主端口）'
+              } else {
+                const md2 = renderPersonaDoc({
+                  profile: merged.profile,
+                  layers,
+                  convergence: conv,
+                  rules: readRules({ dir: join(personaDir, 'ontology'), maxTopics: 8, maxPerTopic: 4 }),
+                  at: Date.now(),
+                })
+                const kb = await syncPersonaDoc({
+                  origin: 'http://127.0.0.1:' + port,
+                  name: cfg.knowledge.personaBaseName || undefined,
+                  markdown: md2,
+                })
+                results.personaKb = kb.ok
+                  ? (kb.action === 'created' ? '已建库并写入：' + kb.kbName : '已更新：' + kb.kbName)
+                  : '失败（' + (kb.stage || '?') + '）：' + kb.error
+                if (!kb.ok) logger?.warn?.('[soulmirror] 画像写库失败：' + (kb.stage || '?') + ' ' + kb.error)
+              }
+            } catch (e) {
+              results.personaKb = '异常：' + e.message
+            }
+          }
         } catch (e) {
           logger?.warn?.('[soulmirror] 记忆层写入失败：' + e.message)
         }
