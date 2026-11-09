@@ -30,3 +30,6 @@ tools/whisper/models/
 # 临时探针脚本（调试用，别提交）
 *.probe-*.mjs
 .probe-*.mjs
+
+# 临时诊断脚本（.开头，别提交）
+.[a-z]*.mjs
