@@ -465,19 +465,37 @@ export function apply(ctx, config) {
   /** 启动时把三个槽位读进内存缓存，供同步调用点使用 */
   const keyCache = { asr: '', tts: '', brain: '' }
   const keySourceOf = { asr: 'none', tts: 'none', brain: 'none' }
+  /** 每个槽位最近一次读取错误（不隐藏：界面与 /status 都要能看到） */
+  const keyErrors = { asr: '', tts: '', brain: '' }
   const loadKeysIntoCache = async () => {
     for (const slot of Object.keys(KEY_SLOTS)) {
       try {
         const hit = await keyStore.get(slot)
         keyCache[slot] = hit.value || ''
         keySourceOf[slot] = hit.source || 'none'
-      } catch { keyCache[slot] = ''; keySourceOf[slot] = 'error' }
+        // 不吞错：读失败要如实记录并写日志
+        keyErrors[slot] = hit.error || ''
+        if (hit.source === 'error') {
+          logger?.warn?.('[soulmirror] 密钥读取失败（' + slot + '）：' + (hit.error || '未知原因'))
+        }
+      } catch (e) {
+        keyCache[slot] = ''
+        keySourceOf[slot] = 'error'
+        keyErrors[slot] = e && e.message ? e.message : String(e)
+        logger?.warn?.('[soulmirror] 密钥读取异常（' + slot + '）：' + keyErrors[slot])
+      }
     }
   }
   if (credentialsService) logger?.info?.('[soulmirror] 密钥走 DSH 凭据存储（' + keyStore.mode + '）')
   else logger?.info?.('[soulmirror] 密钥走插件文件（' + keyStore.describeLocation().path + '）')
 
   /** 同步取密钥：内存缓存 → 旧字段（兼容未迁移）→ 空 */
+  /** 缺密钥时给出可操作原因：区分"没配"与"读取失败" */
+  function keyProblem(slot) {
+    const err = keyErrors[slot] || ''
+    if (err) return '密钥读取失败（' + slot + '）：' + err + ' → 请检查 DSH 凭据存储的读写权限或修复后重试'
+    return ''
+  }
   const keyFor = (slotCfg, slot) => {
     if (keyCache[slot]) return keyCache[slot]
     return (slotCfg && slotCfg.apiKey) || ''
@@ -813,6 +831,8 @@ export function apply(ctx, config) {
                 keyStoragePath: keyStore.describeLocation().path,
                 keys: { asr: !!keyCache.asr, tts: !!keyCache.tts, brain: !!keyCache.brain },
                 keySourceOf: { ...keySourceOf },
+    // 读取失败的原因：不隐藏，否则用户只会看到"没配置"
+    keyErrors: { ...keyErrors },
                 dshHome: DSH_HOME_RESOLVED,
               }
             } catch (e) { return { error: e.message, file: CONFIG_FILE } }
@@ -1145,7 +1165,7 @@ export function apply(ctx, config) {
           // 密钥写进安全存储（DSH 凭据服务，或插件自己的 credentials.json），
           // 不再落进 config.json —— 和设置混在一个文件里既可被同步也可能被误删。
           const wr = await keyStore.set('asr', value)
-          await loadKeysIntoCache()
+          await loadKeysIntoCache()   // 顺带复位 keyErrors
           if (!wr.ok) {
             return reply({
               ok: false,
@@ -4563,7 +4583,7 @@ export function apply(ctx, config) {
   async function probeAsrConn() {
     const t0 = Date.now()
     const key = resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key
-    if (!key) return { ok: false, ms: 0, error: new Error('缺少密钥：环境变量 DASHSCOPE_API_KEY 未设置') }
+    if (!key) return { ok: false, ms: 0, error: new Error(keyProblem('asr') || '缺少密钥：环境变量 DASHSCOPE_API_KEY 未设置') }
     return await new Promise((resolve) => {
       let settled = false
       const done = (r) => {
@@ -4610,7 +4630,7 @@ export function apply(ctx, config) {
         return { ok: false, ms: Date.now() - t0, error: e }
       }
     }
-    if (!key) return { ok: false, ms: 0, error: new Error('缺少密钥：环境变量 DASHSCOPE_API_KEY 未设置') }
+    if (!key) return { ok: false, ms: 0, error: new Error(keyProblem('asr') || '缺少密钥：环境变量 DASHSCOPE_API_KEY 未设置') }
     return await new Promise((resolve) => {
       let settled = false
       const done = (r) => {
@@ -4811,7 +4831,10 @@ export function apply(ctx, config) {
     const wav = join(dir, 'audio.wav')
     if (!existsSync(wav)) return { ok: false, error: '没有录音文件（本次可能没采到音频）' }
     const key = resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key
-    if (!key) return { ok: false, error: '缺少语音识别密钥' }
+    if (!key) {
+      const why = keyProblem('asr')
+      return { ok: false, error: why || '缺少语音识别密钥（未配置）' }
+    }
 
     offlineBusy = true
     setPostMeeting({ phase: 'offline', error: '', dir })

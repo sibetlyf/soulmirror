@@ -116,16 +116,33 @@ test('DSH 里按命名引用存过的值也能读到（resolve 兜底）', async
   } finally { rmSync(d, { recursive: true, force: true }) }
 })
 
-test('服务写入抛错时回退文件（不让 Key 无处可去）', async () => {
+test('服务写入抛错时**直接报错**，绝不回退文件', async () => {
   const d = dir()
   try {
     const svc = fakeService()
     svc.modifyRecord = async () => { throw new Error('宿主拒绝写入') }
     const store = createKeyStore({ credentials: svc, configDir: d })
     const r = await store.set('asr', 'sk-fallback')
-    assert.equal(r.ok, true)
-    assert.equal(r.mode, 'plugin-file', '应回退到文件')
-    assert.equal(JSON.parse(readFileSync(fileStorePath(d), 'utf8')).asr, 'sk-fallback')
+    assert.equal(r.ok, false, '必须失败')
+    assert.equal(r.mode, 'dsh-credentials')
+    assert.match(r.error, /宿主拒绝写入/, '要带上原始原因')
+    // 关键：不能悄悄写到别处，否则用户以为存进了 DSH
+    assert.equal(existsSync(fileStorePath(d)), false, '不许回退落文件')
+    assert.equal((await store.get('asr')).value, '', '也不该有值')
+  } finally { rmSync(d, { recursive: true, force: true }) }
+})
+
+test('服务读取抛错时返回 source=error，不静默当"没配置"', async () => {
+  const d = dir()
+  try {
+    const svc = fakeService()
+    svc.readRecord = async () => { throw new Error('读取被拒绝') }
+    svc.resolve = async () => { throw new Error('读取被拒绝') }
+    const store = createKeyStore({ credentials: svc, configDir: d })
+    const g = await store.get('asr')
+    assert.equal(g.value, '')
+    assert.equal(g.source, 'error')
+    assert.match(g.error, /读取被拒绝/)
   } finally { rmSync(d, { recursive: true, force: true }) }
 })
 

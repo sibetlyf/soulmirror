@@ -55,3 +55,27 @@ test('/status 暴露密钥存储位置与各槽位是否已配置（不含值）
   assert.match(seg, /keys: \{ asr: !!keyCache\.asr/, '应给出是否已配置（布尔）')
   assert.equal(/apiKey: keyCache/.test(seg), false, '状态里不得回显密钥')
 })
+
+test('凭据服务出错时直接报错，不回退到插件文件', () => {
+  const at = src.indexOf('const keyErrors = ')
+  assert.ok(at > 0, '应有 keyErrors 记录')
+  const seg = src.slice(at, at + 1000)
+  assert.match(seg, /source === 'error'/, '应识别 error 来源')
+  assert.match(seg, /logger\?\.warn\?\./, '读失败要写日志，不静默')
+  // 桥里不许出现"写入失败就回退文件"
+  const bridge = readFileSync(new URL('../lib/credentials-bridge.js', import.meta.url), 'utf8')
+  const setAt = bridge.indexOf('async set(slot, value) {')
+  const setSeg = bridge.slice(setAt, setAt + 2200)
+  assert.match(setSeg, /return \{ ok: false, mode: 'dsh-credentials', error: msg \}/, '失败应直接返回错误')
+})
+
+test('/status 暴露 keyErrors（不隐藏失败原因）', () => {
+  assert.match(src, /keyErrors: \{ \.\.\.keyErrors \}/, '状态里应带错误原因')
+  assert.equal(/apiKey: keyErrors/.test(src), false, '不得回显密钥')
+})
+
+test('缺 Key 的提示区分：未配置 vs 读取失败', () => {
+  assert.match(src, /function keyProblem\(slot\)/, '应有统一的原因说明')
+  assert.match(src, /密钥读取失败（/, '读失败要说明是读失败')
+  assert.match(src, /缺少语音识别密钥（未配置）/, '未配置要说明是没配')
+})
