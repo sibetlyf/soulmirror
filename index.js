@@ -39,7 +39,7 @@ import { saveMinutes as persistMinutesFile } from './lib/minutes-file.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
-import { readWavPcm, readWavHeader, transcribeOffline, buildOfflineMinutes } from './lib/offline-asr.js'
+import { readWavPcm, readWavHeader, transcribeOffline, buildOfflineMinutes, getLastMinutesError } from './lib/offline-asr.js'
 import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
 import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
 import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
@@ -3628,7 +3628,35 @@ export function apply(ctx, config) {
       }
     }
 
-    function makeDshCompleter(brainCfg) {
+    /**
+   * 纪要专用补全器。
+   *
+   * 为什么不能复用 sessionCompleter：
+   *   那个补全器被"逐句判定/候选词/润色"共用，有闸门（maxPending=2、同内容合并、120s 超时）。
+   *   而生成纪要是**一次性、长输入、长输出**的调用：
+   *     · 正好有逐句判定在排队 → 被闸门合并/丢弃 → 纪要退化成"抽取式"
+   *     · 转录 400 句 + 长输出 → 常常超过 120s → 同样失败
+   *   实测后果就是用户看到"纪要基本上啥都没有"。
+   *
+   * 所以这里单独开一条路：直接向会议会话提问，不走闸门，超时放宽。
+   */
+  function makeMinutesCompleter() {
+    return async function completeMinutes(messages) {
+      const list = Array.isArray(messages) ? messages : []
+      const system = list.filter((m) => m && m.role === 'system').map((m) => String(m.content || '')).join('\n\n')
+      const user = list.filter((m) => m && m.role !== 'system').map((m) => String(m.content || '')).join('\n\n')
+      const prompt = [system, user].filter(Boolean).join('\n\n')
+      const sid = await ensureJudgementSession()
+      // 纪要要读完整场转写再写长文：给 5 分钟，且不经过闸门
+      const r = await promptSession(ctx, sid, prompt, { timeoutMs: 300000 })
+      if (!r || !r.ok) throw new Error((r && r.error) || '纪要会话未返回结果')
+      const text = String(r.text || '').trim()
+      if (!text) throw new Error('纪要会话返回空内容')
+      return text
+    }
+  }
+
+  function makeDshCompleter(brainCfg) {
       const llm = ctx.get('llm')
       if (!llm || typeof llm.stream !== 'function') return null
       const controller = ctx.get('sessionController')
@@ -3664,6 +3692,8 @@ export function apply(ctx, config) {
   let brainModel = null
 
   const sessionCompleter = makeSessionCompleter()
+  let lastMinutesFallbackReason = ''
+  const minutesCompleter = makeMinutesCompleter()
   const completer = httpCompleter
     || (cfg.brain.provider ? makeDshCompleter(cfg.brain) : sessionCompleter)
 
@@ -4313,9 +4343,15 @@ export function apply(ctx, config) {
           { role: 'user', content: text },
         ])
         if (out) { lastMinutesMd = out; return out }
-      } catch { /* 退化为抽取式 */ }
+    } catch (e) {
+      lastMinutesFallbackReason = '纪要模型调用失败：' + (e && e.message ? e.message : String(e))
+      logger?.warn?.('[soulmirror] ' + lastMinutesFallbackReason)
     }
-    const fallback = '## 会议要点（抽取式）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
+    // 兜底必须诚实：这不是摘要，是原文节选，并说明为什么没生成
+    }
+    const reason = lastMinutesFallbackReason || (typeof getLastMinutesError === 'function' && getLastMinutesError()) || '模型未就绪'
+    const fallback = '> ⚠ 本次没有生成正式纪要（' + reason + '）。\n> 下面是最后 12 句原文节选，不是摘要。\n\n' +
+      '## 会议要点（原文节选）\n' + lines.slice(-12).map((l) => '- ' + l.text).join('\n')
     lastMinutesMd = fallback
     return fallback
   }
@@ -4749,11 +4785,13 @@ export function apply(ctx, config) {
       const replay = readLogText(raw)
       const texts = replay.lines
         .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
+        // 别把助手自己的播报（"会议纪要已写入知识库"）当成会议内容
+        .filter((x) => !/会议纪要已写入知识库|已写入知识库|开始会后整理/.test(String(x.text)))
         .map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text }))
       if (!texts.length) return { ok: false, error: '账本里没有可用句子' }
 
       setPostMeeting({ phase: 'minutes', sentences: texts.length, dir })
-      const md = await buildOfflineMinutes({ sentences: texts, completer })
+      const md = await buildOfflineMinutes({ sentences: texts, completer: minutesCompleter || completer })
       if (!md) return { ok: false, error: '纪要生成失败（模型没返回内容）' }
       const saved = await persistMinutesFile(join(dir, 'minutes.md'), md)
       logger?.info?.('[soulmirror] 已从账本补出纪要：' + dir + '（' + texts.length + ' 句）')
@@ -4903,7 +4941,22 @@ export function apply(ctx, config) {
         return { ok: false, cancelled: true, error: '已取消（超时）' }
       }
       await writeFile(join(dir, 'transcript-offline.jsonl'), lines.map((x) => JSON.stringify(x)).join('\n') + (lines.length ? '\n' : ''), 'utf8').catch(() => {})
-      const md = await buildOfflineMinutes({ sentences: lines.map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text })), completer })
+      const md = await buildOfflineMinutes({
+      sentences: lines
+        .filter((x) => x && x.text && !/知识库|会议纪要已写入/.test(String(x.text)))   // 别把助手自己的播报写进纪要
+        .map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text })),
+      completer: async (msgs) => {
+        try {
+          return await (minutesCompleter || completer)(msgs)
+        } catch (e) {
+          // 不许静默退化：把原因记下来，界面与日志都要能看到
+          const msg = '纪要模型调用失败：' + (e && e.message ? e.message : String(e))
+          logger?.warn?.('[soulmirror] ' + msg)
+          results.offline = (results.offline || '') + '；' + msg
+          throw e
+        }
+      },
+    })
       let savedPath = ''
       if (md) {
         const saved = await persistMinutesFile(join(dir, 'minutes.md'), md)
@@ -5012,7 +5065,17 @@ export function apply(ctx, config) {
       // 采集信息写进 meta：以后"这段录音为什么是空的"能直接查，不用猜
       let captureInfo = null
       try {
-        const durSec = Math.max(0, Math.round((Date.now() - startedMs) / 1000))
+        // 时长优先取录音本身（音频秒数），拿不到再看会话起始时间；
+      // 原来只靠 startedMs，解析失败就退成 now → 时长 0 → 静音占比被算成 100%（误报"整段静音"）
+      let durSec = 0
+      try {
+        const wav = join(runDir, 'audio.wav')
+        if (existsSync(wav)) {
+          const st = statSync(wav)
+          durSec = Math.max(0, Math.round((st.size - 44) / 32000))   // 16k/16bit/单声道
+        }
+      } catch { /* ignore */ }
+      if (!durSec) durSec = Math.max(0, Math.round((Date.now() - startedMs) / 1000))
         const verdict = captureVerdict({
           bytes: session.bytes || 0,
           silentSec: session.silentSec || 0,
