@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+﻿import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { buildOfflineMinutes, getLastMinutesError } from '../lib/offline-asr.js'
@@ -71,7 +71,7 @@ test('接线：纪要优先交给 DSH 后台任务，失败才回退', () => {
 test('接线：后台任务用文件交接（不走命令行传长文本）', () => {
   const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   const at = src.indexOf('async function minutesViaBackgroundTask')
-  const seg = src.slice(at, at + 1600)
+  const seg = src.slice(at, at + 4000)
   assert.match(seg, /writeMinutesSource\(/, '应把转写写文件')
   assert.match(seg, /buildMinutesTaskPrompt\(/, '应构造文件读写指令')
   assert.match(seg, /readMinutesResult\(/, '应读回结果并校验')

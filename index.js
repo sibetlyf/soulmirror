@@ -58,6 +58,7 @@ import { captureVerdict } from './lib/capture-guard.js'
 import { createFinalizeRegistry, snapshotRun } from './lib/finalize-registry.js'
 import { createKeyStore, pickLegacyKeys, SLOTS as KEY_SLOTS } from './lib/credentials-bridge.js'
 import { buildMinutesTaskPrompt, writeMinutesSource, readMinutesResult, resetMinutesOutput, shouldUseBackgroundTask } from './lib/minutes-task.js'
+import { createProgress, describeProgress } from './lib/progress.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -3681,21 +3682,48 @@ export function apply(ctx, config) {
     if (!shouldUseBackgroundTask({ minutesViaDsh: cfg.minutesViaDsh !== false })) {
       return { ok: false, error: '已关闭后台任务（minutesViaDsh=false）' }
     }
+    // 纪要进度：准备 → 起后台任务 → 模型写 → 读回
+    const mnProgress = createProgress({ pipeline: 'minutes' })
+    const reportMinutes = () => {
+      const snap = mnProgress.snapshot()
+      setPostMeeting({ phase: 'minutes', ...snap, progressText: describeProgress(snap) })
+    }
+    mnProgress.stage('prepare', { detail: '整理转写文本' })
+    reportMinutes()
+
     resetMinutesOutput(dir)
     const src = writeMinutesSource({ dir, lines })
     if (!src.sentences) return { ok: false, error: '没有可写的转写句子' }
+    mnProgress.stage('prepare', { detail: src.sentences + ' 句 / ' + src.chars + ' 字', fraction: 1 })
+    reportMinutes()
 
     const prompt = buildMinutesTaskPrompt({
       transcriptPath: src.path.replace(/\\/g, '/'),
       outputPath: join(dir, 'minutes-by-dsh.md').replace(/\\/g, '/'),
       title,
     })
+    mnProgress.stage('spawn', { detail: '启动 DSH 后台任务', fraction: 1 })
+    reportMinutes()
     const t0 = Date.now()
+    mnProgress.stage('generate', { detail: '模型写纪要中（已等 0 秒）', fraction: 0.05 })
+    reportMinutes()
+    const mnTimer = setInterval(() => {
+      try {
+        const snap = mnProgress.snapshot()
+        const frac = Math.min(0.9, 0.05 + snap.elapsedSec / 120)
+        mnProgress.detail('模型写纪要中（已等 ' + snap.elapsedSec + ' 秒）', frac)
+        reportMinutes()
+      } catch { /* ignore */ }
+    }, 2000)
+    mnTimer.unref?.()
     const r = await runDshTask(prompt, {
       profile: cfg.minutesProfile || cfg.twin.profile || 'headless',
       cwd: dir,
       timeoutMs: Math.max(120000, Number(cfg.minutesTimeoutMs) || 300000),
     })
+    clearInterval(mnTimer)
+    mnProgress.stage('read', { detail: '读回纪要', fraction: 0.5 })
+    reportMinutes()
     const elapsed = Math.round((Date.now() - t0) / 1000)
     const out = readMinutesResult({ dir })
     if (out.ok) {
@@ -4928,7 +4956,14 @@ export function apply(ctx, config) {
     }
 
     offlineBusy = true
+    const offProgress = createProgress({ pipeline: 'offline' })
+    const reportOffline = (extra = {}) => {
+      const snap = offProgress.snapshot()
+      setPostMeeting({ phase: 'offline', error: '', dir, ...snap, progressText: describeProgress(snap), ...extra })
+    }
     setPostMeeting({ phase: 'offline', error: '', dir })
+    offProgress.stage('prepare', { detail: '检查录音与设备' })
+    reportOffline()
     try { pushWorkStatus(true).catch(() => {}) } catch { /* ignore */ }
     const t0 = Date.now()
     try {
@@ -4958,7 +4993,9 @@ export function apply(ctx, config) {
             setPostMeeting({ phase: 'error', error: '跳过云端重转写：' + plan.reason, dir })
             return { ok: false, error: plan.reason }
           }
-          if (plan.action === 'trim') {
+          offProgress.stage('upload', { detail: '准备上传（' + Math.round(scan.durationSec) + ' 秒有声 / 静音 ' + Math.round(scan.silentRatio * 100) + '%）', fraction: 0 })
+        reportOffline()
+        if (plan.action === 'trim') {
             const cut = join(dir, 'audio-offline.wav')
             const r2 = await extractRangeToWav({ src: wav, dst: cut, startSec: plan.startSec, endSec: plan.endSec })
             uploadWav = cut
@@ -4968,7 +5005,21 @@ export function apply(ctx, config) {
         } catch (e) {
           logger?.warn?.('[soulmirror] 录音体检失败，按整段上传：' + e.message)
         }
-        const r = await transcribeFileWithSpeakers({
+        offProgress.stage('recognize', { detail: '云端识别中（已等 0 秒）', fraction: 0.05 })
+        reportOffline()
+        // 云端识别是主要耗时：每 2 秒推进一点百分比，并显示已等秒数（不假装快好了，封顶本阶段 90%）
+        const recTimer = setInterval(() => {
+          try {
+            const snap = offProgress.snapshot()
+            const frac = Math.min(0.9, 0.05 + snap.elapsedSec / 120)
+            offProgress.detail('云端识别中（已等 ' + snap.elapsedSec + ' 秒）', frac)
+            reportOffline()
+          } catch { /* ignore */ }
+        }, 2000)
+        recTimer.unref?.()
+        let r
+        try {
+          r = await transcribeFileWithSpeakers({
           apiKey: key,
           // 用 openAsBlob 从磁盘流式上传：readFileSync 会额外占一整份音频，再被 Blob 复制一次，
           // 长会议（几十分钟）峰值就是几百 MB，实测曾把 4GB 堆撑爆。
@@ -4986,6 +5037,9 @@ export function apply(ctx, config) {
         const { pcm } = readWavPcm(wav)
         const r2 = await transcribeOffline({ apiKey: key, model: resolveAsrModel(cfg.asr), pcm, sampleRate: 16000, speed: 4 })
         lines = (r2.sentences || []).filter((x) => x.text).map((x) => ({ ...x, speaker: '' }))
+      }
+      } finally {
+        clearInterval(recTimer)
       }
 
       // 超时后被取消：不要再用迟到的结果覆盖磁盘
