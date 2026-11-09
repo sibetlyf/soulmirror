@@ -415,6 +415,10 @@ export function apply(ctx, config) {
   // 数据目录同样跟随 DSH 根，而不是写死 homedir：
   // 同一台机器上跑多个实例时，各实例的会议记录不应互相覆盖。
   const DSH_HOME_RESOLVED = (() => {
+    // 显式出口优先：独立环境（便携版、容器、多实例测试）可以把配置钉死在固定目录，
+    // 不随 DSH_HOME / profile 变化而漂移。否则换个启动方式就"保存的 Key 不见了"。
+    const pinned = String(process.env.SOULMIRROR_HOME || '').trim()
+    if (pinned) return pinned
     try {
       return resolveDshHome({ selfUrl: import.meta.url, env: process.env, homeDir: homedir(), exists: existsSync, join }) || join(homedir(), '.dsh')
     } catch { return join(homedir(), '.dsh') }
@@ -730,6 +734,31 @@ export function apply(ctx, config) {
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
           lastModelProbe,
+          // 配置落点自查：独立环境里"保存了却读不到"多半是两个路径不一致
+          config: (() => {
+            try {
+              const exists = existsSync(CONFIG_FILE)
+              let diskKey = { asr: false, tts: false, apiKeyEnv: '' }
+              if (exists) {
+                const j = JSON.parse(readFileSync(CONFIG_FILE, 'utf8').replace(/^\uFEFF/, ''))
+                diskKey = {
+                  asr: !!(j && j.asr && j.asr.apiKey),
+                  tts: !!(j && j.tts && j.tts.apiKey),
+                  apiKeyEnv: (j && j.asr && j.asr.apiKeyEnv) || '',
+                }
+              }
+              return {
+                dir: CONFIG_DIR,
+                file: CONFIG_FILE,
+                exists,
+                // 磁盘上有没有存 Key（布尔，不含内容）
+                diskHasKey: diskKey,
+                // 运行时生效的 Key 来源：file / env / registry / none
+                runtimeSource: keyInfo(cfg.asr).source,
+                dshHome: DSH_HOME_RESOLVED,
+              }
+            } catch (e) { return { error: e.message, file: CONFIG_FILE } }
+          })(),
           // 版本：插件版本与存储格式版本分开报（含义完全不同）
           version: versionInfo({ dshVersion: '' }),
           // 四层记忆与"越用越像"的进度

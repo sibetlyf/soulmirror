@@ -100,3 +100,54 @@ meeting_schedule_list        # 看有没有周期任务
 
 插件停着（`enabled=false`）时：不采集、不轮询、不建会话、不产纪要。
 可以用 `/api/soulmirror/status` 确认：`enabled`、`session.capturing`、`mem`。
+
+## 语音 Key「保存了，下次运行又是空的」
+
+真实故障链（2026-11-09 修复，提交见 CHANGELOG）：
+
+```
+① 保存 Key → savePersisted 写进 config.json        ← 这一步一直是好的
+② 下次启动 → loadPersisted 读到了                   ← 也没问题
+③ 紧接着 ensureConfigFile(CONFIG_FILE, cfg) 发现缺了新默认键 → 合并回写
+④ 回写时调用了 stripSecrets() → apikey 被删除      ← 真正的凶手
+⑤ 于是下一轮启动文件里已是空
+```
+
+**独立环境更容易命中**：每个新版本/新 profile 都会补新键，每次都触发一次回写。
+
+### 自查（不暴露密钥）
+
+```bash
+curl http://127.0.0.1:3080/api/soulmirror/status | jq .config
+```
+
+```json
+{
+  "dir": "C:\\Users\\you\\.dsh\\soulmirror",
+  "file": "...\\config.json",
+  "exists": true,
+  "diskHasKey": { "asr": true, "tts": false, "apiKeyEnv": "DASHSCOPE_API_KEY" },
+  "runtimeSource": "file",
+  "dshHome": "C:\\Users\\you\\.dsh"
+}
+```
+
+- `diskHasKey.asr=false` → 文件里确实没存进去（看下一步）
+- `runtimeSource` ≠ `file` → 运行时用的是环境变量/注册表里的 Key，不是文件
+- `file` 指向的目录不是你预期的 → 见下面「配置钉死」
+
+### 配置钉死在固定目录（独立环境 / 便携版 / 多实例）
+
+```
+SOULMIRROR_HOME=D:\soulmirror-data
+```
+
+设置后所有配置、会议记录、人格数据都落在该目录，不随 `DSH_HOME` 或 profile 漂移。
+
+### 已知不能自动做的事
+
+Key 是你账号的资产，插件不会替你申请；写入失败时会在日志里打出**具体路径与原因**：
+
+```
+[soulmirror] 保存配置失败: <原因> → <config.json 路径>
+```
