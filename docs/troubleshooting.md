@@ -151,3 +151,49 @@ Key 是你账号的资产，插件不会替你申请；写入失败时会在日�
 ```
 [soulmirror] 保存配置失败: <原因> → <config.json 路径>
 ```
+
+## 密钥存在哪（与 DSH 官方一致）
+
+SoulMirror 不再把明文 Key 写进 `config.json`，而是交给密钥存储：
+
+| 情况 | 存到哪 | 说明 |
+|---|---|---|
+| 宿主有 `credentials` 服务 | DSH 的 `records`（`soulmirror/asr`、`soulmirror/tts`、`soulmirror/brain`） | 与 DSH 自身密钥同一套存储：`<DSH_HOME>/.credentials.yaml` |
+| 宿主没有该服务 | 插件自己的 `credentials.json`（仅属主可读） | 位置：`<DSH_HOME>/soulmirror/credentials.json` |
+
+`config.json` 里只保留 `asr.apiKeyEnv` 这类**名字**，不再留值。
+
+### 读取顺序
+
+```
+① 密钥存储（DSH records / 命名引用 ref）
+② credentials.json（回退）
+③ 环境变量 / Windows 注册表（resolveDashScopeKey）
+```
+
+界面只报"是否已配置 + 来源"，**不回显值**（与 DSH 的 `describe` 语义一致）。
+
+### 自查
+
+```bash
+curl http://127.0.0.1:3080/api/soulmirror/status | jq '.config | {keyStorage, keyStoragePath, keys, keySourceOf}'
+```
+
+```json
+{
+  "keyStorage": "dsh-credentials",
+  "keyStoragePath": "(DSH 凭据存储)",
+  "keys": { "asr": true, "tts": false, "brain": false },
+  "keySourceOf": { "asr": "dsh-credentials:record", "tts": "none", "brain": "none" }
+}
+```
+
+### 迁移
+
+首次启动如果发现 `config.json` 里还有明文 `apiKey`，会自动：
+
+1. 搬进密钥存储（已有值不覆盖）
+2. 从 `config.json` 抹掉明文
+3. 日志打印 `已把明文密钥迁进安全存储：asr`
+
+失败时不会丢 Key，会退回到插件文件并打印原因。

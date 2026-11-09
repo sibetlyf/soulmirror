@@ -56,6 +56,7 @@ import { scanPendingRecovery, isPendingRecovery } from './lib/recovery.js'
 import { scanAudioLevels, extractRangeToWav, planOfflineUpload, explainOfflineError } from './lib/offline-audio.js'
 import { captureVerdict } from './lib/capture-guard.js'
 import { createFinalizeRegistry, snapshotRun } from './lib/finalize-registry.js'
+import { createKeyStore, pickLegacyKeys, SLOTS as KEY_SLOTS } from './lib/credentials-bridge.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -456,6 +457,58 @@ export function apply(ctx, config) {
     if (r.error) logger?.warn?.('[soulmirror] 配置自动生成失败：' + r.error)
   } catch { /* 不影响运行 */ }
 
+  // ── 密钥存储：优先 DSH 凭据服务，没有才回退插件文件 ──────────────
+  // 与 DSH 官方一致：机密不放配置里，配置只留"名字"。
+  let credentialsService = null
+  try { credentialsService = ctx.get?.('credentials') || null } catch { /* 没有就算了 */ }
+  const keyStore = createKeyStore({ credentials: credentialsService, configDir: CONFIG_DIR, logger })
+  /** 启动时把三个槽位读进内存缓存，供同步调用点使用 */
+  const keyCache = { asr: '', tts: '', brain: '' }
+  const keySourceOf = { asr: 'none', tts: 'none', brain: 'none' }
+  const loadKeysIntoCache = async () => {
+    for (const slot of Object.keys(KEY_SLOTS)) {
+      try {
+        const hit = await keyStore.get(slot)
+        keyCache[slot] = hit.value || ''
+        keySourceOf[slot] = hit.source || 'none'
+      } catch { keyCache[slot] = ''; keySourceOf[slot] = 'error' }
+    }
+  }
+  if (credentialsService) logger?.info?.('[soulmirror] 密钥走 DSH 凭据存储（' + keyStore.mode + '）')
+  else logger?.info?.('[soulmirror] 密钥走插件文件（' + keyStore.describeLocation().path + '）')
+
+  /** 同步取密钥：内存缓存 → 旧字段（兼容未迁移）→ 空 */
+  const keyFor = (slotCfg, slot) => {
+    if (keyCache[slot]) return keyCache[slot]
+    return (slotCfg && slotCfg.apiKey) || ''
+  }
+
+  // 启动收尾：加载缓存；并把配置里的明文 Key 搬进安全存储（迁移后从配置里删掉）
+  const initKeys = async () => {
+    try {
+      await loadKeysIntoCache()
+      const legacy = pickLegacyKeys(cfg)
+      if (legacy.asr || legacy.tts || legacy.brain) {
+        const r = await keyStore.migrate(legacy)
+        if (r.migrated.length) {
+          logger?.info?.('[soulmirror] 已把明文密钥迁进安全存储：' + r.migrated.join('、'))
+          // 从配置里抹掉明文，只保留"名字"
+          for (const slot of ['asr', 'tts', 'brain']) {
+            if (cfg[slot]) cfg[slot].apiKey = ''
+            if (stored[slot]) stored[slot].apiKey = ''
+          }
+          try { savePersisted({}) } catch { /* ignore */ }
+          await loadKeysIntoCache()
+        }
+        if (r.failed.length) logger?.warn?.('[soulmirror] 密钥迁移失败：' + r.failed.join('；'))
+      }
+    } catch (e) {
+      logger?.warn?.('[soulmirror] 密钥初始化失败：' + e.message)
+    }
+  }
+  // 不阻塞启动：读不到就当没配置，用的时候会再报
+  initKeys().catch(() => {})
+
   function publicConfig() {
     return {
       enabled: cfg.enabled,
@@ -484,8 +537,8 @@ export function apply(ctx, config) {
         sampleRate: cfg.tts.sampleRate,
         apiKeyEnv: cfg.tts.apiKeyEnv,
         apiKey: '',
-        keySet: !!resolveDashScopeKey(cfg.tts).key,
-        keySource: resolveDashScopeKey(cfg.tts).source,
+        keySet: !!resolveDashScopeKey({ ...cfg.tts, apiKey: keyFor(cfg.tts, 'tts') }).key,
+        keySource: resolveDashScopeKey({ ...cfg.tts, apiKey: keyFor(cfg.tts, 'tts') }).source,
         workspaceId: cfg.tts.workspaceId || '',
         cloneBaseUrl: cfg.tts.cloneBaseUrl || '',
         clonePrefix: cfg.tts.clonePrefix || 'soulmirror',
@@ -597,7 +650,7 @@ export function apply(ctx, config) {
   }
 
   function voiceCloneKey() {
-    return resolveDashScopeKey(cfg.tts).key
+    return resolveDashScopeKey({ ...cfg.tts, apiKey: keyFor(cfg.tts, 'tts') }).key
   }
 
   async function voiceEnrollment(action, input) {
@@ -755,6 +808,11 @@ export function apply(ctx, config) {
                 diskHasKey: diskKey,
                 // 运行时生效的 Key 来源：file / env / registry / none
                 runtimeSource: keyInfo(cfg.asr).source,
+                // 密钥到底存在哪：dsh-credentials（DSH 凭据服务）/ plugin-file（插件自带文件）
+                keyStorage: keyStore.mode,
+                keyStoragePath: keyStore.describeLocation().path,
+                keys: { asr: !!keyCache.asr, tts: !!keyCache.tts, brain: !!keyCache.brain },
+                keySourceOf: { ...keySourceOf },
                 dshHome: DSH_HOME_RESOLVED,
               }
             } catch (e) { return { error: e.message, file: CONFIG_FILE } }
@@ -861,7 +919,7 @@ export function apply(ctx, config) {
         const problems = []
     // 缺密钥时采集根本不会启动，健康检查必须说出来
     try {
-      if (cfg.asr.provider !== 'none' && !resolveDashScopeKey(cfg.asr).key) {
+      if (cfg.asr.provider !== 'none' && !resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key) {
         problems.push('缺少语音识别密钥：在「会议 → 配置 → 语音识别」填 Key，或设置环境变量 ' +
           (cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY'))
       }
@@ -1084,26 +1142,31 @@ export function apply(ctx, config) {
           // 允许留空：空字符串就是"清空密钥"，不写就不动
           if (body.value === undefined) return reply({ message: '没有提供 value，未改动' })
           const value = String(body.value || '').trim()
-          let sv
-          if (!value) {
-            // 显式清空：patchToStore 为了保护"留空不覆盖"会跳过空 apiKey，
-            // 所以这里直接改内存与待写对象，再走一次保存。
-            cfg.asr.apiKey = ''
-            if (!stored.asr) stored.asr = {}
-            stored.asr.apiKey = ''
-            sv = savePersisted({})
-          } else {
-            sv = savePersisted({ asr: { apiKey: value } })
-          }
-          if (!sv.ok) {
+          // 密钥写进安全存储（DSH 凭据服务，或插件自己的 credentials.json），
+          // 不再落进 config.json —— 和设置混在一个文件里既可被同步也可能被误删。
+          const wr = await keyStore.set('asr', value)
+          await loadKeysIntoCache()
+          if (!wr.ok) {
             return reply({
               ok: false,
-              message: '保存失败（没写进磁盘）：' + sv.error + '\n配置文件：' + sv.path +
-                '\n请换一个可写的安装目录，或用以有权限的账号运行 DSH',
-              saveError: sv.error,
+              message: '保存失败：' + (wr.error || '未知原因') + '\n存储位置：' + JSON.stringify(keyStore.describeLocation()),
+              saveError: wr.error || '',
             })
           }
-          return reply({ message: value ? '密钥已保存 → ' + sv.path : '密钥已清空（转写不可用，其它功能照常）' })
+          // 清掉可能残留的旧明文（迁移兜底）
+          if (cfg.asr) cfg.asr.apiKey = ''
+          if (stored.asr) stored.asr.apiKey = ''
+          const sv = savePersisted({})
+          if (!sv.ok) {
+            logger?.warn?.('[soulmirror] 密钥已存好，但配置文件清理失败：' + sv.error)
+          }
+          return reply({
+            message: value
+              ? '密钥已保存 → ' + wr.mode + '（' + JSON.stringify(keyStore.describeLocation()) + '）'
+              : '密钥已清空（转写不可用，其它功能照常）',
+            keyStorage: wr.mode,
+            keySource: keySourceOf.asr,
+          })
         }
 
         if (action === 'probe-models') {
@@ -1285,7 +1348,7 @@ export function apply(ctx, config) {
         for await (const chunk of req) buf.push(chunk)
         const kind = (JSON.parse(Buffer.concat(buf).toString('utf8') || '{}').kind || 'tts')
         if (kind === 'tts') {
-          const key = resolveDashScopeKey(cfg.tts).key
+          const key = resolveDashScopeKey({ ...cfg.tts, apiKey: keyFor(cfg.tts, 'tts') }).key
           if (!key) return json(200, { ok: false, error: '未配置 Key' })
           try {
             let bytes = 0
@@ -3403,7 +3466,7 @@ export function apply(ctx, config) {
     let key = ''
     let keySource = ''
     try {
-      const r = resolveDashScopeKey(cfg.asr)
+      const r = resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') })
       key = r.key || ''
       // config / env / env:registry —— 面板要能说清"这个 key 从哪来的"
       keySource = r.source || ''
@@ -3806,7 +3869,7 @@ export function apply(ctx, config) {
     execute: wrap('meeting_agent_start', async (a) => {
       if (cfg.asr.provider === 'none') return { ok: false, result: 'ASR 未配置，无法开启' }
       if (cfg.asr.provider === 'dashscope') {
-        const key = resolveDashScopeKey(cfg.asr).key
+        const key = resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key
         if (!key) {
           return { ok: false, result: '缺少 DashScope Key：环境变量 ' + (cfg.asr.apiKeyEnv || 'DASHSCOPE_API_KEY') + ' 未设置，配置里也没有填。\n在「会议 → 配置」里填 Key 并保存，或 setx 后重启 DSH。' }
         }
@@ -4499,7 +4562,7 @@ export function apply(ctx, config) {
    */
   async function probeAsrConn() {
     const t0 = Date.now()
-    const key = resolveDashScopeKey(cfg.asr).key
+    const key = resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key
     if (!key) return { ok: false, ms: 0, error: new Error('缺少密钥：环境变量 DASHSCOPE_API_KEY 未设置') }
     return await new Promise((resolve) => {
       let settled = false
@@ -4535,7 +4598,7 @@ export function apply(ctx, config) {
    */
   async function probeTtsConn() {
     const t0 = Date.now()
-    const key = resolveDashScopeKey(cfg.tts).key
+    const key = resolveDashScopeKey({ ...cfg.tts, apiKey: keyFor(cfg.tts, 'tts') }).key
     const provider = String(cfg.tts.provider || 'dashscope')
     if (provider !== 'dashscope') {
       // sapi 是本机离线合成：只要没抛错就算通，不产生网络请求
@@ -4747,7 +4810,7 @@ export function apply(ctx, config) {
     if (!dir) return { ok: false, error: '没有会议目录' }
     const wav = join(dir, 'audio.wav')
     if (!existsSync(wav)) return { ok: false, error: '没有录音文件（本次可能没采到音频）' }
-    const key = resolveDashScopeKey(cfg.asr).key
+    const key = resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key
     if (!key) return { ok: false, error: '缺少语音识别密钥' }
 
     offlineBusy = true
@@ -5916,7 +5979,7 @@ export function apply(ctx, config) {
         const rows = installChecklist({
           configFile: !cfgFile.error,
           bridge: !!(env.tools && env.tools.mbridge),
-          key: !!resolveDashScopeKey(cfg.asr).key,
+          key: !!resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key,
           captureDevice: cfg.devices.capture,
           virtualMic: !!(cfg.devices.speak && (cfg.devices.speak || '').toUpperCase().includes('CABLE')),
         })
