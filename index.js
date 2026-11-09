@@ -5110,23 +5110,17 @@ export function apply(ctx, config) {
     }
     const runDir = run.dir
     try {
-    let md = await buildMinutes()
+    // 纪要**必须等非流式转写结果**（会后离线重转写）返回后再生成。
+    // 原因：实时流式转写是"边说边猜"的中间结果——断句碎、同音字多、没有说话人；
+    // 拿它写纪要等于用草稿写总结。所以这里先不生成，等下面 offline 段落拿到
+    // transcript-offline.jsonl 之后再写（那才是完整、带说话人的一份）。
+    let md = ''
+    let minutesFromOffline = false
     const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
     const title = (cfg.knowledge.titlePrefix || '会议纪要') + ' · ' + stamp
-    const results = { minutes: '', knowledge: '', persona: '' }
+    const results = { minutes: '', knowledge: '', persona: '', minutesSource: '' }
 
-    // 1) 落盘（会话目录 + 会议工作区）
-    if (md) {
-      try {
-        if (runDir) {
-          const r = await persistMinutesFile(join(runDir, 'minutes.md'), md)
-          results.minutes = r.path
-          if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
-        }
-        const ws = ensureMeetingWorkspace()
-        if (ws.dir) await persistMinutesFile(join(ws.dir, 'minutes.md'), md)
-      } catch { /* ignore */ }
-    }
+    // 1) 落盘推迟到 offline 之后（见后面的「2.5) 纪要」）
 
     // 记录会议结束信息（回看要用）
     try {
@@ -5197,12 +5191,49 @@ export function apply(ctx, config) {
           (off.mode === 'replay' ? '（云端不可用，本地重放）' : '')
         if (off.minutesPath) results.minutes = off.minutesPath
         // 会后重转写的纪要比实时版更完整（含说话人），优先把它写进知识库
-        if (off.md) md = off.md
-        results.minutesSource = minutesSource || 'unknown'
+        if (off.md) {
+          md = off.md
+          minutesFromOffline = true
+          results.minutesSource = minutesSource || 'background'
+        }
+        if (!minutesSource) results.minutesSource = off.md ? 'background' : ''
       } else if (off.error) {
         results.offline = '跳过：' + off.error
       }
     } catch { /* 离线失败不影响纪要 */ }
+
+
+    // 2) 纪要：到这里"非流式转写"已经跑完（成功用它的结果，失败才回退实时转写）
+    if (!md) {
+      const liveLines = (session.transcript || [])
+        .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
+        .map((x) => (x.speaker ? x.speaker + "：" : "") + x.text)
+      if (liveLines.length) {
+        logger?.warn?.("[soulmirror] 没有非流式转写结果，退回用实时转写生成纪要（质量会差一些）")
+        const bgLive = await minutesViaBackgroundTask(runDir, liveLines, title)
+        if (bgLive.ok) {
+          md = bgLive.markdown
+          results.minutesSource = 'background:live'
+        } else {
+          try {
+            md = await buildMinutes()
+            results.minutesSource = 'session:live'
+          } catch (e) { logger?.warn?.('[soulmirror] 实时转写生成纪要失败：' + e.message) }
+        }
+      }
+    }
+    if (md) {
+      results.minutesSource = results.minutesSource || (minutesFromOffline ? "background" : "unknown")
+      try {
+        if (runDir) {
+          const r = await persistMinutesFile(join(runDir, 'minutes.md'), md)
+          results.minutes = r.path
+          if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
+        }
+        const ws = ensureMeetingWorkspace()
+        if (ws.dir) await persistMinutesFile(join(ws.dir, 'minutes.md'), md)
+      } catch { /* ignore */ }
+    }
 
     // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
     if (writeKnowledge && cfg.knowledge.enabled && md && cfg.twin.enabled && gate('knowledge').allowed) {

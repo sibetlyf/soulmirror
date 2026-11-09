@@ -47,13 +47,15 @@ test('窗口关闭（lifecycle.onExit）仍会整理，且只在采集过时触�
   assert.match(seg, ORGANIZER, '窗口关闭应触发生成纪要')
 })
 
-test('纪要链路顺序：先纪要 → 再离线重转写 → 再写库', () => {
+test('纪要链路顺序：先非流式转写 → 再生成纪要 → 再写库', () => {
+  // 2026-11-09 用户纠正：纪要必须等"会议结束后的非流式转写结果"返回后再写。
+  // 实时流式转写是边说边猜的草稿，用它写纪要质量必然差。
   const at = src.indexOf('async function finalizeMeeting(')
-  const seg = src.slice(at, at + 6000)
-  const iMinutes = seg.indexOf('buildMinutes(')
+  const seg = src.slice(at, at + 30000)
   const iOffline = seg.indexOf('runOfflinePass(')
+  const iMinutes = seg.indexOf("persistMinutesFile(join(runDir, 'minutes.md')")
   const iKnow = seg.indexOf('writeViaHostApi(')
-  assert.ok(iMinutes > 0, '应先 buildMinutes')
-  assert.ok(iOffline > iMinutes, '离线重转写应在首次纪要之后（用录音补全）')
-  assert.ok(iKnow > iOffline, '写知识库应在最后')
+  assert.ok(iOffline > 0, '应先跑离线（非流式）重转写')
+  assert.ok(iMinutes > iOffline, '纪要应在非流式结果之后才落盘')
+  assert.ok(iKnow > iMinutes, '写知识库应在最后')
 })
