@@ -57,6 +57,7 @@ import { scanAudioLevels, extractRangeToWav, planOfflineUpload, explainOfflineEr
 import { captureVerdict } from './lib/capture-guard.js'
 import { createFinalizeRegistry, snapshotRun } from './lib/finalize-registry.js'
 import { createKeyStore, pickLegacyKeys, SLOTS as KEY_SLOTS } from './lib/credentials-bridge.js'
+import { buildMinutesTaskPrompt, writeMinutesSource, readMinutesResult, resetMinutesOutput, shouldUseBackgroundTask } from './lib/minutes-task.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -279,6 +280,12 @@ export const Config = z.object({
     onlyForSessionPrefix: z.string().default(''),
   }),
   /** 会后写回知识库（通过 DSH 的 knowledge 工具完成）。 */
+  /** 会议纪要是否交给 DSH 后台任务（独立进程）去写。默认开。 */
+  minutesViaDsh: z.boolean().default(true),
+  /** 用哪个 profile 跑这台后台任务（空 = 跟 twin.profile 或 headless）。 */
+  minutesProfile: z.string().default(''),
+  /** 后台任务超时（毫秒）。读整场转写 + 写长文，给足 5 分钟。 */
+  minutesTimeoutMs: z.number().default(300000),
   knowledge: z.object({
     enabled: z.boolean().default(true),
     /** 交给哪个 profile 去写（需要该 profile 装了 dsh-knowledge）。 */
@@ -376,6 +383,9 @@ export function apply(ctx, config) {
     brain: { baseUrl: '', provider: '', model: '', apiKeyEnv: 'BRAIN_API_KEY', apiKey: '', profile: 'SoulMirror', minGapMs: 8000, gate: 'llm', ...(config.brain || {}) },
     twin: { enabled: true, autoDelegate: true, reportSpeak: true, summarize: true, autoSession: true, profile: 'headless', timeoutMs: 180000, allowShell: [], ...(config.twin || {}) },
     autoAnswer: { enabled: false, timeoutMs: 5000, onlyForSessionId: '', onlyForSessionPrefix: '', ...(config.autoAnswer || {}) },
+    minutesViaDsh: config.minutesViaDsh !== false,
+    minutesProfile: String(config.minutesProfile || ''),
+    minutesTimeoutMs: Number(config.minutesTimeoutMs) || 300000,
     knowledge: { enabled: true, profile: 'headless', titlePrefix: '会议纪要', mode: 'host', ...(config.knowledge || {}) },
     personaAutoUpdate: config.personaAutoUpdate !== false,
     apps: Array.isArray(config.apps) && config.apps.length
@@ -3656,6 +3666,47 @@ export function apply(ctx, config) {
     }
   }
 
+  /**
+   * 用 **DSH 后台任务** 写纪要：起一个 headless 进程，读转写文件、写纪要文件。
+   *
+   * 为什么不塞进主会话：
+   *   · 主会话补全器有闸门（maxPending=2、合并、120s），纪要被合并/超时后静默退化成原文节选
+   *   · 纪要是重活，压在会议会话里会拖慢其它判断
+   *   · 用户明确要求：结束后的整理交给 dsh 的后台任务
+   *
+   * @returns {Promise<{ok: boolean, markdown?: string, error?: string, elapsed?: number}>}
+   */
+  async function minutesViaBackgroundTask(dir, lines, title = '') {
+    if (!dir) return { ok: false, error: '没有会议目录' }
+    if (!shouldUseBackgroundTask({ minutesViaDsh: cfg.minutesViaDsh !== false })) {
+      return { ok: false, error: '已关闭后台任务（minutesViaDsh=false）' }
+    }
+    resetMinutesOutput(dir)
+    const src = writeMinutesSource({ dir, lines })
+    if (!src.sentences) return { ok: false, error: '没有可写的转写句子' }
+
+    const prompt = buildMinutesTaskPrompt({
+      transcriptPath: src.path.replace(/\\/g, '/'),
+      outputPath: join(dir, 'minutes-by-dsh.md').replace(/\\/g, '/'),
+      title,
+    })
+    const t0 = Date.now()
+    const r = await runDshTask(prompt, {
+      profile: cfg.minutesProfile || cfg.twin.profile || 'headless',
+      cwd: dir,
+      timeoutMs: Math.max(120000, Number(cfg.minutesTimeoutMs) || 300000),
+    })
+    const elapsed = Math.round((Date.now() - t0) / 1000)
+    const out = readMinutesResult({ dir })
+    if (out.ok) {
+      logger?.info?.('[soulmirror] 纪要由 DSH 后台任务完成（' + src.sentences + ' 句，用时 ' + elapsed + 's）')
+      return { ok: true, markdown: out.markdown, elapsed, sentences: src.sentences }
+    }
+    const why = out.error + (r && r.error ? '；任务错误：' + String(r.error).slice(0, 160) : '')
+    logger?.warn?.('[soulmirror] 后台任务没写出纪要：' + why)
+    return { ok: false, error: why, elapsed }
+  }
+
   function makeDshCompleter(brainCfg) {
       const llm = ctx.get('llm')
       if (!llm || typeof llm.stream !== 'function') return null
@@ -3693,6 +3744,8 @@ export function apply(ctx, config) {
 
   const sessionCompleter = makeSessionCompleter()
   let lastMinutesFallbackReason = ''
+  /** 本次纪要由谁产出：background（DSH 后台任务）/ session（会议会话）/ extractive（原文节选） */
+  let minutesSource = ''
   const minutesCompleter = makeMinutesCompleter()
   const completer = httpCompleter
     || (cfg.brain.provider ? makeDshCompleter(cfg.brain) : sessionCompleter)
@@ -4941,22 +4994,38 @@ export function apply(ctx, config) {
         return { ok: false, cancelled: true, error: '已取消（超时）' }
       }
       await writeFile(join(dir, 'transcript-offline.jsonl'), lines.map((x) => JSON.stringify(x)).join('\n') + (lines.length ? '\n' : ''), 'utf8').catch(() => {})
-      const md = await buildOfflineMinutes({
-      sentences: lines
-        .filter((x) => x && x.text && !/知识库|会议纪要已写入/.test(String(x.text)))   // 别把助手自己的播报写进纪要
-        .map((x) => ({ text: (x.speaker ? x.speaker + '：' : '') + x.text })),
-      completer: async (msgs) => {
-        try {
-          return await (minutesCompleter || completer)(msgs)
-        } catch (e) {
-          // 不许静默退化：把原因记下来，界面与日志都要能看到
-          const msg = '纪要模型调用失败：' + (e && e.message ? e.message : String(e))
-          logger?.warn?.('[soulmirror] ' + msg)
-          results.offline = (results.offline || '') + '；' + msg
-          throw e
-        }
-      },
-    })
+      // 纪要优先交给 DSH 后台任务（独立进程，不在会议会话里跑）
+    const cleanLines = lines
+      .filter((x) => x && x.text && !/知识库|会议纪要已写入/.test(String(x.text)))
+      .map((x) => (x.speaker ? x.speaker + '：' : '') + x.text)
+    let minutesTitle = ''
+    try { minutesTitle = String(loadMeta(dir)?.title || basename(dir) || '') } catch { /* ignore */ }
+    const bg = await minutesViaBackgroundTask(dir, cleanLines, minutesTitle)
+    let md = ''
+    if (bg.ok) {
+      minutesSource = 'background'
+      md = bg.markdown
+    } else {
+      lastMinutesFallbackReason = '后台任务未产出：' + (bg.error || '未知原因')
+      md = await buildOfflineMinutes({
+        sentences: cleanLines.map((text) => ({ text })),
+        completer: async (msgs) => {
+          try {
+            const out = await (minutesCompleter || completer)(msgs)
+            minutesSource = 'session'
+            return out
+          } catch (e) {
+            // 不许静默退化：把原因记下来，界面与日志都要能看到
+            const msg = '纪要模型调用失败：' + (e && e.message ? e.message : String(e))
+            logger?.warn?.('[soulmirror] ' + msg)
+            results.offline = (results.offline || '') + '；' + msg
+            lastMinutesFallbackReason = msg
+            throw e
+          }
+        },
+        logger,
+      })
+    }
       let savedPath = ''
       if (md) {
         const saved = await persistMinutesFile(join(dir, 'minutes.md'), md)
@@ -5129,6 +5198,7 @@ export function apply(ctx, config) {
         if (off.minutesPath) results.minutes = off.minutesPath
         // 会后重转写的纪要比实时版更完整（含说话人），优先把它写进知识库
         if (off.md) md = off.md
+        results.minutesSource = minutesSource || 'unknown'
       } else if (off.error) {
         results.offline = '跳过：' + off.error
       }

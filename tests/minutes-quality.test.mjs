@@ -56,3 +56,23 @@ test('接线：纪要里要过滤掉助手自己的播报', () => {
   const seg = src.slice(at, at + 300)
   assert.match(seg, /\.map\(\(x\) => \(\{ text:/, '过滤后应接着拼句子')
 })
+
+test('接线：纪要优先交给 DSH 后台任务，失败才回退', () => {
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.match(src, /async function minutesViaBackgroundTask\(dir, lines, title/, '应有后台任务实现')
+  const at = src.indexOf('const bg = await minutesViaBackgroundTask')
+  assert.ok(at > 0, '离线整理应先尝试后台任务')
+  const seg = src.slice(at, at + 900)
+  assert.match(seg, /if \(bg\.ok\)/, '成功就直接用后台结果')
+  assert.match(seg, /minutesSource = 'background'/, '应记录来源')
+  assert.match(seg, /buildOfflineMinutes\(/, '失败才回退到会话模型')
+})
+
+test('接线：后台任务用文件交接（不走命令行传长文本）', () => {
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const at = src.indexOf('async function minutesViaBackgroundTask')
+  const seg = src.slice(at, at + 1600)
+  assert.match(seg, /writeMinutesSource\(/, '应把转写写文件')
+  assert.match(seg, /buildMinutesTaskPrompt\(/, '应构造文件读写指令')
+  assert.match(seg, /readMinutesResult\(/, '应读回结果并校验')
+})
