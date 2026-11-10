@@ -20,6 +20,8 @@ npm test
 - 本机 node_modules 是 DSH 宿主 junction，禁止在其中 npm install。独立干净 CI 可执行 `npm install --no-save --ignore-scripts --legacy-peer-deps typescript@5.9.3`；不改运行时 peer 依赖。
 - test:rules 验证“坏代码必须失败”、工具缺失失败、Key 测试隔离；client-render 验证真实组件执行，但不等于浏览器实机验证。
 - 禁止 --test-force-exit：不自然退出就是泄漏。超时用于报告失败，不表示底层资源已清理。
+- `npm test` 固定 `--test-concurrency=4`：默认并发在本机（100+ 测试文件、多个会启动插件实例）
+  会互相拖慢到看起来挂住；限并发后 20s 跑完。不要把"卡住"当成通过，也不要靠强制退出绕开。
 
 ### 硬件集成测试（默认跳过）
 `SOULMIRROR_INTEGRATION=1` 只在获得当前用户明确授权、隔离的测试机上使用。它允许真实进程/网络，不能当作普通单测开关。以下保留原断言并显式跳过，不计入默认通过数量：

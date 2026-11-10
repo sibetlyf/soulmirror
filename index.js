@@ -1686,6 +1686,13 @@ export function apply(ctx, config, deps = {}) {
           return json(200, { ok: true, data, voices: voiceListOf(data), workspaceId })
         } catch (e) { return json(200, { ok: false, error: e.message }) }
       }
+      if (req.method === 'POST' && sub === 'open') {
+        const bufO = []
+        for await (const chunk of req) bufO.push(chunk)
+        const bodyO = JSON.parse(Buffer.concat(bufO).toString('utf8') || '{}')
+        const r = await openMeetingClient(bodyO.app)
+        return json(200, r)
+      }
       if (req.method === 'POST' && sub === 'join') {
         const bufJ = []
         for await (const chunk of req) bufJ.push(chunk)
@@ -2803,6 +2810,24 @@ export function apply(ctx, config, deps = {}) {
     }),
   }))
 
+  /**
+   * 启动会议客户端（已运行就只汇报窗口），不加入任何会议。
+   * 面板按钮与 meeting_open 工具共用这一个实现。
+   * @returns {Promise<{ok: boolean, result: string, launched?: boolean}>}
+   */
+  async function openMeetingClient(appName = '') {
+    const app = meetingApp(appName)
+    const path = resolveAppPath(app.path)
+    if (!path) return { ok: false, result: '未找到 ' + app.name + ' 客户端，请在配置里填写 apps[].path' }
+    const r = await ensureApp(path, app.title, app.proc)
+    const lines = (r.windows || []).map((w) => '[' + w.cls + '] ' + w.title)
+    return {
+      ok: true,
+      launched: !!r.launched,
+      result: (r.launched ? '已启动：' : '已运行：') + app.name + '\n' + (lines.join('\n') || '(窗口尚未出现)'),
+    }
+  }
+
   // ── 启动 / 加入 / 离开 ──────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_open',
@@ -2811,14 +2836,7 @@ export function apply(ctx, config, deps = {}) {
       app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
     },
     output: OUT(),
-    execute: wrap('meeting_open', async (a) => {
-      const app = meetingApp(a.app)
-      const path = resolveAppPath(app.path)
-      if (!path) return { ok: false, result: `未找到 ${app.name} 客户端，请在配置里填写 apps[].path` }
-      const r = await ensureApp(path, app.title, app.proc)
-      const lines = r.windows.map((w) => `[${w.cls}] ${w.title}`)
-      return { ok: true, result: (r.launched ? '已启动：' : '已运行：') + app.name + '\n' + (lines.join('\n') || '(窗口尚未出现)') }
-    }),
+    execute: wrap('meeting_open', async (a) => openMeetingClient(a.app)),
   }))
 
   const joinTool = defineTool({

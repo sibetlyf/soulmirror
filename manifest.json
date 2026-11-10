@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "index.js",
-      "sha256": "c5a873c5fa947264b0ca0165287355d7e08e7c797c94bd2b721a18179e6133d0",
-      "bytes": 331278
+      "sha256": "96801c5e53522fa5983a1b42987752e66f563782402ddd2c95bb909334052b41",
+      "bytes": 331946
     },
     {
       "path": "lib/action-items.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "2191977984751b69f91667a54e8895f72d8b21b6f03ed211472002c7b0193010",
-      "bytes": 124475
+      "sha256": "cf45e6ce4518f18b5f15c69f7aa8cb70359d831e69b6e7329c7938829b5bbe08",
+      "bytes": 127034
     },
     {
       "path": "lib/context-snapshot.js",
@@ -474,13 +474,13 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "cef751704937ab492ace7a627849477f4b4421ecc349c5d01f593f043fe279d7",
+      "sha256": "53a05f6ba769b346f00742c3579ea1c8ddec89e7836f3b6c9555e290f83187b5",
       "bytes": 15377
     },
     {
       "path": "package.json",
-      "sha256": "79b8935e0f789cab748f9241d5881816a5229f026b4a83d9ae568090ef0ae3c4",
-      "bytes": 2198
+      "sha256": "239d12f0d4d4ad96fa84d109f71412c40851b603a5b0d063663869ebcd5fe711",
+      "bytes": 2240
     },
     {
       "path": "README.md",

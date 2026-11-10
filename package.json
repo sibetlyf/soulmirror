@@ -82,9 +82,9 @@
     }
   },
   "scripts": {
-    "test": "node --test \"tests/*.test.mjs\"",
+    "test": "node --test --test-concurrency=4 \"tests/*.test.mjs\"",
     "check:scope": "node scripts/check-scope.mjs",
-    "test:rules": "node --test --test-timeout=30000 tests/development-rules.test.mjs tests/key-consistency.test.mjs",
+    "test:rules": "node --test --test-concurrency=2 --test-timeout=30000 tests/development-rules.test.mjs tests/key-consistency.test.mjs",
     "check:dev": "npm run check:scope && npm run test:rules"
   },
   "engines": {
