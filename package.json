@@ -76,8 +76,6 @@
     }
   },
   "scripts": {
-    "postinstall": "node scripts/postinstall.mjs",
-    "setup": "node scripts/postinstall.mjs",
     "test": "node --test \"tests/*.test.mjs\""
   },
   "engines": {

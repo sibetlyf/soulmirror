@@ -23,7 +23,8 @@ async function main() {
     const { homedir } = await import('node:os')
     const file = join(homedir(), '.dsh', 'soulmirror', 'config.json')
     const r = ensureConfigFile(file, {
-      enabled: false,
+      // 默认开：装上就能用
+      enabled: true,
       asr: { provider: 'dashscope', dashscopeModel: 'paraformer-realtime-v2', sentenceSilenceMs: 400, hourlyBudgetMinutes: 0 },
       devices: { capture: '', speak: 'CABLE Input' },
       twin: { enabled: true, useActiveWorkspace: true, workspaceCwd: '' },
