@@ -60,6 +60,7 @@ import { createKeyStore, pickLegacyKeys, SLOTS as KEY_SLOTS } from './lib/creden
 import { buildMinutesTaskPrompt, writeMinutesSource, readMinutesResult, resetMinutesOutput, shouldUseBackgroundTask } from './lib/minutes-task.js'
 import { createProgress, describeProgress } from './lib/progress.js'
 import { buildPreflight } from './lib/preflight.js'
+import { collectIssues, topIssue, describeIssues } from './lib/issues.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -834,6 +835,31 @@ export function apply(ctx, config) {
           lastModelProbe,
           // 采集链路体检（最近一次）：直接回答"为什么不转录"
           lastPreflight,
+          // 当前问题清单：第一条就是最该处理的（界面横幅与排查都用它）
+          issues: (() => {
+            try {
+              const lastLine = session.transcript && session.transcript.length
+                ? Date.parse((session.transcript[session.transcript.length - 1] || {}).t || '') || 0
+                : 0
+              return collectIssues({
+                preflight: lastPreflight,
+                capturing: !!session.capturing,
+                transcriptLines: (session.transcript || []).length,
+                lastLineAgeSec: lastLine ? Math.round((Date.now() - lastLine) / 1000) : null,
+                // 识别状态来自 asrState（{online,failed,lastError}），不是我编的字段
+                asr: {
+                  online: !!(session.asrState && session.asrState.online),
+                  failed: !!(session.asrState && session.asrState.failed),
+                  error: (session.asrState && session.asrState.lastError) || '',
+                },
+                keyErrors: { ...keyErrors },
+                postMeeting: { phase: postMeeting.phase, error: postMeeting.error },
+                captureError: session.lastError || '',
+                captureDevice: session.deviceLabel || cfg.devices.capture || '',
+                silentSec: session.silentSec || 0,
+              })
+            } catch { return [] }
+          })(),
           // 配置落点自查：独立环境里"保存了却读不到"多半是两个路径不一致
           config: (() => {
             try {
