@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 
-import { bridge, ensureBridge, listDevices, toolsDir, micUsage, defaultRenderDevice, meetingMicActive, bridgeExe } from './lib/bridge.js'
+import { bridge, ensureBridge, listDevices, toolsDir, pluginDir, micUsage, defaultRenderDevice, meetingMicActive, bridgeExe } from './lib/bridge.js'
 import {
   listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
   ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect, shotWindow,
@@ -60,6 +60,7 @@ import { createKeyStore, pickLegacyKeys, SLOTS as KEY_SLOTS } from './lib/creden
 import { buildMinutesTaskPrompt, writeMinutesSource, readMinutesResult, resetMinutesOutput, shouldUseBackgroundTask } from './lib/minutes-task.js'
 import { createProgress, describeProgress } from './lib/progress.js'
 import { buildPreflight } from './lib/preflight.js'
+import { parseManifest, planUpgrade, applyUpgrade, describeUpgrade, sha256Hex, UPGRADE_REPO, UPGRADE_BRANCH } from './lib/upgrade.js'
 import { collectIssues, topIssue, describeIssues } from './lib/issues.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
@@ -6346,13 +6347,52 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
     name: 'soul_setup',
     description: '检查并自动配置运行环境（Windows 编译 mbridge；macOS/Linux 提示 ffmpeg 等依赖）。装完先跑一次这个。',
     parameters: {
-      action: { type: 'string', enum: ['check', 'report', 'build', 'auto', 'deps', 'install-deps', 'links', 'audio'], required: true, description: 'check 看环境 / report 安装体检清单（缺什么、怎么补） / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡 / audio 音频路由诊断' },
+      action: { type: 'string', enum: ['check', 'report', 'build', 'auto', 'deps', 'install-deps', 'links', 'audio', 'upgrade'], required: true, description: 'check 看环境 / report 安装体检清单（缺什么、怎么补） / build 编译 mbridge / auto 自动处理 / deps 看虚拟声卡 / install-deps 尝试安装虚拟声卡 / audio 音频路由诊断' },
     },
     output: OUT(),
     execute: wrap('soul_setup', async (a) => {
       if (a.action === 'build') {
         const r = buildBridge({ logger })
         return { ok: r.ok, result: (r.ok ? '编译完成：' + r.path : '失败：' + (r.error || r.reason || '')) + '\n\n' + formatEnv(detectEnv()) }
+      }
+      if (a.action === 'upgrade') {
+        // 增量升级：只替换 sha256 变了的文件；配置与会议记录一律不碰
+        try {
+          const base = 'https://raw.githubusercontent.com/' + UPGRADE_REPO + '/' + UPGRADE_BRANCH + '/'
+          const getBuf = async (rel) => {
+            const res = await fetch(base + rel + '?t=' + Date.now())
+            if (!res.ok) throw new Error(rel + ' → HTTP ' + res.status)
+            return Buffer.from(await res.arrayBuffer())
+          }
+          const remoteManifestText = (await getBuf('manifest.json')).toString('utf8')
+          const remote = parseManifest(remoteManifestText)
+          if (!remote.size) throw new Error('远端 manifest 为空（仓库可能还没发布 manifest.json）')
+          const local = new Map()
+          for (const rel of remote.keys()) {
+            try { local.set(rel, sha256Hex(readFileSync(join(pluginDir, rel)))) } catch { /* 本地缺失 = 新增 */ }
+          }
+          const plan = planUpgrade(local, remote)
+          if (!plan.total) {
+            return { ok: true, result: describeUpgrade({ written: [], failed: [] }, { version: VERSION }) }
+          }
+          const out = await applyUpgrade({
+            dir: pluginDir,
+            plan,
+            joinPath: join,
+            expect: remote,
+            readFileBuf: (abs) => readFileSync(abs),
+            writeFileBuf: (abs, buf) => { mkdirSync(dirname(abs), { recursive: true }); writeFileSync(abs, buf) },
+            fetchBuf: getBuf,
+            logger,
+          })
+          let remoteVersion = VERSION
+          try { remoteVersion = JSON.parse(remoteManifestText).version || VERSION } catch { /* ignore */ }
+          const body = describeUpgrade(out, { version: remoteVersion })
+          logger?.info?.('[soulmirror] 增量升级：' + out.written.length + ' 个文件')
+          return { ok: out.failed.length === 0, result: body }
+        } catch (e) {
+          return { ok: false, result: '升级失败：' + e.message + '\n可继续手动覆盖插件目录（配置不会丢）' }
+        }
       }
       if (a.action === 'links') {
         const s = linkStatus(cfg.twin.profile)
