@@ -449,18 +449,18 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "2b5227f4cd32411512290aaedf0c2e7faf54d7c80337e6d14dcaa6dcc2d347eb",
+      "sha256": "97302a52624e6d7f4887e47d81471f3acbc0882d82b2c984c7b57377203aec72",
       "bytes": 14608
     },
     {
       "path": "package.json",
-      "sha256": "8221cf82e3c4f57535894227d5e8196544650534d4bf821f768eeb9c369a368e",
-      "bytes": 1804
+      "sha256": "fab305ba0642bf4323e268724c6a0d240275af1d0faadd5a03f0fef794e69d75",
+      "bytes": 1937
     },
     {
       "path": "README.md",
-      "sha256": "d78fe41f80fd84693621b602964ea1def6f5c4e9cb509076274fc02a8e00beb0",
-      "bytes": 8022
+      "sha256": "fe21d6dd9a9b968c6e2e3c855115eb2a6f5617f93bb5f24796f0ef9efbd8dd52",
+      "bytes": 8065
     },
     {
       "path": "tools/hold.ps1",

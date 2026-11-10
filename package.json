@@ -51,10 +51,15 @@
     }
   },
   "files": [
+    "manifest.json",
     "index.js",
     "lib/",
-    "tools/",
-    "scripts/",
+    "tools/mbridge.exe",
+    "tools/meeting-bridge.cs",
+    "tools/ui.ps1",
+    "tools/mic.ps1",
+    "tools/hold.ps1",
+    "tools/README.md",
     "cordis.patch.yml",
     "README.md",
     "assets/",

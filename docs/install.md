@@ -5,8 +5,19 @@
 ## 🔧 装起来
 
 ```bash
+# 直接装（公开仓库，无需 token；已实测）
 dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
 ```
+
+想改代码 / 想用增量升级，就换成本地 link：
+
+```bash
+git clone https://github.com/sibetlyf/soulmirror.git ~/.dsh/plugins/soulmirror
+dsh plugin --profile web add link:~/.dsh/plugins/soulmirror
+```
+
+> `dsh plugin --profile <名字> ...` 只是把后面的参数转给 profile 目录里的 pnpm，
+> 所以 `add` / `update` / `rm` 都可以直接用。
 
 重启 `dsh web`，再跑一次 `soul_setup { action: "auto" }`。Windows 会用系统自带 `csc`
 把 `tools/mbridge.exe` 编译出来，macOS / Linux 只做依赖检查。

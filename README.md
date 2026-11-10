@@ -121,15 +121,17 @@
 ## 🚀 上手
 
 ```bash
-dsh plugin --profile <你的 profile> add <本插件>
-# 重启 dsh web → 侧栏底部「🎙 会议」→ 右侧展开会议助手侧栏
+# ① 从 GitHub 直接装（公开仓库，无需 token；已实测）
+dsh plugin --profile web add github:sibetlyf/soulmirror
+
+# ② 或本地 clone 后 link（可增量升级、可改代码）
+git clone https://github.com/sibetlyf/soulmirror.git ~/.dsh/plugins/soulmirror
+dsh plugin --profile web add link:~/.dsh/plugins/soulmirror
 ```
 
 然后：填一次百炼 Key（识别/语音/模型共用）→ 点「测模型」确认连通 → 开会。
-**升级不用卸载重装**：`soul_setup { action: "upgrade" }` 只替换 sha256 变了的文件，
-配置与会议记录不动；link / git / node_modules 三种安装方式的差异见 [docs/upgrade.md](docs/upgrade.md)。
 
-安装细节 [docs/install.md](docs/install.md) · 最短路径 [docs/quickstart.md](docs/quickstart.md)
+**升级不用卸载重装**：`soul_setup { action: "upgrade" }` 只替换 sha256 变了的文件、配置与会议记录不动；三种安装方式见 [docs/upgrade.md](docs/upgrade.md)。
 
 ---
 
@@ -184,10 +186,7 @@ dsh plugin --profile <你的 profile> add <本插件>
 ## ⚠️ 两条必须知道的限制
 
 1. **电脑休眠 / DSH 退出时，到点自动参会不会触发**——固有限制，不是 bug。
-2. **会议软件改版可能让自动化失效**：入会、静音等依赖控件定位，
-   失效时快速报错而不是卡死，可用 `meeting_ui` 手动兜底。
-
-其余限制写在 [docs/troubleshooting.md](docs/troubleshooting.md)，不粉饰。
+2. **会议软件改版可能让自动化失效**：入会、静音依赖控件定位，失效时快速报错而不是卡死，可用 `meeting_ui` 手动兜底。其余限制见 [docs/troubleshooting.md](docs/troubleshooting.md)，不粉饰。
 
 ---
 
