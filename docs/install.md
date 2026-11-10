@@ -59,3 +59,30 @@ dsh: git-hosted plugins build on install via their prepare script, which pnpm bl
 
 > peer 依赖的 `[WARN]` 可以忽略：`@deepseek-ai/dsh-tools`、`schemastery`、
 > `react` 由 DSH 运行时提供，不需要装进 profile。
+
+如果报错里被拦的是**别的包**（例如 `node-pty`、`koffi`、`protobufjs`、`@google/genai`）：
+
+```text
+[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: koffi@3.1.1, node-pty@1.2.0-beta.15, ...
+Packages: +786 -7
+```
+
+那说明安装时把 DSH 内部依赖也拉进了 profile（早期版本把 `@deepseek-ai/dsh-tools`
+声明成了必装 peer）。已在 `b784e5f` 把 peer 全部标记 `optional`，装新版本后只会装 1 个包：
+
+```bash
+dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
+```
+
+实在要留旧版本，就按提示把这几个 key 加进 `<profile>/pnpm-workspace.yaml` 的 `allowBuilds`：
+
+```yaml
+allowBuilds:
+  '@deepseek-ai/dsh-subprocess-local': true
+  '@google/genai': true
+  koffi: true
+  node-pty: true
+  protobufjs: true
+```
+
+然后重跑。被拦的包是 DSH 自身依赖，放行前值得确认它们来自官方来源。

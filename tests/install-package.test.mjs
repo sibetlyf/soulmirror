@@ -50,3 +50,23 @@ test('脚本文件本身仍可手动执行，且默认是启用而不是关闭',
   // 即使不再自动跑，这个脚本被人手动执行时也不该把用户配置改成关闭
   assert.match(postinstall, /enabled: true/, '默认应为启用，不再是 enabled: false')
 })
+
+test('peer 依赖必须全部标记 optional（否则 pnpm 会去下载 DSH 内部整棵树）', () => {
+  // 真实故障：另一台机器执行
+  //   dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
+  //   → Packages: +786 -7
+  //   → [ERR_PNPM_IGNORED_BUILDS] Ignored build scripts:
+  //       @deepseek-ai/dsh-subprocess-local, @google/genai, koffi, node-pty, protobufjs
+  //   → dsh: plugin command failed
+  //
+  // 原因：peerDependencies 里的 @deepseek-ai/dsh-tools 在对方 profile 里不存在，
+  // pnpm 于是从 registry 把它连同 dsh 的内部依赖（node-pty / koffi / protobufjs…）一起装上，
+  // 而这些包的构建脚本被 pnpm 10 默认拦截 → 安装被判失败。
+  // 这些包本来就由 DSH 运行时提供，不该装进 profile，所以标 optional。
+  const peers = Object.keys(pkg.peerDependencies || {})
+  assert.ok(peers.length > 0, '应保留 peer 声明（说明依赖谁）')
+  const meta = pkg.peerDependenciesMeta || {}
+  for (const name of peers) {
+    assert.equal(meta[name] && meta[name].optional, true, 'peer 必须 optional：' + name)
+  }
+})
