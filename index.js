@@ -842,6 +842,8 @@ export function apply(ctx, config) {
           lastModelProbe,
           // 采集链路体检（最近一次）：直接回答"为什么不转录"
           lastPreflight,
+          // 宿主代码是否比运行进程新（true = 改了没重启，界面会提示重启）
+          host: { bootedAt: BOOT_AT, codeMtime: CODE_MTIME, stale: HOST_STALE },
           // 当前问题清单：第一条就是最该处理的（界面横幅与排查都用它）
           issues: (() => {
             try {
@@ -849,6 +851,7 @@ export function apply(ctx, config) {
                 ? Date.parse((session.transcript[session.transcript.length - 1] || {}).t || '') || 0
                 : 0
               return collectIssues({
+                host: { stale: HOST_STALE, bootedAt: BOOT_AT, codeMtime: CODE_MTIME },
                 preflight: lastPreflight,
                 capturing: !!session.capturing,
                 transcriptLines: (session.transcript || []).length,
@@ -6629,5 +6632,20 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
 
   logger?.info?.('soulmirror: 全部工具已注册')
 }
+
+/**
+ * 宿主是否在跑旧代码？
+ *
+ * 反复踩的坑：改了 index.js、也部署了，但 DSH 宿主没重启，
+ * 于是界面上一直是旧行为（例如体检报"mbridge.exe 不存在"，其实是旧代码里的
+ * toolsDir is not a function 被当成"文件不存在"）。
+ * 这里记下模块加载时刻，并与文件 mtime 比较，前端就能直接提示"请重启宿主"。
+ */
+const BOOT_AT = Date.now()
+let CODE_MTIME = 0
+try {
+  CODE_MTIME = statSync(fileURLToPath(import.meta.url)).mtimeMs
+} catch { /* ignore */ }
+const HOST_STALE = CODE_MTIME > BOOT_AT + 3000   // 留 3 秒容差，避免误报
 
 export default { name, inject, Config, apply }
