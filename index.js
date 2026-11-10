@@ -5569,9 +5569,13 @@ export function apply(ctx, config) {
         logger?.info?.('[soulmirror] 已开启：开始采集转写并建会话（' + reason + '）')
       },
       onExit: async () => {
+        // 不能只看 session.capturing：采集进程可能还在跑、标志却已为 false
+        // （重连间隙、异常退出后残留）。所以这里一律先真停采集。
         const wasCapturing = !!session.capturing
+        const wasRunning = !!session.running
         agent.running = false
-        if (!wasCapturing) return
+        if (!wasCapturing && !wasRunning) return
+        try { await session.stopCapture() } catch { /* 已停也无所谓 */ }
         try {
           // 纪要写本地；知识库回写与发言属于"对外动作"，未开启时不做
           const o = await stopAndOrganize('离开会议', { wasCapturing })
@@ -5582,6 +5586,36 @@ export function apply(ctx, config) {
       },
     },
   )
+
+// ── 会议结束自愈：检测不到会议窗口就停采集并整理 ─────────────
+// 为什么需要：生命周期依赖窗口形态，客户端崩溃/最小化到托盘/直接结束会议时
+// 可能判不出来，于是采集一直跑、"转录停不下来"。这条是兜底，代价很低。
+let noMeetingTicks = 0
+const meetingWatchdog = setInterval(async () => {
+  try {
+    if (!session.capturing && !session.running) { noMeetingTicks = 0; return }
+    const wins = await listWindows()
+    const apps = activeApps()
+    const procs = new Set(apps.map((a) => String(a.proc || "").toLowerCase()).filter(Boolean))
+    const frag = String(cfg.windowTitle || "腾讯会议")
+    const alive = (wins || []).some((w) => {
+      const proc = String(w.proc || "").toLowerCase()
+      if (procs.size && !procs.has(proc)) return false
+      return String(w.title || "").includes(frag) || /FloatSpeakingWnd|VideoMainWindow|MeetingView/.test(String(w.cls || ""))
+    })
+    if (alive) { noMeetingTicks = 0; return }
+    noMeetingTicks += 1
+    if (noMeetingTicks >= 2) {
+      noMeetingTicks = 0
+      logger?.info?.("[soulmirror] 连续 " + 2 + " 次没检测到会议窗口，自动停止采集并整理")
+      setPostMeeting({ phase: "stopping", error: "", dir: session.dir || "", progressText: "会议已结束，正在收尾" })
+      await stopAndOrganize("会议已结束（窗口消失）", { wasCapturing: true })
+    }
+  } catch { /* 检测失败不算结束 */ }
+}, 15000)
+meetingWatchdog.unref?.()
+ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting watchdog")
+
   // 恢复上次的开关状态：上次开着就继续开，上次关着就保持待命
   if (cfg.enabled === true) armed = true
   // 桌面宠物是可选项：上次开着就自动恢复
