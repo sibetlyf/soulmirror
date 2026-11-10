@@ -18,12 +18,12 @@ import { readFileSync } from 'node:fs'
 const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
 
 test('默认走内联执行，不再默认依赖子进程', () => {
-  const at = src.indexOf('const off = await withTimeout(')
-  assert.ok(at > 0, '找不到 offline 调用')
-  const seg = src.slice(at, at + 900)
-  assert.match(seg, /cfg\.offlineViaChild === true/, '子进程应是可选，而非常态')
-  assert.match(seg, /: runOfflinePass\(runDir/, '否则内联执行（目录用不可变快照）')
-  assert.match(seg, /onTimeout/, '超时应通知取消')
+  const at = src.indexOf('offline: async task =>')
+  assert.ok(at > 0, '找不到 offline 步骤')
+  const seg = src.slice(at, src.indexOf('minutes: async task =>',at))
+  assert.match(seg, /await runOfflinePass\(task.dir/, '默认内联执行，目录来自任务快照')
+  assert.match(seg, /isCancelled:task.isCancelled/, '超时取消令牌必须传到底层')
+  assert.match(seg, /transcriptionOnly:true/, '转写与生成纪要是分离步骤')
 })
 
 test('上传前先体检：静音就跳过，有声区间才上传', () => {
@@ -46,9 +46,7 @@ test('体检失败不能挡住重转写（按整段上传）', () => {
 
 test('云端错误翻译成人话，不只扔原始 JSON', () => {
   assert.match(src, /explainOfflineError\(e\.message\)/, '应翻译错误')
-  const at = src.indexOf('云端文件识别失败')
-  const seg = src.slice(at, at + 300)
-  assert.match(seg, /why/, '日志里应带人话原因')
+  assert.match(src, /throw new Error\('非流式文件识别失败：' \+ explainOfflineError\(e.message\)\)/, '错误必须翻译后抛出，由管线记录失败，不得静默继续')
 })
 
 test('上传用流式 openAsBlob（不整份读入内存）', () => {

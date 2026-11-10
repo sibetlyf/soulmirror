@@ -73,9 +73,10 @@ test('不带门槛时行为不变（单测可直接测同步）', async () => {
 })
 
 test('会后调用处带了门槛，且"暂不写入"如实报告', () => {
-  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
-  const at = src.indexOf('人格画像 → 独立知识库')
-  assert.ok(at > 0)
+  // 画像沉淀已抽到独立模块：调用点与门槛都在那里，主入口只负责把它接进会后管线
+  const src = readFileSync(new URL('../lib/postmeeting-persona.js', import.meta.url), 'utf8')
+  const at = src.indexOf('personaSync')
+  assert.ok(at > 0, '找不到画像写库分支')
   const seg = src.slice(at, at + 2600)
   assert.match(seg, /minItems:/, '应传条数门槛')
   assert.match(seg, /minScore:/, '应传相似度门槛')

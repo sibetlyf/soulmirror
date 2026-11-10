@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -6,9 +7,7 @@ import { join } from 'node:path'
 
 // 关键：在导入插件之前把 HOME 指向临时目录，避免污染真实配置
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-home-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
@@ -26,7 +25,7 @@ function bootPlugin(extra = {}) {
     effect: () => () => {},
     emit() {},
   }
-  plugin.apply(ctx, {})
+  applyIsolated(plugin, ctx, extra.config || {})
   return { tools, routes, handlers }
 }
 
@@ -96,8 +95,8 @@ test('配置 API：POST /auto 开关监听', async () => {
   const { routes } = bootPlugin()
   const on = await callApi(routes[0], 'POST', '/api/soulmirror/auto', { action: 'start' })
   assert.equal(on.code, 200)
-  assert.equal(on.body.auto, true)
-  const off = await callApi(routes[0], 'POST', '/api/soulmirror/auto', { action: 'stop' })
+  assert.equal(on.body.armed, true, 'test mode does not start the real lifecycle timer')
+  const off = await callApi(routes[0], 'POST', '/api/soulmirror/auto', { action: 'off' })
   assert.equal(off.body.auto, false)
 })
 
@@ -176,7 +175,7 @@ test('工具：soul_session 显示工作区与会话', async () => {
   assert.match(r.result, /会议身份/)
 })
 
-test('工具：soul_setup check/links/deps 不抛错', async () => {
+test('工具：soul_setup check/links/deps 不抛错', { skip: process.env.SOULMIRROR_INTEGRATION !== '1' && 'Requires explicit SOULMIRROR_INTEGRATION=1: desktop/audio/device integration; not part of safe default suite' }, async () => {
   const { tools } = bootPlugin()
   const t = tools.find((x) => x.name === 'soul_setup')
   const check = await t.execute({ action: 'check' }, {})
@@ -203,13 +202,17 @@ test('工具：soul_say 内容为空时拒绝', async () => {
   assert.equal(r.ok, false)
 })
 
-test('自动应答：插件启动时注册了 approval/request 拦截', () => {
-  const { handlers } = bootPlugin()
-  assert.equal(typeof handlers['approval/request'], 'function')
+test('自动应答默认关闭；安装器显式开启才注册 approval/request（不发请求）', async () => {
+  const off = bootPlugin()
+  assert.equal(off.handlers['approval/request'], undefined)
+  const { installAutoAnswer } = await import('../lib/auto-answer.js')
+  const handlers = {}
+  const enabled = installAutoAnswer({ on(name, handler) { handlers[name] = handler; return () => {} } }, { enabled: true })
+  try { assert.equal(typeof handlers['approval/request'], 'function') } finally { enabled.dispose() }
 })
 
 test('插件二次加载不抛错（幂等）', () => {
-  assert.doesNotThrow(() => plugin.apply({
+  assert.doesNotThrow(() => applyIsolated(plugin, {
     tools: { register() {} },
     logger: { info() {}, warn() {} },
     get: () => ({ port: 3100 }),
@@ -220,6 +223,4 @@ test('插件二次加载不抛错（幂等）', () => {
   }, {}))
 })
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

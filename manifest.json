@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "files": [
     {
       "path": "index.js",
-      "sha256": "8cf086ff52a2b077bfd2179b97cda00b688190f9c2a0d892b8aef8fe98bbca0b",
-      "bytes": 343265
+      "sha256": "cf7770df8496a1192d314abb3e7602b9a702cebd502eaebcd1d36d0f2178e445",
+      "bytes": 330007
     },
     {
       "path": "lib/action-items.js",
@@ -84,8 +84,8 @@
     },
     {
       "path": "lib/bridge.js",
-      "sha256": "bf1f3eb56e955bf5379e26b0f345b3171d4a39799e15df565f6874483c63bd4b",
-      "bytes": 9608
+      "sha256": "e97667eb66258ed905d0ac6086566998678dffa13ae30fb170170562c2af3645",
+      "bytes": 9905
     },
     {
       "path": "lib/calibrate-agent.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "a9abe7966b885048b331eac6e4c058ec30756d4af5fed1b73eafefff7ffbfc40",
-      "bytes": 150359
+      "sha256": "94a86818485b1204dfd189f82e94d54e6865f7f667fa9bc130f92ec8a9b50e4c",
+      "bytes": 123319
     },
     {
       "path": "lib/context-snapshot.js",
@@ -159,8 +159,8 @@
     },
     {
       "path": "lib/dsh-session.js",
-      "sha256": "14aa3c693b84e1d10bb2f99e284c299baf3d3f1ebbe52f83c9605e0953146455",
-      "bytes": 6272
+      "sha256": "7952aa28b35e45091a4373075dabf7d9ba2a37c7c468c418a994b5f88b975760",
+      "bytes": 6323
     },
     {
       "path": "lib/echo-guard.js",
@@ -193,9 +193,14 @@
       "bytes": 2469
     },
     {
+      "path": "lib/journal.js",
+      "sha256": "5b7bfdb493f065ce71dfd8757350bd5145903f9eff90bda0fabdf1741a48701f",
+      "bytes": 22110
+    },
+    {
       "path": "lib/knowledge.js",
-      "sha256": "67cb3a9732c70f9c14e57fb0f6d79868f6304e1369bb2a4f75744e86ad63f4e9",
-      "bytes": 12757
+      "sha256": "5370e7266684a47dff19641ffc0ed4dec3c4425d605a711c7ef735a1f58c801c",
+      "bytes": 12814
     },
     {
       "path": "lib/lifecycle.js",
@@ -224,8 +229,8 @@
     },
     {
       "path": "lib/meeting-record.js",
-      "sha256": "1db834a9d4cb039798a8f5fed0974a93c3916f596185d5921ab609bb2ed9766d",
-      "bytes": 5119
+      "sha256": "e1ecdd54335e83e8615877718e77bad7929b7d6a8d345c5b37203c3a61a3ac69",
+      "bytes": 5176
     },
     {
       "path": "lib/memory-layers.js",
@@ -256,6 +261,11 @@
       "path": "lib/model-resolve.js",
       "sha256": "59920f9a2c945d3eba96fbfd3e2cd3132bd917b7139ba4b0a7f6fb0ce257b941",
       "bytes": 2794
+    },
+    {
+      "path": "lib/model-route.js",
+      "sha256": "958fe2467260cd6d5006a2773eeac4713c3e513e3619b82adf99a911020187cc",
+      "bytes": 2998
     },
     {
       "path": "lib/offline-asr.js",
@@ -303,6 +313,16 @@
       "bytes": 11769
     },
     {
+      "path": "lib/postmeeting-persona.js",
+      "sha256": "0999574339d0915c08bc0aee49a8fe8e2dae2a1950444dcccc49421140c865f9",
+      "bytes": 6300
+    },
+    {
+      "path": "lib/postmeeting.js",
+      "sha256": "bb4b3d54a7c078f813a45de239508c4625745b46a2829e372ab100439849bd64",
+      "bytes": 7737
+    },
+    {
       "path": "lib/preflight.js",
       "sha256": "c5def323c078464011eb5fb7fbfbbc68a8bc1da3ab5a6edb61fc3c7a8f6b60de",
       "bytes": 6565
@@ -324,8 +344,8 @@
     },
     {
       "path": "lib/README.md",
-      "sha256": "f609081f6a71e8509fa933ebb22e0dfb5b33cd1f892a7dbdb7b90f2c5f4d8225",
-      "bytes": 6764
+      "sha256": "af6d0163d9473d4ba38c7c5b8296325c9658ae258fb0bd569eb3dc3445b3c7da",
+      "bytes": 7391
     },
     {
       "path": "lib/record-export.js",
@@ -359,8 +379,8 @@
     },
     {
       "path": "lib/session.js",
-      "sha256": "5c8ea0a70082cc80a8a3907aa088aa7e1d9c42c5b2d5d795c3e3cd268e9b5d4f",
-      "bytes": 35455
+      "sha256": "43b1cce59c94d69a8f058da36404e37f3c95fb9a66985b49161eb96badd91b2d",
+      "bytes": 38597
     },
     {
       "path": "lib/setup-rows.js",
@@ -434,8 +454,13 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "39250f5ce2d5b790aae74a7a85cda1731ec63b870c297acea06ae89421c825e9",
+      "sha256": "be92f7d8258fc206dbdbbb94e4a5b212d91652bada3c014c6778bf94b3567519",
       "bytes": 3947
+    },
+    {
+      "path": "lib/view-model.js",
+      "sha256": "8380612406708a93c1671785dd36ebdee8f932277f07267c7126b1b3e8d2ca18",
+      "bytes": 7768
     },
     {
       "path": "lib/workspace.js",
@@ -449,18 +474,18 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "815d098189698247b4ba4850772f0da9577a380b31d8271b0e12f72ece02e387",
-      "bytes": 14608
+      "sha256": "382426a0b885c4a0440f3c7bf1cc084dc28ac0c4d0a433481510198276aa2632",
+      "bytes": 15377
     },
     {
       "path": "package.json",
-      "sha256": "bdeef47adbca33e81a68f04f4b9934cc335a69bfb271dc406c4b098ffdff0e42",
-      "bytes": 1967
+      "sha256": "79b8935e0f789cab748f9241d5881816a5229f026b4a83d9ae568090ef0ae3c4",
+      "bytes": 2198
     },
     {
       "path": "README.md",
-      "sha256": "fe21d6dd9a9b968c6e2e3c855115eb2a6f5617f93bb5f24796f0ef9efbd8dd52",
-      "bytes": 8065
+      "sha256": "d4629ab24a8f665c2b392949ae4b511fba9aa9e26d06edd9a5af65a27ff66148",
+      "bytes": 8274
     },
     {
       "path": "tools/hold.ps1",

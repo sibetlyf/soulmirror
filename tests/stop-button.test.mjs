@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -5,16 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-stop-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
 
 const routes = []
 const tools = []
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register(t) { tools.push(t) } },
   logger: { info() {}, warn() {} },
   get: (k) => (k === 'webServer' ? { port: 3084 } : undefined),
@@ -33,13 +32,13 @@ async function api(method, url, body) {
   return { code: res.code, body: JSON.parse(out || '{}') }
 }
 
-test('开关往返：start 返回 enabled=true，stop 返回 enabled=false', async () => {
+test('开关往返：start 返回 enabled=true，off 返回 enabled=false', async () => {
   const on = await api('POST', '/api/soulmirror/auto', { action: 'start' })
   assert.equal(on.body.enabled, true)
   assert.equal(on.body.armed, true)
 
-  const off = await api('POST', '/api/soulmirror/auto', { action: 'stop' })
-  assert.equal(off.body.enabled, false, 'stop 必须真的把 enabled 关掉，否则按钮永远停不下来')
+  const off = await api('POST', '/api/soulmirror/auto', { action: 'off' })
+  assert.equal(off.body.enabled, false, 'off 必须关闭总开关；stop 仅结束本场录音')
   assert.equal(off.body.armed, false)
 
   const s = await api('GET', '/api/soulmirror/status')
@@ -55,7 +54,7 @@ test('stop 是幂等的：连点两次也不报错', async () => {
   assert.equal(b.body.enabled, false)
 })
 
-test('已入会时 meeting_join 直接返回，不去点客户端', async () => {
+test('已入会时 meeting_join 直接返回，不去点客户端', { skip: process.env.SOULMIRROR_INTEGRATION !== '1' && 'Requires explicit SOULMIRROR_INTEGRATION=1: desktop/audio/device integration; not part of safe default suite' }, async () => {
   await api('POST', '/api/soulmirror/auto', { action: 'start' })
   const t = tools.find((x) => x.name === 'meeting_join')
   // 测试模式下 listWindows 返回空 → 不会命中"已在会中"，但也不能崩
@@ -65,6 +64,4 @@ test('已入会时 meeting_join 直接返回，不去点客户端', async () => 
   await api('POST', '/api/soulmirror/auto', { action: 'stop' })
 })
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

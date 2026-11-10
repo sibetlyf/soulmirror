@@ -21,7 +21,7 @@ test('只有一处发起 GET /config（共享 store 内部）', () => {
 
 test('三个原本各自取配置的组件都改用 useConfig()', () => {
   // 大页面与设置向导
-  for (const fn of ['function ConfigTab(', 'function MeetingPage(']) {
+  for (const fn of ['function ConfigTab(']) {
     const at = client.indexOf(fn)
     assert.ok(at > 0, '找不到 ' + fn)
     const seg = client.slice(at, at + 3000)
@@ -29,7 +29,10 @@ test('三个原本各自取配置的组件都改用 useConfig()', () => {
   }
   // 第三处（设备/设置卡）——按声明次数断言，避免依赖具体函数名
   const uses = [...client.matchAll(/useConfig\(\)/g)].length
-  assert.ok(uses >= 3, '至少三处组件应共用配置，实际 ' + uses)
+  assert.ok(uses >= 2, '配置编辑器应使用唯一共享store，实际 ' + uses)
+  assert.match(client, /function MeetingPage\(props\) \{ return React.createElement\(MeetingWorkspace/, '页面不再维护第二份配置，而是共用工作台')
+  assert.match(client, /h\(ConfigTab\)/, '工作台复用同一个配置编辑器')
+  assert.match(client, /v\.display\.width/, '显示配置来自服务端view而非独立本地配置')
 })
 
 test('保存后写回共享 store（另一页立刻同步）', () => {

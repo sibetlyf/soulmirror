@@ -9,6 +9,11 @@
  *
  * 依赖：tools/mbridge.exe（WASAPI + SAPI）、tools/ui.ps1（UIAutomation，Windows PowerShell 5.1）
  */
+import { buildViewModel, normalizeDisplay } from './lib/view-model.js'
+import { resolveModelRoute, createModelRouteStore, overrideOwnedModel } from './lib/model-route.js'
+import { createJournal, findInterrupted, recoverJournal } from './lib/journal.js'
+import { createPostMeeting } from './lib/postmeeting.js'
+import { updatePostMeetingPersona } from './lib/postmeeting-persona.js'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync, openAsBlob, readdirSync } from 'node:fs'
@@ -24,12 +29,12 @@ const execFileAsync = promisify(execFile)
 
 import { bridge, ensureBridge, listDevices, toolsDir, pluginDir, micUsage, defaultRenderDevice, meetingMicActive, bridgeExe } from './lib/bridge.js'
 import {
-  listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
+  listWindows as desktopListWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
   ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect, shotWindow,
 } from './lib/desktop.js'
 import { MeetingSession } from './lib/session.js'
 import { pickLocalModel } from './lib/asr.js'
-import { speak, sayToMeeting } from './lib/tts.js'
+import { speak, sayToMeeting, synthesize } from './lib/tts.js'
 import { synthesizeStream } from './lib/dashscope-tts.js'
 import { startDashScopeAsr } from './lib/dashscope.js'
 import { DemoController } from './lib/demo.js'
@@ -70,7 +75,8 @@ import { renderPersonaDoc, syncPersonaDoc } from './lib/persona-kb.js'
 import { pickBackfillMeetings, slimMeetingText, buildBackfillPrompt, summarizeBackfill } from './lib/persona-backfill.js'
 import { renderSpeakerTranscript, whyNoPersona, isHerLine, choosePersonaSource, enableHint } from './lib/persona-source.js'
 import { VERSION, STORAGE_VERSION, versionInfo } from './lib/version.js'
-import { resolveProfileDir } from './lib/profile-path.js'
+import { resolveProfileDir, resolveDshHome } from './lib/profile-path.js'
+import { topicFromTitle, buildMeetingDirName, shouldReuseDir } from './lib/meeting-name.js'
 import { pickApp, rankApps } from './lib/app-detect.js'
 import { validateMeetingCode, classifyJoinFailure, joinFailureResult } from './lib/join-guard.js'
 import { checkOptionalDeps, featureAllowed, featureGateMessage, installPlugin } from './lib/deps-optional.js'
@@ -106,6 +112,7 @@ export const inject = ['tools', 'webServer']
 export const Config = z.object({
   /** 总开关：关闭后所有写操作工具直接拒绝。 */
   enabled: z.boolean().default(true),
+  display: z.object({width:z.number().default(420),density:z.string().default('comfortable'),activityLimit:z.number().default(30),showActivity:z.boolean().default(true),showDiagnostics:z.boolean().default(true),autoOpen:z.boolean().default(true)}),
   /** 会议客户端 exe 路径（空 = 自动探测腾讯会议）。 */
   appPath: z.string().default(''),
   /** 窗口标题片段。 */
@@ -206,6 +213,7 @@ export const Config = z.object({
   }),
   /** 后台大脑：转写流 → 判定是否插话（LLM 走 OpenAI 兼容接口，不配则用规则+模板）。 */
   brain: z.object({
+    sourceSessionId: z.string().default(''),
     baseUrl: z.string().default(''),
     provider: z.string().default(''),
     model: z.string().default(''),
@@ -343,12 +351,15 @@ const OUT = (extra = {}) => ({
   render: (_a, v) => [{ type: 'text', text: v.result }],
 })
 
-export function apply(ctx, config) {
+export function apply(ctx, config, deps = {}) {
   const logger = ctx.logger
+  const listWindows = deps.listWindows || desktopListWindows
+  const testMode = process.env.SOULMIRROR_TEST === '1'
   const cfg = {
     // 总开关：默认开——装上就能用，检测到会议自动录音。
     // 只有用户显式关过（config.enabled === false）才保持关闭。
     enabled: config.enabled !== false,
+    display: normalizeDisplay(config.display),
     appPath: config.appPath || '',
     windowTitle: config.windowTitle || '腾讯会议',
     windowClass: config.windowClass || 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView',
@@ -454,6 +465,10 @@ export function apply(ctx, config) {
   })()
   const CONFIG_DIR = join(DSH_HOME_RESOLVED, 'soulmirror')
   const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
+  recoverJournal(CONFIG_DIR)
+  const journal = createJournal({ root: CONFIG_DIR })
+  journal.load()
+  journal.append('host.boot', { pid: process.pid })
 
   function deepMerge(base, patch) {
     const out = { ...base }
@@ -610,6 +625,7 @@ export function apply(ctx, config) {
       userName: cfg.userName || '',
       wakeWords: cfg.wakeWords || [],
       autoWatch: cfg.autoWatch === true,
+      display: normalizeDisplay(cfg.display),
       extra: cfg._extra || {},
     }
   }
@@ -644,6 +660,7 @@ export function apply(ctx, config) {
       writeFileSync(CONFIG_FILE, text, 'utf8')
       const back = readFileSync(CONFIG_FILE, 'utf8')
       if (back !== text) throw new Error('回读内容与写入不一致')
+      if (patch.enabled !== undefined) journal.append('plugin.enabled',{enabled:!!patch.enabled})
       return { ok: true, path: CONFIG_FILE, error: '' }
     } catch (e) {
       stored = prevStored
@@ -657,6 +674,10 @@ export function apply(ctx, config) {
     }
   }
 
+  journal.append('plugin.enabled',{enabled:cfg.enabled === true})
+  cfg.display = normalizeDisplay(cfg.display)
+  // Automatic joining is never implied by enabling meeting capture.
+  cfg.autoJoin.enabled = false
   const EDITABLE = {
     asr: ['provider', 'model', 'dashscopeModel', 'baseUrl', 'apiKeyEnv', 'apiKey', 'chunkSeconds', 'lang'],
     tts: ['provider', 'model', 'voice', 'sampleRate', 'apiKeyEnv', 'apiKey', 'speed', 'workspaceId', 'cloneBaseUrl', 'clonePrefix', 'cloneVoiceId'],
@@ -676,7 +697,7 @@ export function apply(ctx, config) {
   }
   function patchToStore(patch) {
     const keep = {}
-    for (const k of ['enabled', 'policy', 'apps', 'activeApp', 'meetingCode', 'meetingCodeManual', 'userName', 'wakeWords', 'autoWatch']) if (patch[k] !== undefined) keep[k] = patch[k]
+    for (const k of ['display', 'enabled', 'policy', 'apps', 'activeApp', 'meetingCode', 'meetingCodeManual', 'userName', 'wakeWords', 'autoWatch']) if (patch[k] !== undefined) keep[k] = patch[k]
     for (const k of Object.keys(EDITABLE)) if (patch[k] !== undefined) keep[k] = pick(patch[k], EDITABLE[k])
     return keep
   }
@@ -792,11 +813,13 @@ export function apply(ctx, config) {
         const nowMs = Date.now()
         const statusStartedAt = nowMs
         if (probeCache.slow && probeCache.at && nowMs - probeCache.at < 15000 && probeCache.value) {
-          return json(200, probeCache.value)
+          const value = {...probeCache.value,journal:journal.projection(),pipelineQueue:pipeline.status(),postMeeting}
+          value.view = buildViewModel({journal:value.journal,runtime:value,display:cfg.display})
+          return json(200,value)
         }
         // 未开启时不做实时探测：少一次 PowerShell 调用，也完全不碰桌面
-        const liveApp = cfg.enabled ? await detectMeetingApp() : meetingApp(cfg.activeApp || '')
-        const codeInfo = await currentMeetingCode(liveApp)
+        const liveApp = cfg.enabled && !testMode ? await detectMeetingApp() : meetingApp(cfg.activeApp || '')
+        const codeInfo = testMode ? {code:"",source:"test"} : await currentMeetingCode(liveApp)
         const statusWins = await listWindows()
         // 挑标题用于展示：排除"标题就是进程名"或空标题的窗口（腾讯会议会留一个 wemeetapp 的后台窗）
         const procName = String(liveApp.proc || '').toLowerCase()
@@ -836,6 +859,8 @@ export function apply(ctx, config) {
           lastSpeakError,
           lastSpeakInfo,
           postMeeting,
+          journal: journal.projection(),
+          pipelineQueue: pipeline.status(),
           optionalDeps,
           depsCheckedAt,
           pet: {
@@ -959,7 +984,7 @@ export function apply(ctx, config) {
             since: lifecycle.startedAt,
             code: codeInfo.code,
             codeSource: codeInfo.source,
-            inMeeting: await meetingActive(liveApp, statusWins),
+            inMeeting: testMode ? false : await meetingActive(liveApp, statusWins),
           },
           models: { asr: cfg.asr.provider + ' / ' + resolveAsrModel(cfg.asr), tts: cfg.tts.provider + ' / ' + cfg.tts.model + ' / ' + cfg.tts.voice },
           devices: { capture: cfg.devices.capture || '默认渲染设备', speak: cfg.devices.speak },
@@ -972,6 +997,8 @@ export function apply(ctx, config) {
           auto: !!(cfg.autoWatch && lifecycle.timer),
           lifecycle: lifecycle.snapshot(),
         }
+        __payload.display = normalizeDisplay(cfg.display)
+        __payload.view = buildViewModel({journal:journal.projection(),runtime:__payload,display:cfg.display})
         probeCache.value = __payload
         probeCache.at = Date.now()
         probeCache.slow = (Date.now() - statusStartedAt) > 3000
@@ -1203,8 +1230,14 @@ export function apply(ctx, config) {
         return json(200, r ? { ok: true, record: r } : { ok: false, error: '读不到记录' })
       }
       if (req.method === 'POST' && sub === 'offline') {
-        const r = await runOfflinePass(session.dir)
-        return json(200, r)
+        const chunks = []
+        for await (const c of req) chunks.push(c)
+        const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
+        const dir = String(body.dir || session.dir || postMeeting.dir || '')
+        if (!dir || !existsSync(join(dir, 'audio.wav'))) return json(400, { ok:false, error:'没有可用录音文件' })
+        const known = listRecords(session.dataRoot(), 10000)
+        if (dir !== session.dir && !(Array.isArray(known) && known.some(r => r.dir === dir))) return json(400, {ok:false,error:'不是已知会议目录'})
+        return json(200, pipeline.enqueue(dir, { reason:'用录音重新整理', restart:body.restart !== false }))
       }
       if (req.method === 'POST' && sub === 'setup') {
         const bufS = []
@@ -1418,7 +1451,7 @@ export function apply(ctx, config) {
           armed = true
           cfg.enabled = true
           cfg.autoWatch = true
-          if (!lifecycle.timer) lifecycle.start()
+          if (!testMode && !lifecycle.timer) lifecycle.start()
           // 清掉上一次的失败原因，避免刚开录就顶着"上次采集错误"
           session.lastError = ''
           try {
@@ -1433,7 +1466,7 @@ export function apply(ctx, config) {
           try { savePersisted({ autoWatch: cfg.autoWatch, enabled: cfg.enabled }) } catch { /* ignore */ }
           logger?.info?.('[soulmirror] 手动开始录音（enabled=true armed=true）')
           return json(200, {
-            ok: true, enabled: true, armed: true, capturing: !!session.capturing,
+            ok: !!session.capturing, enabled: true, armed: true, capturing: !!session.capturing,
             error: session.lastError || '',
             auto: !!(cfg.autoWatch && lifecycle.timer),
             lifecycle: lifecycle.snapshot(),
@@ -1444,7 +1477,7 @@ export function apply(ctx, config) {
           armed = true
           cfg.enabled = true
           cfg.autoWatch = true
-          if (!lifecycle.timer) lifecycle.start()
+          if (!testMode && !lifecycle.timer) lifecycle.start()
           logger?.info?.('[soulmirror] 已开启会议功能（armed），允许自动操作')
         } else if (action === 'off') {
           // 真正关闭会议功能（设置里的开关）：解除 armed、停止监听、持久化关闭
@@ -1458,9 +1491,9 @@ export function apply(ctx, config) {
           // 于是重启/重装后插件永远"未启用"，用户感觉"每次安装都不打开"。
           const stoppedDir = session.dir || ''
           const hadAudio = !!session.capturing
-          logger?.info?.('[soulmirror] 已关闭会议功能（disarmed），不再自动操作')
+          logger?.info?.('[soulmirror] 结束本场录音，保留自动会议检测')
           // 用户点"结束录音"= 这场会开完了：直接开始会后整理（离线重转写 + 纪要 + 知识库）
-          if (hadAudio && stoppedDir) {
+          if (stoppedDir) {
             // 统一入口：停采 + 去抖 + 整理都在 stopAndOrganize 里
             stopAndOrganize('结束录音', { wasCapturing: hadAudio })
               .then((o) => {
@@ -1734,7 +1767,7 @@ export function apply(ctx, config) {
     } catch { spkCache = { name: spkCache.name, at: now } }
     return spkCache.name
   }
-  const session = new MeetingSession(cfg, logger, { getKey: () => keyFor(cfg.asr, 'asr') })
+  const session = new MeetingSession(cfg, logger, { getKey: () => keyFor(cfg.asr, 'asr'), onEvent: (type,data) => journal.append(type,data) })
 
   // ── 是否"已开启会议功能" ─────────────────────────────────────────────
   // 关键：装了插件 ≠ 允许它动电脑。只有用户显式开启（面板开关 / meeting_agent_start）
@@ -3746,16 +3779,53 @@ export function apply(ctx, config) {
      * 而 DSH 会把这些历史保留在内存里 —— 长时间运行就是持续增长。
      * 所以每 200 轮或 45 分钟换一个新会话：旧的自然被回收。
      */
+    // 非语音模型：默认跟随 DSH 会话模型。
+    // 不猜"当前活跃会话"——进程里任何会话（含别的对话、子代理）的最后一次请求
+    // 都会经过这里，拿它当来源就等于让别人的模型悄悄改掉本插件的模型。
+    // 来源只有两种：显式绑定的会话（brain.sourceSessionId），或 DSH 默认模型。
+    // 判定/纪要实际用的模型（由 routeStore 填入，供界面显示来源）
+    let brainModel = null
+    const ownedSelections = new Map()   // 本插件自己创建的内部会话 → 已选定模型
+    const routeStore = createModelRouteStore({
+      readSnapshot: (dir) => (dir ? (journal.projection().runs[dir]?.model || null) : (journal.projection().models || null)),
+      // 快照先落盘（runtime.model），再让界面看到：重启后同一场会用同一个模型。
+      commitSnapshot: (dir, route) => journal.append('runtime.model', dir ? { run: dir, selection: route } : { selection: route }),
+      resolve: async (snapshot) => {
+        const sc = ctx.get('sessionController')
+        const route = await resolveModelRoute({
+          sourceSessionId: cfg.brain.sourceSessionId || '',
+          snapshot: snapshot || undefined,
+          inspect: async (sid) => {
+            if (!sc || typeof sc.inspect !== 'function') throw new Error('宿主不支持读取绑定会话')
+            return await sc.inspect(sid)
+          },
+          catalog: async () => (sc && typeof sc.modelCatalog === 'function' ? await sc.modelCatalog() : null),
+        })
+        brainModel = { provider: route.provider, model: route.model, source: route.source, sourceSessionId: route.sourceSessionId || '' }
+        logger?.info?.('[soulmirror] 非语音模型：' + route.provider + '/' + route.model + '（' + route.source + '）')
+        return route
+      },
+    })
+    // 只改本插件自己创建的会话：base 由 DSH 记录在 request/header，不调用 selectModel 改宿主默认。
+    ctx.on('agent/request', async ({ agent }, next) => {
+      const base = await next()
+      return overrideOwnedModel(agent.id, base, ownedSelections)
+    })
+    async function bindOwnedSession(sid, dir = '') {
+      ownedSelections.set(sid, await routeStore.forRun(dir))
+    }
     async function ensureJudgementSession() {
       const stale = judgementSessionId && (
         judgementTurns >= (Number(cfg.judgementMaxTurns) || 200) ||
         (judgementAt && Date.now() - judgementAt > (Number(cfg.judgementMaxAgeMs) || 45 * 60 * 1000))
       )
-      if (judgementSessionId && !stale) return judgementSessionId
+      if (judgementSessionId && !stale) { await bindOwnedSession(judgementSessionId); return judgementSessionId }
       if (stale) logger?.info?.('[soulmirror] 判定会话轮换（已用 ' + judgementTurns + ' 轮）')
       const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
       const cwd = ws.agentCwd || ws.dir
       judgementSessionId = await createSession(ctx, { cwd, title: '会议助手 · 判定（内部）' })
+      // 先绑定模型再发第一条：否则第一次请求会用宿主默认，模型与后续不一致
+      await bindOwnedSession(judgementSessionId)
       judgementTurns = 0
       judgementAt = Date.now()
       logger?.info?.('[soulmirror] 判定会话已就绪：' + judgementSessionId)
@@ -3811,17 +3881,26 @@ export function apply(ctx, config) {
    * 所以这里单独开一条路：直接向会议会话提问，不走闸门，超时放宽。
    */
   function makeMinutesCompleter() {
-    return async function completeMinutes(messages) {
+    // 纪要单独一个内部会话：不跟逐句判定抢同一条历史，也不会让长文把判定会话顶爆。
+    let minutesSessionId = ''
+    return async function completeMinutes(messages, { dir = '' } = {}) {
       const list = Array.isArray(messages) ? messages : []
       const system = list.filter((m) => m && m.role === 'system').map((m) => String(m.content || '')).join('\n\n')
       const user = list.filter((m) => m && m.role !== 'system').map((m) => String(m.content || '')).join('\n\n')
       const prompt = [system, user].filter(Boolean).join('\n\n')
-      const sid = await ensureJudgementSession()
+      const runDir = String(dir || session.dir || '')
+      if (!minutesSessionId) {
+        const ws = ensureMeetingWorkspace('', lifecycle?.lastWindowTitle || '')
+        minutesSessionId = await createSession(ctx, { cwd: ws.agentCwd || ws.dir, title: '会议助手 · 纪要（内部）' })
+      }
+      // 每场会按它自己的模型快照：旧会议重跑时不会被新会议的模型悄悄换掉
+      await bindOwnedSession(minutesSessionId, runDir)
       // 纪要要读完整场转写再写长文：给 5 分钟，且不经过闸门
-      const r = await promptSession(ctx, sid, prompt, { timeoutMs: 300000 })
+      const r = await promptSession(ctx, minutesSessionId, prompt, { timeoutMs: 300000 })
       if (!r || !r.ok) throw new Error((r && r.error) || '纪要会话未返回结果')
       const text = String(r.text || '').trim()
       if (!text) throw new Error('纪要会话返回空内容')
+      minutesSource = 'session'
       return text
     }
   }
@@ -3918,16 +3997,12 @@ export function apply(ctx, config) {
       })
     }
 
-  const brainKey = cfg.brain.apiKey
-    || process.env[cfg.brain.apiKeyEnv || 'BRAIN_API_KEY']
-    || process.env.ARK_API_KEY
-    || process.env.OPENAI_API_KEY
+  const brainKey = cfg.brain.baseUrl && cfg.brain.provider && cfg.brain.model ? cfg.brain.apiKey : ''
   // 留空 = 用 DSH 当前模型；只有真的配置了 Key 才走自定义 endpoint。
   const httpCompleter = brainKey ? createCompleter(cfg.brain) : null
   // 优先级：显式配置的 OpenAI 兼容端点 → DSH 会话（默认）。
   // 用户明确要求"用 dsh 的 session 跑"，所以不再依赖 catalog.default 这类全局默认模型。
   // 判定/候选词实际用的模型（由 resolveModel 填入，供界面显示）
-  let brainModel = null
 
   const sessionCompleter = makeSessionCompleter()
   let lastMinutesFallbackReason = ''
@@ -3935,7 +4010,7 @@ export function apply(ctx, config) {
   let minutesSource = ''
   const minutesCompleter = makeMinutesCompleter()
   const completer = httpCompleter
-    || (cfg.brain.provider ? makeDshCompleter(cfg.brain) : sessionCompleter)
+    || sessionCompleter
 
   // 注意：必须在 completer 初始化之后再装配纠错器，否则会踩 TDZ
   //
@@ -4840,7 +4915,16 @@ export function apply(ctx, config) {
   // 会后整理进度：点"结束录音"后依次做 离线重转写 → 纪要 → 知识库
   // 之前这些步骤只在会议窗口退出时触发，用户点结束录音后完全没反应、也没进度可看
   let postMeeting = { phase: 'idle', at: 0, error: '', sentences: 0, speakers: 0, minutesPath: '', dir: '' }
-  const setPostMeeting = (patch) => { postMeeting = { ...postMeeting, ...patch, at: Date.now() } }
+  const setPostMeeting = (patch) => {
+    const r = journal.projection().runs[patch.dir || postMeeting.dir]
+    if (r && r.phase === 'running' && patch.detail) journal.append('pipeline.progress',{run:r.run,step:r.step,detail:patch.detail})
+  }
+  journal.subscribe(() => {
+    const p = journal.projection()
+    const runs = Object.values(p.runs).sort((a,b)=>(b.lastSeq||0)-(a.lastSeq||0))
+    const r = runs.find(x=>x.phase==='running') || runs[0]
+    if (r) postMeeting = {phase:r.phase==='running' ? r.step || 'stopping' : r.phase,dir:r.run,error:r.error || '',detail:r.stepDetail || '',at:Date.parse(r.updatedAt)||0,...r.result}
+  })
 
   let offlineBusy = false
   /**
@@ -5103,7 +5187,7 @@ export function apply(ctx, config) {
     }
   }
 
-  async function runOfflinePass(dir = session.dir, { isCancelled } = {}) {
+  async function runOfflinePass(dir = session.dir, { isCancelled, transcriptionOnly = false } = {}) {
     if (offlineBusy) return { ok: false, error: '上一次离线转写还没结束' }
     if (!dir) return { ok: false, error: '没有会议目录' }
     const wav = join(dir, 'audio.wav')
@@ -5132,6 +5216,8 @@ export function apply(ctx, config) {
       // 优先用云端文件识别：能分人、断句更准
       let lines = []
       let mode = 'file'
+      // 计时器必须声明在 try 外：finally 要能清掉它（以前在块内 const，finally 里 ReferenceError）
+      let recTimer = null
       try {
         // 超大录音跳过云端文件识别：它要整份上传，几十分钟的会议代价高、也更容易失败。
         // 超过 300MB（约 2.5 小时 16k 单声道）直接走本地重放，内存有界。
@@ -5167,11 +5253,10 @@ export function apply(ctx, config) {
         offProgress.stage('recognize', { detail: '云端识别中（已等 0 秒）', fraction: 0.05 })
         reportOffline()
         // 云端识别是主要耗时：每 2 秒推进一点百分比，并显示已等秒数（不假装快好了，封顶本阶段 90%）
-        const recTimer = setInterval(() => {
+        recTimer = setInterval(() => {
           try {
             const snap = offProgress.snapshot()
-            const frac = Math.min(0.9, 0.05 + snap.elapsedSec / 120)
-            offProgress.detail('云端识别中（已等 ' + snap.elapsedSec + ' 秒）', frac)
+            offProgress.detail('云端识别中（已等 ' + snap.elapsedSec + ' 秒）')
             reportOffline()
           } catch { /* ignore */ }
         }, 2000)
@@ -5189,16 +5274,10 @@ export function apply(ctx, config) {
         })
         lines = (r.sentences || []).filter((x) => x.text)
       } catch (e) {
-        // 云端失败就退回本地快速重放（至少不丢功能）
-        const why = explainOfflineError(e.message)
-        logger?.warn?.('[soulmirror] 云端文件识别失败（' + why + '），回退到本地重放：' + String(e.message).slice(0, 200))
-        mode = 'replay'
-        const { pcm } = readWavPcm(wav)
-        const r2 = await transcribeOffline({ apiKey: key, model: resolveAsrModel(cfg.asr), pcm, sampleRate: 16000, speed: 4 })
-        lines = (r2.sentences || []).filter((x) => x.text).map((x) => ({ ...x, speaker: '' }))
+        throw new Error('非流式文件识别失败：' + explainOfflineError(e.message))
       }
       } finally {
-        clearInterval(recTimer)
+        if (recTimer) clearInterval(recTimer)
       }
 
       // 超时后被取消：不要再用迟到的结果覆盖磁盘
@@ -5206,52 +5285,13 @@ export function apply(ctx, config) {
         logger?.warn?.('[soulmirror] 离线重转写已超时取消，丢弃本次结果（避免迟到写入）')
         return { ok: false, cancelled: true, error: '已取消（超时）' }
       }
-      await writeFile(join(dir, 'transcript-offline.jsonl'), lines.map((x) => JSON.stringify(x)).join('\n') + (lines.length ? '\n' : ''), 'utf8').catch(() => {})
-      // 纪要优先交给 DSH 后台任务（独立进程，不在会议会话里跑）
-    const cleanLines = lines
-      .filter((x) => x && x.text && !/知识库|会议纪要已写入/.test(String(x.text)))
-      .map((x) => (x.speaker ? x.speaker + '：' : '') + x.text)
-    let minutesTitle = ''
-    try { minutesTitle = String(loadMeta(dir)?.title || basename(dir) || '') } catch { /* ignore */ }
-    const bg = await minutesViaBackgroundTask(dir, cleanLines, minutesTitle)
-    let md = ''
-    if (bg.ok) {
-      minutesSource = 'background'
-      md = bg.markdown
-    } else {
-      lastMinutesFallbackReason = '后台任务未产出：' + (bg.error || '未知原因')
-      md = await buildOfflineMinutes({
-        sentences: cleanLines.map((text) => ({ text })),
-        completer: async (msgs) => {
-          try {
-            const out = await (minutesCompleter || completer)(msgs)
-            minutesSource = 'session'
-            return out
-          } catch (e) {
-            // 不许静默退化：把原因记下来，界面与日志都要能看到
-            const msg = '纪要模型调用失败：' + (e && e.message ? e.message : String(e))
-            logger?.warn?.('[soulmirror] ' + msg)
-            results.offline = (results.offline || '') + '；' + msg
-            lastMinutesFallbackReason = msg
-            throw e
-          }
-        },
-        logger,
-      })
-    }
-      let savedPath = ''
-      if (md) {
-        const saved = await persistMinutesFile(join(dir, 'minutes.md'), md)
-        savedPath = saved.path
-      }
-      const elapsed = Math.round((Date.now() - t0) / 1000)
-      logger?.info?.('[soulmirror] 离线转写完成：' + lines.length + ' 句，耗时 ' + elapsed + ' 秒')
-      // 先算 speakers 再用：之前 setPostMeeting 引用了下一行才声明的 const，
-      // 每次离线转写成功都以 ReferenceError 收尾 —— 表现就是"转完了但纪要/入库没做"。
-      const speakers = new Set(lines.map((x) => x.speaker).filter(Boolean)).size
-      setPostMeeting({ phase: 'minutes', sentences: lines.length, speakers })
-      try { saveMeta(dir, { speakers, lines: lines.length, offlineAt: new Date().toISOString() }) } catch { /* ignore */ }
-      return { ok: true, sentences: lines.length, speakers, mode, seconds: Math.round(seconds), elapsed, md, minutesPath: savedPath }
+      if (!lines.length) throw new Error('非流式识别没有返回有效句子；请检查录音，未使用实时草稿替代')
+      await writeFile(join(dir, 'transcript-offline.jsonl'), lines.map((x) => JSON.stringify(x)).join('\n') + '\n', 'utf8')
+      if (transcriptionOnly) return { ok: true, sentences: lines.length, speakers: new Set(lines.map(x => x.speaker).filter(Boolean)).size, mode, seconds: Math.round(seconds), elapsed: Math.round((Date.now()-t0)/1000) }
+      const speakers = new Set(lines.map(x=>x.speaker).filter(Boolean)).size
+      saveMeta(dir,{speakers,lines:lines.length,offlineAt:new Date().toISOString()})
+      return {ok:true,sentences:lines.length,speakers,mode,seconds:Math.round(seconds),elapsed:Math.round((Date.now()-t0)/1000)}
+
     } catch (e) {
       logger?.warn?.('[soulmirror] 离线转写失败：' + e.message)
       setPostMeeting({ phase: 'error', error: '离线转写失败：' + e.message })
@@ -5292,405 +5332,76 @@ export function apply(ctx, config) {
    */
   async function stopAndOrganize(reason = '手动停止', opts = {}) {
     const dir = session.dir || ''
-    // 调用方可能在进入这里之前就已经停过采集（那会让 wasCapturing 为 false，
-    // 整理被直接跳过——用户以为"停止即整理"，实际什么都没生成）。
-    // 所以允许调用方显式声明"进来之前还在采集"，并且统一由本函数负责停采。
-    const wasCapturing = opts.wasCapturing == null ? !!session.capturing : !!opts.wasCapturing
-    let stopResult = null
-    try { stopResult = await session.stopCapture() } catch { /* 已经停了也无所谓 */ }
-    if (!wasCapturing || !dir) return { organized: false, reason, dir, chunks: (stopResult && stopResult.chunks) || 0 }
-    setPostMeeting({ phase: 'stopping', dir, error: '' })
-    logger?.info?.('[soulmirror] 停止采集（' + reason + '），开始会后整理')
-    try {
-      const r = await finalizeMeeting({ speak: false, writeKnowledge: true })
-      setPostMeeting({ phase: 'done', minutesPath: (r && r.minutes) || postMeeting.minutesPath })
-      return { organized: true, reason, dir, result: r }
-    } catch (e) {
-      setPostMeeting({ phase: 'error', error: e.message, dir })
-      logger?.warn?.('[soulmirror] 会后整理失败：' + e.message)
-      return { organized: false, reason, dir, error: e.message }
+    const active = !!(session.capturing || session.running || opts.wasCapturing)
+    if (!dir) return { organized:false, reason:'没有会议目录' }
+    if (active) {
+      setPostMeeting({phase:'stopping',dir,error:''})
+      const stopped = await session.stopCapture()
+      if (!stopped.ok) throw new Error(stopped.error || '录音收尾失败')
+      // 采集信息写进 meta：记录真实设备和静音判定，事后可追查。
+      const durationSec = session.startedAt ? Math.max(0,(Date.now()-Date.parse(session.startedAt))/1000) : 0
+      const verdict = captureVerdict({bytes:session.bytes || 0,silentSec:session.silentSec || 0,durationSec})
+      const captureInfo = {device: session.deviceLabel || cfg.devices.capture || '',bytes:session.bytes || 0,silentSec:session.silentSec || 0,durationSec,silentRatio:verdict.silentRatio,verdict:verdict.verdict || ''}
+      saveMeta(dir,{endedAt:new Date().toISOString(),capture: captureInfo})
     }
+    const r = pipeline.enqueue(dir, {reason})
+    return { ...r, organized:r.ok, dir, reason:r.error || reason }
   }
 
-  async function finalizeMeeting({ speak = false, writeKnowledge = true } = {}) {
-    // 按会议隔离：不同会议互不影响；同一会议同一份转写只做一次。
-    // 原来用全局 finalizing + 60s 去抖，会把"紧接着结束的第二场会"误判成重复。
-    const run = snapshotRun(session)
-    const claim = finalizeRegistry.tryBegin(run.dir, run.revision)
-    if (!claim.ok) {
-      logger?.info?.('[soulmirror] 跳过整理：' + claim.reason + '（' + run.dir + '）')
-      return { skipped: claim.reason }
-    }
-    const runDir = run.dir
-    try {
-    // 纪要**必须等非流式转写结果**（会后离线重转写）返回后再生成。
-    // 原因：实时流式转写是"边说边猜"的中间结果——断句碎、同音字多、没有说话人；
-    // 拿它写纪要等于用草稿写总结。所以这里先不生成，等下面 offline 段落拿到
-    // transcript-offline.jsonl 之后再写（那才是完整、带说话人的一份）。
-    let md = ''
-    let minutesFromOffline = false
-    const stamp = new Date().toISOString().slice(0, 16).replace('T', ' ')
-    const title = (cfg.knowledge.titlePrefix || '会议纪要') + ' · ' + stamp
-    const results = { minutes: '', knowledge: '', persona: '', minutesSource: '' }
-
-    // 1) 落盘推迟到 offline 之后（见后面的「2.5) 纪要」）
-
-    // 记录会议结束信息（回看要用）
-    try {
-      const startedMs = Date.parse(loadMeta(runDir)?.startedAt || '') || Date.now()
-      // 采集信息写进 meta：以后"这段录音为什么是空的"能直接查，不用猜
-      let captureInfo = null
-      try {
-        // 时长优先取录音本身（音频秒数），拿不到再看会话起始时间；
-      // 原来只靠 startedMs，解析失败就退成 now → 时长 0 → 静音占比被算成 100%（误报"整段静音"）
-      let durSec = 0
-      try {
-        const wav = join(runDir, 'audio.wav')
-        if (existsSync(wav)) {
-          const st = statSync(wav)
-          durSec = Math.max(0, Math.round((st.size - 44) / 32000))   // 16k/16bit/单声道
-        }
-      } catch { /* ignore */ }
-      if (!durSec) durSec = Math.max(0, Math.round((Date.now() - startedMs) / 1000))
-        const verdict = captureVerdict({
-          bytes: session.bytes || 0,
-          silentSec: session.silentSec || 0,
-          durationSec: durSec,
-        })
-        captureInfo = {
-          device: session.deviceLabel || cfg.devices.capture || '(系统默认)',
-          captureAuto: cfg.devices.captureAuto !== false,
-          bytes: session.bytes || 0,
-          silentSec: session.silentSec || 0,
-          durationSec: durSec,
-          silentRatio: verdict.silentRatio,
-          verdict: verdict.verdict || '',
-          diagnosis: session.captureDiagnosis || null,
-        }
-        if (verdict.verdict) logger?.warn?.('[soulmirror] 采集判定：' + verdict.verdict)
-      } catch { /* ignore */ }
-
-      saveMeta(runDir, {
-        endedAt: new Date().toISOString(),
-        durationMin: Math.max(1, Math.round((Date.now() - startedMs) / 60000)),
-        ...(captureInfo ? { capture: captureInfo } : {}),
-      })
-    } catch { /* ignore */ }
-
-    // 1.5) 会后离线重转写：用整场录音补全实时那条线可能漏掉的句子
-    try {
-      // 总超时：离线重转写涉及"整份上传 + 云端排队 + 下载结果"，
-      // 网络或服务端变慢时可能拖很久。卡住必须自己认输，
-      // 否则用户看到的是"转文字一直不动"，最后什么都没落盘。
-      const offlineTimeoutMs = Math.max(60000, Number(cfg.offlineTimeoutMs) || 10 * 60 * 1000)
-      // 遵循"节约资源"：会后重转写是唯一的重活（整份上传 + 云端排队），
-      // 交给**独立的 dsh 子进程**跑，主进程只等结果。子进程挂了也不影响宿主。
-      // 超时后置位：底层若还在跑，写盘前会看到它并丢弃迟到结果
-      let offlineCancelled = false
-      const off = await withTimeout(
-        // 默认走内联：子进程那条路要在另一个 dsh 里调到本插件工具，未经验证且容易卡到超时。
-        // 需要隔离时再显式打开 offlineViaChild。
-        cfg.offlineViaChild === true
-          ? runOfflineInBackground(runDir)
-          : runOfflinePass(runDir, { isCancelled: () => offlineCancelled }),
-        offlineTimeoutMs,
-        '离线重转写超时（' + Math.round(offlineTimeoutMs / 60000) + ' 分钟）',
-          { onTimeout: () => { offlineCancelled = true } },
-      )
-      if (off.ok) {
-        results.offline = '会后重转写：' + off.sentences + ' 句' +
-          (off.speakers ? '（' + off.speakers + ' 位说话人）' : '') +
-          '，' + off.seconds + ' 秒音频，用时 ' + off.elapsed + ' 秒' +
-          (off.mode === 'replay' ? '（云端不可用，本地重放）' : '')
-        if (off.minutesPath) results.minutes = off.minutesPath
-        // 会后重转写的纪要比实时版更完整（含说话人），优先把它写进知识库
-        if (off.md) {
-          md = off.md
-          minutesFromOffline = true
-          results.minutesSource = minutesSource || 'background'
-        }
-        if (!minutesSource) results.minutesSource = off.md ? 'background' : ''
-      } else if (off.error) {
-        results.offline = '跳过：' + off.error
+  const pipeline = createPostMeeting({ journal, logger, timeouts:{offline:Math.max(60000,Number(cfg.offlineTimeoutMs)||600000),minutes:300000,knowledge:120000,persona:120000}, steps: {
+    offline: async task => {
+      task.assertActive()
+      const r = await runOfflinePass(task.dir, {isCancelled:task.isCancelled,transcriptionOnly:true})
+      task.assertActive()
+      if (!r.ok) throw new Error(r.error || '整段转写失败')
+      return {...r,status:'done',result:r.sentences+' 句 · '+r.speakers+' 位说话人'}
+    },
+    minutes: async task => {
+      task.assertActive()
+      const lines = readLogText(await readFile(join(task.dir,'transcript-offline.jsonl'),'utf8')).lines
+        .filter(x=>x && x.text).map(x=>(x.speaker ? x.speaker+'：' : '')+x.text)
+      if (!lines.length) throw new Error('没有已落盘的非流式转写，不能生成纪要')
+      const md = await minutesCompleter([{role:'system',content:'根据完整会议转写生成中文 Markdown 纪要，含决议、待办（负责人及期限，未知则注明）、风险、未决问题。不得编造。'}, {role:'user',content:lines.join('\n')}],{dir:task.dir})
+      task.assertActive()
+      if (!md || !String(md).trim()) throw new Error('DSH 会话模型返回空纪要')
+      const saved = await persistMinutesFile(join(task.dir,'minutes.md'),md)
+      task.assertActive()
+      saveMeta(task.dir,{minutesAt:new Date().toISOString(),minutesSource:'dsh-session',minutesPath:saved.path})
+      return {status:'done',result:'已保存',path:saved.path,source:'dsh-session',sentences:lines.length}
+    },
+    knowledge: async task => {
+      if (!cfg.knowledge.enabled || cfg.knowledge.mode === 'off') return {status:'skip',reason:'配置已关闭知识库写入'}
+      const previous = loadMeta(task.dir)
+      if (previous?.knowledgeAt && previous?.knowledgeId) return {status:'done',result:'已确认入库（未重复写入）'}
+      if (previous?.knowledgeAttemptAt) throw new Error('上次知识库请求结果不确定，已停止自动重发；请在知识库核对是否已有该会议纪要')
+      const md = await readFile(previous?.minutesPath || join(task.dir,'minutes.md'),'utf8')
+      task.assertActive()
+      const port = resolveHostPort()
+      if (!port) throw new Error('无法连接宿主知识库；纪要已在本地保存')
+      saveMeta(task.dir,{knowledgeAttemptAt:new Date().toISOString()})
+      const origin = 'http://127.0.0.1:' + port
+      const r = await writeViaHostApi({port,origin,title:(cfg.knowledge.titlePrefix || '会议纪要')+' · '+basename(task.dir),markdown:md,type:'decision',group:'会议纪要'})
+      task.assertActive()
+      if (!r.ok || r.committed === false) {
+        const message = '写入失败：' + origin + '/knowledge-local/v1/entries；' + (r.error || '知识库未确认提交；请核实后重试，避免重复写入')
+        logger?.warn?.('[soulmirror] 知识库写入失败：' + message)
+        throw new Error(message)
       }
-    } catch (e) {
-      // 不能静默：否则界面会永远停在"云端识别中 79%"，而实际早已进入下一步
-      const why = '离线重转写异常：' + (e && e.message ? e.message : String(e))
-      lastMinutesFallbackReason = lastMinutesFallbackReason || why
-      logger?.warn?.('[soulmirror] ' + why)
-      setPostMeeting({ phase: 'minutes', error: '', dir: runDir, progressText: why.slice(0, 80) })
-    }
-
-
-    // 2) 纪要：到这里"非流式转写"已经跑完（成功用它的结果，失败才回退实时转写）
-    if (!md) {
-      const liveLines = (session.transcript || [])
-        .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
-        .map((x) => (x.speaker ? x.speaker + "：" : "") + x.text)
-      if (liveLines.length) {
-        logger?.warn?.("[soulmirror] 没有非流式转写结果，退回用实时转写生成纪要（质量会差一些）")
-        const bgLive = await minutesViaBackgroundTask(runDir, liveLines, title)
-        if (bgLive.ok) {
-          md = bgLive.markdown
-          results.minutesSource = 'background:live'
-        } else {
-          try {
-            md = await buildMinutes()
-            results.minutesSource = 'session:live'
-          } catch (e) { logger?.warn?.('[soulmirror] 实时转写生成纪要失败：' + e.message) }
-        }
-      }
-    }
-    if (md) {
-      results.minutesSource = results.minutesSource || (minutesFromOffline ? "background" : "unknown")
-      try {
-        if (runDir) {
-          const r = await persistMinutesFile(join(runDir, 'minutes.md'), md)
-          results.minutes = r.path
-          // 收尾：否则界面停在最后一个阶段，用户以为还在跑
-          setPostMeeting({
-            phase: 'done',
-            minutesPath: r.path,
-            progressText: '整理完成 · 来源 ' + (results.minutesSource || 'unknown'),
-            stage: 'done',
-            stageLabel: '整理完成',
-            percent: 100,
-            detail: '',
-          })
-          if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
-        }
-        const ws = ensureMeetingWorkspace()
-        if (ws.dir) await persistMinutesFile(join(ws.dir, 'minutes.md'), md)
-      } catch { /* ignore */ }
-    }
-
-    // 2) 写知识库：交给装了 dsh-knowledge 的 profile 去落库
-    if (writeKnowledge && cfg.knowledge.enabled && md && cfg.twin.enabled && gate('knowledge').allowed) {
-      const kd = detectKnowledge(cfg.knowledge.profile || '')
-      const mode = String(cfg.knowledge.mode || 'host')
-      if (!writeKnowledge) {
-        results.knowledge = '已跳过（会议功能未开启，只落本地纪要）'
-      } else if (mode === 'off') {
-        results.knowledge = '已关闭（knowledge.mode = off）'
-      } else if (!kd.installed && !kd.host) {
-        results.knowledge = '跳过（未安装 dsh-knowledge）'
-      } else if (mode === 'host') {
-        // 直连宿主里知识库插件的本地管理 API：不需要额外安装、不需要模型
-        const port = resolveHostPort()
-        if (kd.host && port) {
-          const origin = 'http://127.0.0.1:' + port
-          const r = await writeViaHostApi({ port, origin, title, markdown: md, type: 'decision', group: '会议纪要' })
-          if (r.ok && r.committed !== false) {
-            results.knowledge = '已写入知识库（' + (r.id || 'ok').toString().slice(0, 8) + '）'
-            addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
-          } else {
-            // 不谎报：本地已存 / 已入队 / 未确认 要分开说
-            const parts = []
-            if (r.localSaved) parts.push('纪要已存本地')
-            if (r.archiveQueued) parts.push('归档已入队')
-            results.knowledge = '未确认写入：' + (r.error || r.status || '') +
-              (parts.length ? '（' + parts.join('，') + '）' : '') +
-              (r.note ? '；' + r.note : '')
-            logger?.warn?.('[soulmirror] 知识库未确认写入：' + JSON.stringify(r).slice(0, 200))
-          }
-        } else {
-          results.knowledge = '跳过（宿主没装知识库或拿不到端口）'
-        }
-      } else if (mode === 'agent') {
-        // 插件之间不能直接调工具：记成待办，让会话里的 agent 写
-        addAssistantLine('会议纪要已生成：' + title + '（待写入知识库）', '知识库')
-        agent.pendingKnowledge = (agent.pendingKnowledge || []).concat([{
-          at: new Date().toISOString(), title, path: results.minutes,
-        }]).slice(-10)
-        results.knowledge = '待写入知识库（' + (kd.host || kd.profile) + ' 已装，可在会话里让我写）'
-      } else if (!kd.profile) {
-        results.knowledge = '跳过（headless 里没装 dsh-knowledge）'
-      } else {
-        const target = kd.profile
-        const r = await writeToKnowledge({
-          title,
-          markdown: md,
-          profile: target,
-          cwd: ensureMeetingWorkspace().dir || undefined,
-          timeoutMs: Math.min(cfg.twin.timeoutMs, 180000),
-          runDshTask,
-        })
-        results.knowledge = r.ok ? '已写入知识库（' + (r.handle || 'ok') + '）' : '写入失败：' + r.error
-        if (r.ok) addAssistantLine('会议纪要已写入知识库：' + title, '知识库')
-      }
-    }
-
-    // 3) 沉淀人格（USER.md / STATE.md）
-    if (cfg.personaAutoUpdate && md && completer) {
-      try {
-        // 规则（用户定）：没有说话人标注的转写，不许提取人格。
-        // 否则转写里混着所有人的话，会把别人的观点记成她的立场。
-        // 择优：会后重转写带说话人分离，质量优于实时转写
-        let offlineLines = []
-        try {
-          const offPath = join(runDir, 'transcript-offline.jsonl')
-          if (existsSync(offPath)) offlineLines = readLogText(readFileSync(offPath, 'utf8')).lines
-        } catch { /* 没有就算了 */ }
-        const src = choosePersonaSource({ offline: offlineLines, live: session.transcript || [] })
-        if (!src.lines.length) {
-          const blocked = whyNoPersona(session.transcript || [])
-          results.persona = '跳过：' + blocked + ' → ' + enableHint()
-          logger?.info?.('[soulmirror] 人格提取跳过：' + blocked)
-          throw new Error('__PERSONA_SKIPPED__')
-        }
-        const spoken = renderSpeakerTranscript(src.lines, { maxChars: 3000 })
-        if (src.source === 'offline') logger?.info?.('[soulmirror] 人格提取用会后重转写产物（' + src.speakers.length + ' 位说话人）')
-
-        // 结构化提取：不只记"事实"，还要记"她怎么说话、站哪边、怎么判断"
-        const existing = loadProfile(personaDir)
-        const knownText = existing ? renderProfile(existing, { maxChars: 1500 }) : ''
-        const out = await completer([
-          {
-            role: 'system',
-            content: [
-              '你在帮一个会议助理"长成用户本人"。从这场会议里抽取**关于用户本人**的信息，只输出 JSON。',
-              '',
-              '五个分区（section 取值只能用它）：',
-              '- identity：长期不变的身份（职位、团队、负责的项目、汇报关系）',
-              '- style：她怎么说话（语气、句长、常用词/口头禅、忌讳的说法）',
-              '- stance：她的立场与偏好（优先级、判断标准、红线、明确反对什么）',
-              '- facts：关于她的稳定事实（习惯、工具、协作对象）',
-              '- state：当前阶段的项目进展/下一步（会过期）',
-              '',
-              '输出格式：{"items":[{"section":"stance","key":"上线节奏","value":"先小范围验证再全量","confidence":0.8}]}',
-              '规则：',
-              '1. key 用 2~8 个字概括主题（同一主题以后会用来判重/取代，请保持稳定）',
-              '2. value 一句话、不超过 40 字、必须是她本人的事（不是会议内容摘要）',
-              '3. confidence 0~1：她明确表达/反复强调给高分，推断给低分',
-              '4. 只写会议里**能证实**的；不确定就不写，宁缺勿编',
-              '5. 已经有的事实不要重复列举；若有变化，用同一个 key 写新值',
-            ].join('\n'),
-          },
-          ...(knownText ? [{ role: 'user', content: '已知画像（避免重复）：\n' + knownText }] : []),
-          { role: 'user', content: '本场会议转写（带说话人）：\n' + spoken.text },
-        ])
-        const jsonText = String(out).replace(/^```(?:json)?|```$/gm, '').trim()
-        const parsed = JSON.parse(jsonText)
-        const items = Array.isArray(parsed) ? parsed : (parsed.items || [])
-        const merged = mergeProfile(existing || emptyProfile(), items)
-        saveProfile(personaDir, merged.profile)
-
-        // 四层记忆：先把本场会写进「暖态」与「流水」，再整理出「冷储」与「归档」
-        // 流水 = 原始（不筛选）；暖态 = 候选（会遗忘）；冷储 = 跨会议稳定（注入）
-        const memDir = join(personaDir, 'memory')
-        try {
-          appendJournal({
-            dir: memDir,
-            at: Date.now(),
-            title: (session.display || '会议'),
-            lines: (session.transcript || []).slice(-40)
-              .filter((x) => x && x.text && x.role !== 'assistant' && x.src !== 'gap')
-              .map((x) => x.text),
-          })
-          for (const it of items) {
-            appendWarm({
-              dir: memDir,
-              text: it && it.value,
-              kind: it && it.section === 'stance' ? 'rule' : 'fact',
-              confidence: it && it.confidence,
-              at: Date.now(),
-            })
-          }
-          const cons = consolidate({ dir: memDir, now: Date.now() })
-          const conv = convergence({ profile: merged.profile, dir: memDir })
-          const layers = layersStatus(memDir)
-          results.memory = '暖态 ' + layers.warm + ' / 冷储 ' + layers.cold +
-            ' / 流水 ' + layers.journalDays + ' 天（本次晋升 ' + cons.promoted.length +
-            '、归档 ' + cons.archived + '）'
-          results.convergence = conv.score + '（' + conv.label + '）'
-
-          // 人格画像 → 独立知识库（同一篇反复更新，不混进会议纪要）
-          if (cfg.knowledge.personaSync !== true) results.personaKb = '未开启自动同步（可手动编辑知识库，或置 knowledge.personaSync=true）'
-          // 可选功能：默认**不**自动写知识库。
-          // 理由：那篇文档用户会自己编辑；自动覆盖会把手改的内容冲掉。
-          // 需要自动同步时显式打开 knowledge.personaSync = true。
-          if (cfg.knowledge.personaSync === true) {
-            try {
-              const port = resolveHostPort()
-              if (!port) {
-                results.personaKb = '跳过（拿不到宿主端口）'
-              } else {
-                const md2 = renderPersonaDoc({
-                  profile: merged.profile,
-                  layers,
-                  convergence: conv,
-                  rules: readRules({ dir: join(personaDir, 'ontology'), maxTopics: 8, maxPerTopic: 4 }),
-                  at: Date.now(),
-                })
-                const kb = await syncPersonaDoc({
-                  origin: 'http://127.0.0.1:' + port,
-                  name: cfg.knowledge.personaBaseName || undefined,
-                  markdown: md2,
-                  profile: merged.profile,
-                  convergence: conv,
-                  // 画像太薄就不写：知识库里那篇是对外可见的印象，
-                  // 只有两三条零散信息就发出去，会让人以为它认错人了。
-                  minItems: Number(cfg.knowledge.personaMinItems) || 5,
-                  minScore: Number(cfg.knowledge.personaMinScore) || 0.2,
-                })
-                results.personaKb = kb.ok
-                  ? (kb.action === 'created' ? '已建库并写入：' + kb.kbName : '已更新：' + kb.kbName)
-                  : (kb.skipped
-                    ? '暂不写入（' + kb.reason + '）'
-                    : '失败（' + (kb.stage || '?') + '）：' + kb.error)
-                if (!kb.ok) logger?.warn?.('[soulmirror] 画像写库失败：' + (kb.stage || '?') + ' ' + kb.error)
-              }
-            } catch (e) {
-              results.personaKb = '异常：' + e.message
-            }
-          }
-        } catch (e) {
-          logger?.warn?.('[soulmirror] 记忆层写入失败：' + e.message)
-        }
-
-        // 三分法：技术知识 / 项目记忆 / 经验规则分开存
-        // 混在一起的后果是"三个月前的进展被当成当前状态"、"随口一句被当成规则"
-        const routed = { knowledge: 0, memory: 0, rule: 0 }
-        for (const it of items) {
-          try {
-            const r = routeItem({ dir: join(personaDir, 'ontology'), item: it })
-            if (r && r.kind) routed[r.kind] = (routed[r.kind] || 0) + 1
-          } catch { /* 单条失败不影响整体 */ }
-        }
-        results.ontology = '知识 ' + (routed.knowledge || 0) + ' 条 / 记忆 ' + (routed.memory || 0) +
-          ' 条 / 规则 ' + (routed.rule || 0) + ' 条'
-        // 人类可读的 markdown 也同步追加一份（便于直接翻看）
-        const bySection = (s) => items.filter((x) => x && x.section === s).map((x) => x.value)
-        const r1 = appendPersonaSection(personaDir, 'user', [...bySection('identity'), ...bySection('facts')], { stamp })
-        const r2 = appendPersonaSection(personaDir, 'state', bySection('state'), { stamp })
-        results.personaDetail = '画像：新增 ' + merged.stats.added + ' 条、强化 ' + merged.stats.reinforced +
-          ' 条、取代 ' + merged.stats.superseded + ' 条、过期 ' + merged.stats.expired +
-          ' 条（markdown 追加 ' + (r1.added + r2.added) + ' 条）'
-        personaAt = 0
-        results.persona = items.length + ' 条'
-      } catch { /* ignore */ }
-    }
-
-    logger?.info?.('[soulmirror] 会议收尾：纪要=' + (results.minutes ? '已保存' : '空') + '，知识库=' + (results.knowledge || '跳过') + '，人格=' + (results.persona || '跳过'))
-    if (speak) {
-      const brief = '这场会到这里，纪要' + (results.minutes ? '已经保存' : '没生成')
-        + (results.knowledge ? '，' + results.knowledge : '') + '。'
-      try {
-        addAssistantLine(brief, '会议收尾')
-        brain.markSpoken(brief)
-        await sayToMeeting(brief, cfg.tts, {
-          speakDevice: cfg.devices.speak,
-          micRestore: cfg.devices.micRestore,
-          windowTitle: cfg.windowTitle,
-          logger,
-        })
-      } catch { /* ignore */ }
-    }
-    return results
-    } finally {
-      finalizeRegistry.end(claim.token)
-    }
-  }
+      saveMeta(task.dir,{knowledgeAt:new Date().toISOString(),knowledgeId:r.id || 'confirmed'})
+      return {status:'done',result:'已确认写入知识库'}
+    },
+    persona: async task => {
+      const result = await updatePostMeetingPersona({dir:task.dir,cfg,personaDir,completer,logger,assertActive:task.assertActive,signal:task.signal,resolveHostPort})
+      task.assertActive()
+      personaAt = 0
+      return result
+    },
+  }})
+  const resumeTimer = setTimeout(() => {
+    if (!testMode) pipeline.resume(findInterrupted(journal.projection()))
+  }, 1000)
+  resumeTimer.unref?.()
+  ctx.effect?.(() => () => {clearTimeout(resumeTimer);pipeline.cancelCurrent()}, 'soulmirror: postmeeting recovery')
 
   // 注意：不能叫 saveMinutes —— 会遮蔽导入的同名文件写入函数，
   // 导致 saveMinutes(path, md) 变成递归调用自己（纪要保持不落盘、会后整理卡死）。
@@ -5715,6 +5426,7 @@ export function apply(ctx, config) {
       },
       logger,
       onEnter: async ({ reason }) => {
+        journal.append('meeting.enter',{reason})
         // 只有一个总开关：没开就什么都不做（连听都不听，省 token）
         if (!cfg.enabled) {
           logger?.info?.('[soulmirror] 检测到会议（' + reason + '），但插件未开启，不做任何事')
@@ -5728,13 +5440,13 @@ export function apply(ctx, config) {
         logger?.info?.('[soulmirror] 已开启：开始采集转写并建会话（' + reason + '）')
       },
       onExit: async () => {
+        journal.append('meeting.exit',{})
         // 不能只看 session.capturing：采集进程可能还在跑、标志却已为 false
         // （重连间隙、异常退出后残留）。所以这里一律先真停采集。
         const wasCapturing = !!session.capturing
         const wasRunning = !!session.running
         agent.running = false
         if (!wasCapturing && !wasRunning) return
-        try { await session.stopCapture() } catch { /* 已停也无所谓 */ }
         try {
           // 纪要写本地；知识库回写与发言属于"对外动作"，未开启时不做
           const o = await stopAndOrganize('离开会议', { wasCapturing })
@@ -5774,14 +5486,8 @@ const meetingWatchdog = setInterval(async () => {
     }
     if (!session.capturing && !session.running) { noMeetingTicks = 0; return }
     const wins = await listWindows()
-    const apps = activeApps()
-    const procs = new Set(apps.map((a) => String(a.proc || "").toLowerCase()).filter(Boolean))
-    const frag = String(cfg.windowTitle || "腾讯会议")
-    const alive = (wins || []).some((w) => {
-      const proc = String(w.proc || "").toLowerCase()
-      if (procs.size && !procs.has(proc)) return false
-      return String(w.title || "").includes(frag) || /FloatSpeakingWnd|VideoMainWindow|MeetingView/.test(String(w.cls || ""))
-    })
+    const detected = lifecycle.detect(wins || [])
+    const alive = detected.inMeeting || !!(await lifecycle.deps.micHeldByApp?.())
     if (alive) { noMeetingTicks = 0; return }
     noMeetingTicks += 1
     if (noMeetingTicks >= 2) {
@@ -5984,17 +5690,9 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
       const dir = String(a.dir || session.dir || '').trim()
       if (!dir) return { ok: false, result: '没有会议目录' }
       if (!cfg.enabled) return { ok: false, result: '会议功能未开启' }
-      const r = await runOfflinePass(dir)
-      if (!r.ok) return { ok: false, result: r.error || '会后重转写失败' }
-      return {
-        ok: true,
-        result: '会后重转写完成：' + r.sentences + ' 句' +
-          (r.speakers ? '（' + r.speakers + ' 位说话人）' : '') +
-          '，' + r.seconds + ' 秒音频，用时 ' + r.elapsed + ' 秒',
-        minutesPath: r.minutesPath || '',
-        sentences: r.sentences,
-        speakers: r.speakers,
-      }
+      const accepted = pipeline.enqueue(dir,{reason:'工具请求会后整理',restart:true})
+      return {ok:accepted.ok,result:accepted.ok ? '已排队：非流式转写 → 纪要 → 知识库，可在会议面板查看进度' : accepted.error}
+
     }),
   }))
 

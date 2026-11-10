@@ -25,15 +25,16 @@ test('/setup 的 key 分支把保存失败如实告诉界面', () => {
 })
 
 test('成功文案带实际存储位置（便于排查路径不一致）', () => {
+  // 用下一个分支做边界（这段代码会变长，按字符数截断会假失败）
   const at = src.indexOf("if (action === 'key')")
-  const seg = src.slice(at, at + 1600)
+  const seg = src.slice(at, src.indexOf("if (action === '", at + 10))
   assert.match(seg, /describeLocation\(\)/, '成功时应给出存储位置')
   assert.match(seg, /keyStorage: wr\.mode/, '应回报是哪种存储')
 })
 
 test('清空密钥真的能清（空字符串表示清除）', () => {
   const at = src.indexOf("if (action === 'key')")
-  const seg = src.slice(at, at + 1800)
+  const seg = src.slice(at, src.indexOf("if (action === '", at + 10))
   // 空值仍要交给 keyStore 处理（内部按 value='' 清除），并清掉可能残留的明文
   assert.match(seg, /keyStore\.set\('asr', value\)/, '空值也要走 keyStore（内部按清除处理）')
   assert.match(seg, /cfg\.asr\.apiKey = ''/, '应清掉内存明文')

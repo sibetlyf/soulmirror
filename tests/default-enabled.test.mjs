@@ -42,9 +42,12 @@ test('真正关闭走 action=off，并持久化', () => {
   assert.match(seg, /lifecycle\.stop\(\)/)
 })
 
-test('界面按钮按"是否在采集"切换，而不是总开关', () => {
-  const uses = [...client.matchAll(/callAuto\((lv|capturing|s)\.?\w* ?\? 'stop' : 'start'\)/g)].length
-  assert.ok(uses >= 3, '所有开始/结束按钮都应基于 capturing，实际 ' + uses + ' 处')
-  assert.equal(/callAuto\(lv\.enabled \?/.test(client), false, '不应再用 enabled 判断')
-  assert.equal(/callAuto\(s\.enabled \?/.test(client), false, '不应再用 enabled 判断')
+test('界面录音按钮由持久化采集状态驱动，总开关为独立操作', async () => {
+  const { buildViewModel } = await import('../lib/view-model.js')
+  const idle = buildViewModel({ journal: { enabled: true, capturing: false } })
+  const recording = buildViewModel({ journal: { enabled: true, capturing: true } })
+  assert.equal(idle.primary.action, 'record')
+  assert.equal(recording.primary.action, 'stop')
+  assert.match(client, /act\(v\.primary\)/, '唯一录音按钮消费服务端动作')
+  assert.match(client, /callAuto\(v\.enabled \? 'off' : 'start'\)/, '设置总开关语义仍独立')
 })

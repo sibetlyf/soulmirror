@@ -28,8 +28,9 @@ test('所有密钥读取点都经过 keyFor（先安全存储，再旧字段）'
 })
 
 test('保存密钥写进安全存储，并清掉配置里的明文', () => {
+  // 用下一个分支做边界，而不是猜字符数：这段代码会继续长，猜窗口会让测试假失败
   const at = src.indexOf("if (action === 'key') {")
-  const seg = src.slice(at, at + 1400)
+  const seg = src.slice(at, src.indexOf("if (action === '", at + 10))
   assert.match(seg, /keyStore\.set\('asr', value\)/, '应写入安全存储')
   assert.match(seg, /loadKeysIntoCache\(\)/, '写后应刷新缓存')
   assert.match(seg, /cfg\.asr\.apiKey = ''/, '应清掉内存明文')

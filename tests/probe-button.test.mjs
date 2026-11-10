@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -11,15 +12,13 @@ import { join } from 'node:path'
  */
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-probe-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
 
 const routes = []
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register() {} },
   logger: { info() {}, warn() {}, error() {} },
   get: () => undefined,
@@ -84,6 +83,4 @@ async function waitFor(fn, timeoutMs = 3000) {
   return null
 }
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

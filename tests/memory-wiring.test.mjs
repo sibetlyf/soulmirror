@@ -17,11 +17,12 @@ import { emptyProfile, mergeProfile } from '../lib/persona-growth.js'
  */
 
 const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+const step = readFileSync(new URL('../lib/postmeeting-persona.js', import.meta.url), 'utf8')
 
 test('会后会写流水与暖态，并整理出冷储', () => {
-  const at = src.indexOf('const memDir = join(personaDir, \'memory\')')
+  const at = step.indexOf("memDir = join(personaDir,'memory')")
   assert.ok(at > 0, '找不到四层记忆接入点')
-  const seg = src.slice(at, at + 1600)
+  const seg = step.slice(at, at + 1800)
   assert.match(seg, /appendJournal\(/, '应写流水')
   assert.match(seg, /appendWarm\(/, '应写暖态')
   assert.match(seg, /consolidate\(/, '应整理（晋升冷储/归档）')

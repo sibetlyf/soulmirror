@@ -28,8 +28,8 @@ test('页面显示问题横幅，且在进度条前面', () => {
   assert.match(client, /function IssueBanner\(props\)/, '应有横幅组件')
   const at = client.indexOf('function MeetingPage(')
   const big = client.slice(at, at + 20000)
-  assert.match(big, /h\(IssueBanner, null\)/, '页面应有横幅')
-  assert.ok(big.indexOf('h(IssueBanner, null)') < big.indexOf('h(ProgressBar, null)'), '横幅应在进度条之前')
+  assert.match(big, /v\.issues \|\| \[\]/, '页面应从共用view读取问题')
+  assert.ok(big.indexOf("role: 'alert'") < big.indexOf("h(PipelineSteps"), '问题应在管线步骤之前')
 })
 
 test('横幅可展开全部条目并复制排查文本', () => {

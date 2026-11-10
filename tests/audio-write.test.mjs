@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { MeetingSession } from '../lib/session.js'
 
 /**
  * 4GB 堆溢出的直接嫌疑之一：录音写入。
@@ -46,11 +49,15 @@ test('有积压上限，超限丢弃并计数（而不是无限缓冲）', () =>
   assert.match(seg, /16 \* 1048576/, '默认上限 16MB 应写明')
 })
 
-test('收尾会 flush 写流（否则最后几秒音频丢失）', () => {
-  assert.match(src, /async _closeAudioStream\(\)/, '缺少收尾方法')
-  const at = src.indexOf('async _closeAudioStream()')
-  const seg = src.slice(at, at + 600)
-  assert.match(seg, /s\.end\(done\)/, '应 end 并等待完成')
-  assert.match(seg, /setTimeout\(done, 3000\)/, '磁盘卡住时要有兜底退出')
-  assert.match(src, /await this\._closeAudioStream\(\)/, '收尾流程要调用它')
+test('收尾会 flush 写流并保留最后的音频字节', async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), 'sm-audio-flush-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
+  const s = new MeetingSession({ dataDir: dir, devices: {}, asr: { provider: 'none' } }, null)
+  s.audioFile = join(dir, 'audio.pcm')
+  const bytes = Buffer.alloc(6400, 7)
+  s._writeAudio(bytes)
+  await s._closeAudioStream()
+  assert.deepEqual(readFileSync(s.audioFile), bytes, '应等待最后一笔音频落盘')
+  assert.equal(s._audioStream, null)
+  await s._closeAudioStream() // 重复收尾必须安全
 })

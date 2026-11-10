@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -5,9 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-sched-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const calls = { created: [], deleted: [] }
 const scheduleStub = {
@@ -24,7 +23,7 @@ const plugin = mod.default || mod
 
 const tools = []
 const routes = []
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register(t) { tools.push(t) } },
   logger: { info() {}, warn() {} },
   get: (k) => {
@@ -48,7 +47,7 @@ async function api(method, url, body) {
 }
 
 const on = () => api('POST', '/api/soulmirror/auto', { action: 'start' })
-const off = () => api('POST', '/api/soulmirror/auto', { action: 'stop' })
+const off = () => api('POST', '/api/soulmirror/auto', { action: 'off' })
 
 test('meeting_auto_attend 走 DSH 自动化任务（不是自建定时器）', async () => {
   await on()
@@ -99,6 +98,4 @@ test('未开启时不允许安排', async () => {
   assert.match(String(r.result), /未开启/)
 })
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

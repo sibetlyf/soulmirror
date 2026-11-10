@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -10,9 +11,7 @@ import { join } from 'node:path'
  */
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-ctx-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
@@ -20,7 +19,7 @@ const plugin = mod.default || mod
 const routes = []
 const prompts = []
 
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register() {} },
   logger: { info() {}, warn() {}, error() {} },
   get(name) {
@@ -79,4 +78,4 @@ test('没有会话服务时也不崩', async () => {
   assert.equal(typeof r.body.ok, 'boolean')
 })
 
-test.after(() => { try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ } })
+// Environment, effects and temporary files are cleaned by isolatePlugin().

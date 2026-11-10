@@ -2,6 +2,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { Readable } from 'node:stream'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 process.env.SOULMIRROR_TEST = '1'
 
@@ -20,7 +23,9 @@ function fakeChild({ dataMs = 20 } = {}) {
   return child
 }
 
-test('音频能通过弹性 ASR 的 feed 送到识别（接口错配回归）', async () => {
+test('音频能通过弹性 ASR 的 feed 送到识别（接口错配回归）', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'soulmirror-asr-wiring-'))
+  t.after(() => rmSync(root, { recursive: true, force: true }))
   const sent = []
   const children = []
   const spawnFn = () => { const c = fakeChild(); children.push(c); return c }
@@ -35,11 +40,24 @@ test('音频能通过弹性 ASR 的 feed 送到识别（接口错配回归）', 
   })
 
   const session = new MeetingSession(
-    { asr: { apiKey: 'x', apiKeyEnv: 'X' }, devices: {}, archive: {} },
+    { dataDir: root, asr: { apiKey: 'x', apiKeyEnv: 'X' }, devices: {}, archive: {} },
     { info() {}, warn() {} },
-    { backoffMs: [5], spawnFn, createAsr },
+    {
+      backoffMs: [5], spawnFn, createAsr,
+      loudestRenderDevice: async () => null,
+      listDevices: async () => [],
+      defaultRenderDevice: async () => '',
+      sessionDevice: async () => null,
+      ensureBridge: () => ({ ok: true }),
+    },
   )
+  session.dir = root
   session.deviceInUse = 'FakeDevice'
+  t.after(async () => {
+    session.running = false
+    for (const c of children) c._stop?.()
+    await session._closeAudioStream()
+  })
   session.running = true
   session.capturing = true
   const loop = session._streamLoop()

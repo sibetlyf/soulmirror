@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "SoulMirror 会议助手：实时转写、会议识别、会后纪要入库；人格管线（用户卡+认知架构+五层画像+四层记忆）越用越像本人；内置演练模式",
   "type": "module",
   "main": "index.js",
@@ -82,7 +82,10 @@
     }
   },
   "scripts": {
-    "test": "node --test \"tests/*.test.mjs\""
+    "test": "node --test \"tests/*.test.mjs\"",
+    "check:scope": "node scripts/check-scope.mjs",
+    "test:rules": "node --test --test-timeout=30000 tests/development-rules.test.mjs tests/key-consistency.test.mjs",
+    "check:dev": "npm run check:scope && npm run test:rules"
   },
   "engines": {
     "node": ">=22"

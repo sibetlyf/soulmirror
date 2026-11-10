@@ -91,11 +91,14 @@ test('流水按日追加，能按秒级时间段取（大文件也取得回来�
   try {
     appendJournal({ dir: d, lines: ['讨论上线节奏', '确认负责人'], at: NOW, title: '周会' })
     appendJournal({ dir: d, lines: ['第二段'], at: NOW + 3600000, title: '续会' })
-    const all = readJournal({ dir: d })
-    assert.ok(all.length >= 2, '应读回流水')
-    // 时间范围
-    const narrow = readJournal({ dir: d, start: '23:59:00', end: '23:59:59' })
-    assert.ok(narrow.length <= all.length)
+    // 读取固定夹具写入的 UTC 日期，不能默认读今天（测试应跨日期确定性）。
+    const day = new Date(NOW).toISOString().slice(0, 10)
+    const all = readJournal({ dir: d, day })
+    assert.equal(all.length, 3, '应读回固定日期的全部流水')
+    const narrow = readJournal({ dir: d, day, start: '10:00:00', end: '10:59:59' })
+    assert.deepEqual(narrow.map((x) => x.text), ['讨论上线节奏', '确认负责人'])
+    const empty = readJournal({ dir: d, day, start: '23:59:00', end: '23:59:59' })
+    assert.deepEqual(empty, [])
   } finally { rmSync(d, { recursive: true, force: true }) }
 })
 

@@ -195,8 +195,10 @@ test('dsh 入口可解析', () => {
   assert.ok(bin === '' || bin.endsWith('bin.js'))
 })
 
-test('推荐项解析在审批场景下退化为 allowed-once', () => {
-  assert.equal(pickRecommended({ toolName: 'pwsh' }).value, 'allowed-once')
+test('推荐项解析无选项不产生权限授权兜底', () => {
+  const r = pickRecommended({ toolName: 'pwsh' })
+  assert.equal(r.value, '')
+  assert.equal(r.reason, 'no-options')
 })
 
 test('大脑：decide 收到 null 触发不崩（push 未命中时会返回 null）', async () => {

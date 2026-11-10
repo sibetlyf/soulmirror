@@ -34,9 +34,10 @@ test('离线重转写接受取消标记，写盘前检查', () => {
 })
 
 test('调用处把取消标记接起来', () => {
-  assert.match(src, /let offlineCancelled = false/, '应有取消标记')
-  assert.match(src, /isCancelled: \(\) => offlineCancelled/, '应传给 runOfflinePass')
-  assert.match(src, /onTimeout: \(\) => \{ offlineCancelled = true \}/, '超时后置位')
+  assert.match(src, /isCancelled:task\.isCancelled/, '应传给 runOfflinePass')
+  const runner = readFileSync(new URL('../lib/postmeeting.js',import.meta.url),'utf8')
+  assert.match(runner,/new AbortController\(/, '每个任务应有独立取消令牌')
+  assert.match(runner,/job\.controller\.signal\.aborted/, '取消状态必须绑定本任务，防止迟到结果影响下一任务')
 })
 
 test('离会不再等待整理', () => {

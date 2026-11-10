@@ -1,4 +1,4 @@
-﻿import { test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { buildOfflineMinutes, getLastMinutesError } from '../lib/offline-asr.js'
@@ -43,9 +43,11 @@ test('接线：纪要走专用补全器，不经过逐句判定闸门', () => {
   const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
   assert.match(src, /function makeMinutesCompleter\(\)/, '应有纪要专用补全器')
   const at = src.indexOf('function makeMinutesCompleter()')
-  const seg = src.slice(at, at + 1200)
-  assert.match(seg, /promptSession\(ctx, sid, prompt, \{ timeoutMs: 300000 \}\)/, '应放宽超时')
+  const seg = src.slice(at, src.indexOf('async function minutesViaBackgroundTask', at))
+  assert.match(seg, /promptSession\(ctx, minutesSessionId, prompt, \{ timeoutMs: 300000 \}\)/, '应放宽超时')
   assert.equal(/gate\.submit/.test(seg), false, '不该走闸门')
+  assert.equal(/ensureJudgementSession/.test(seg), false, '纪要不该复用逐句判定的会话')
+  assert.match(seg, /会议助手 · 纪要（内部）/, '纪要要有自己的内部会话')
 })
 
 test('接线：纪要里要过滤掉助手自己的播报', () => {
@@ -57,15 +59,15 @@ test('接线：纪要里要过滤掉助手自己的播报', () => {
   assert.match(seg, /\.map\(\(x\) => \(\{ text:/, '过滤后应接着拼句子')
 })
 
-test('接线：纪要优先交给 DSH 后台任务，失败才回退', () => {
+test('接线：正式纪要用专用DSH会话模型，失败不能抽取稿冒充成功', () => {
   const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
-  assert.match(src, /async function minutesViaBackgroundTask\(dir, lines, title/, '应有后台任务实现')
-  const at = src.indexOf('const bg = await minutesViaBackgroundTask')
-  assert.ok(at > 0, '离线整理应先尝试后台任务')
-  const seg = src.slice(at, at + 900)
-  assert.match(seg, /if \(bg\.ok\)/, '成功就直接用后台结果')
-  assert.match(seg, /minutesSource = 'background'/, '应记录来源')
-  assert.match(seg, /buildOfflineMinutes\(/, '失败才回退到会话模型')
+  const at = src.indexOf('minutes: async task =>')
+  const seg = src.slice(at, src.indexOf('knowledge: async task =>',at))
+  assert.ok(at > 0)
+  assert.match(seg, /await minutesCompleter\(/)
+  assert.match(seg, /throw new Error\('DSH 会话模型返回空纪要'\)/)
+  assert.match(seg, /source:'dsh-session'/)
+  assert.doesNotMatch(seg, /buildOfflineMinutes\(|buildMinutes\(/)
 })
 
 test('接线：后台任务用文件交接（不走命令行传长文本）', () => {

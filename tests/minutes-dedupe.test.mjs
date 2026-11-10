@@ -28,17 +28,13 @@ test('buildMinutes 会把结果缓存起来（否则去重返回空）', () => {
   assert.match(body, /lastMinutesMd = fallback/, '抽取式结果没有缓存')
 })
 
-test('收尾防抖在入口就打时间戳（中途抛错也不会被反复触发）', () => {
-  const i = src.indexOf('async function finalizeMeeting')
-  assert.ok(i > 0, '找不到 finalizeMeeting')
-  const body = src.slice(i, i + 700)
-  const guardAt = body.indexOf("if (Date.now() - lastFinalizedAt < 60000)")
-  const stampAt = body.indexOf('lastFinalizedAt = Date.now()')
-  assert.ok(guardAt >= 0, '没有 60 秒防抖')
-  assert.ok(stampAt > guardAt, '时间戳应在防抖判断之后立刻打上')
-  // 打时间戳的位置必须在"开始干活"之前（不能还在函数末尾）
-  const firstAwait = body.indexOf('await buildMinutes')
-  assert.ok(stampAt < firstAwait, '时间戳打得太晚：抛错时会绕过防抖')
+test('收尾交给持久化队列去重，不再依赖会误伤下一场的全局60秒防抖', () => {
+  const at = src.indexOf('async function stopAndOrganize(')
+  assert.ok(at > 0)
+  const body = src.slice(at, src.indexOf('const pipeline = createPostMeeting',at))
+  assert.match(body, /pipeline\.enqueue\(dir/)
+  assert.doesNotMatch(body, /lastFinalizedAt/)
+  // 并发重复/失败释放/跨会议隔离由 finalize-isolation-wiring 行为测试覆盖。
 })
 
 test('每次生成纪要都会留下带次数的日志', () => {

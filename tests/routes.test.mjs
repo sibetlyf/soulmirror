@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -10,9 +11,7 @@ import { join } from 'node:path'
  */
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-routes-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
@@ -20,7 +19,7 @@ const plugin = mod.default || mod
 const routes = []
 const tools = []
 
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register(t) { tools.push(t) } },
   logger: { info() {}, warn() {}, error() {} },
   get: (k) => (k === 'webServer' ? { port: 3097 } : undefined),
@@ -67,7 +66,8 @@ test('/health 返回结构完整且可判定', async () => {
 test('/health 关闭状态不误报（本来就不该连接）', async () => {
   const r = await call('GET', '/api/soulmirror/health')
   assert.equal(r.body.enabled, false)
-  assert.deepEqual(r.body.problems, [])
+  assert.ok(Array.isArray(r.body.problems))
+  assert.doesNotMatch(r.body.problems.join('\n'), /断连|连接中断|连接失败/, '关闭时允许展示缺配置，但不应误报运行中断连')
 })
 
 test('演练 start → status 可见 → stop', async () => {
@@ -136,6 +136,4 @@ test('meeting_demo 工具已注册且参数可解析', () => {
   assert.ok(t.parameters.properties.real, '要有 real 参数')
 })
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

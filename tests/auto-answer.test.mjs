@@ -2,7 +2,14 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { installAutoAnswer, pickRecommended, collectOptions } from '../lib/auto-answer.js'
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+function installed(t, cfg = {}) {
+  const handlers = {}
+  const logs = []
+  const inst = installAutoAnswer({ on(name, fn) { handlers[name] = fn; return () => {} } },
+    { enabled: true, timeoutMs: 1000, onlyForSessionId: 'meeting-test', ...cfg }, { info: (m) => logs.push(m) })
+  t.after(() => inst.dispose())
+  return { handlers, logs, inst }
+}
 
 test('collectOptions 兼容多种形状', () => {
   const a = collectOptions({ options: [{ id: 'yes', label: '好（推荐）', recommended: true }] })
@@ -15,61 +22,65 @@ test('collectOptions 兼容多种形状', () => {
 })
 
 test('pickRecommended 优先显式标记，其次标签', () => {
-  assert.deepEqual(
-    pickRecommended({ options: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B', recommended: true }] }).reason,
-    'recommended-flag',
-  )
-  assert.equal(
-    pickRecommended({ options: [{ id: 'x', label: '跳过' }, { id: 'y', label: '继续 (Recommended)' }] }).value,
-    'y',
-  )
-  assert.equal(
-    pickRecommended({ options: [{ id: 'p', label: '方案一（推荐）' }] }).value,
-    'p',
-  )
+  assert.equal(pickRecommended({ options: [{ id: 'a' }, { id: 'b', recommended: true }] }).reason, 'recommended-flag')
+  assert.equal(pickRecommended({ options: [{ id: 'x', label: '跳过' }, { id: 'y', label: '继续 (Recommended)' }] }).value, 'y')
+  assert.equal(pickRecommended({ options: [{ id: 'p', label: '方案一（推荐）' }] }).value, 'p')
 })
 
-test('pickRecommended 无推荐项时：审批默认允许一次', () => {
-  assert.equal(pickRecommended({ toolName: 'pwsh', options: [{ id: 'deny' }] }).value, 'allowed-once')
+test('pickRecommended 不制造 allowed-once；无推荐项只返回已有选项', () => {
+  assert.equal(pickRecommended({ toolName: 'pwsh', options: [{ id: 'deny' }] }).value, 'deny')
+  assert.equal(pickRecommended({ toolName: 'pwsh' }).value, '')
 })
 
-test('pickRecommended 问句无推荐项时取第一项', () => {
+test('问句无推荐项仅在已有选项中取第一项', () => {
   const r = pickRecommended({ kind: 'question', questions: [{ options: [{ id: 'first' }, { id: 'second' }] }] })
   assert.equal(r.value, 'first')
   assert.equal(r.reason, 'first-option')
 })
 
-test('没人回答时超时自动选推荐项', async () => {
-  const handlers = {}
-  const ctx = { on: (name, fn) => { handlers[name] = fn; return () => {} } }
-  const logs = []
-  const inst = installAutoAnswer(ctx, { enabled: true, timeoutMs: 1200 }, { info: (m) => logs.push(m) })
-  assert.equal(inst.enabled, true)
-  const answer = await handlers['approval/request'](
-    { toolName: 'ask_user_question', options: [{ id: 'go', label: '继续 (Recommended)' }] },
-    () => new Promise(() => {}), // 人永远不回答
-  )
+test('同一显式范围的问句无人回答，才超时选推荐项', async (t) => {
+  const { handlers, logs, inst } = installed(t)
+  // Production timer is unref'd: this bounded sentinel keeps only this isolated test alive.
+  const keepAlive = setTimeout(() => {}, 2000)
+  t.after(() => clearTimeout(keepAlive))
+  const answer = await handlers['approval/request']({ kind: 'question', sessionId: 'meeting-test',
+    options: [{ id: 'go', label: '继续 (Recommended)' }] }, () => new Promise(() => {}))
   assert.equal(answer, 'go')
   assert.equal(inst.count, 1)
   assert.match(logs.join('\n'), /自动选择/)
 })
 
-test('有人先回答时用人的答案，不自动答', async () => {
-  const handlers = {}
-  const ctx = { on: (name, fn) => { handlers[name] = fn; return () => {} } }
-  const inst = installAutoAnswer(ctx, { enabled: true, timeoutMs: 3000 }, { info: () => {} })
-  setTimeout(() => {}, 10)
-  const answer = await handlers['approval/request'](
-    { options: [{ id: 'auto', label: '自动 (Recommended)' }] },
-    async () => 'human-choice',
-  )
+test('人先回答时使用人的答案，不自动答', async (t) => {
+  const { handlers, inst } = installed(t)
+  const answer = await handlers['approval/request']({ kind: 'question', sessionId: 'meeting-test',
+    options: [{ id: 'auto', recommended: true }] }, async () => 'human-choice')
   assert.equal(answer, 'human-choice')
   assert.equal(inst.count, 0)
 })
 
-test('禁用时不安装', () => {
-  const ctx = { on: () => { throw new Error('should not subscribe') } }
-  const inst = installAutoAnswer(ctx, { enabled: false }, {})
-  assert.equal(inst.enabled, false)
-  inst.dispose()
+test('审批即使有推荐允许项也绝不自动通过', async (t) => {
+  const { handlers, inst } = installed(t)
+  const answer = await handlers['approval/request']({ kind: 'approval', sessionId: 'meeting-test',
+    options: [{ id: 'allowed-once', recommended: true }] }, async () => 'human-required')
+  assert.equal(answer, 'human-required')
+  assert.equal(inst.count, 0)
+})
+
+test('无范围或其它会话问句不自动接管', async (t) => {
+  for (const cfg of [{ onlyForSessionId: '' }, { onlyForSessionId: 'other-session' }]) {
+    const { handlers, inst } = installed(t, cfg)
+    const answer = await handlers['approval/request']({ kind: 'question', sessionId: 'meeting-test',
+      options: [{ id: 'auto', recommended: true }] }, async () => 'human-required')
+    assert.equal(answer, 'human-required')
+    assert.equal(inst.count, 0)
+  }
+})
+
+test('默认与显式禁用均不安装', () => {
+  const ctx = { on() { throw new Error('should not subscribe') } }
+  for (const cfg of [{}, { enabled: false }]) {
+    const inst = installAutoAnswer(ctx, cfg, {})
+    assert.equal(inst.enabled, false)
+    inst.dispose()
+  }
 })

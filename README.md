@@ -96,7 +96,7 @@
 | **DSH** | 本插件是 DSH 插件，由 Cordis 加载 |
 | **Windows** | 音频环回与桌面自动化依赖 Windows；`mbridge.exe` 随包分发，装完即可用 |
 | **DashScope Key** | 语音识别与合成（阿里百炼），也可填兼容服务 |
-| **一个模型** | 判断 / 纠错 / 总结需要 OpenAI 兼容接口 |
+| **一个模型** | 除语音外**默认跟随 DSH 会话模型**，不用单独配；想固定来源可填 `brain.sourceSessionId` |
 | **虚拟声卡** | 只有"发言"需要（如 VB-CABLE）；只开会不发言可以不装 |
 
 ### 可选插件
@@ -167,7 +167,8 @@ dsh plugin --profile web add link:~/.dsh/plugins/soulmirror
 
 | 文档 | 内容 |
 |---|---|
-| [docs/development.md](docs/development.md) | 测试与参考致谢 |
+| [AGENTS.md](AGENTS.md) | **改动本仓库前必读**：先复现、强制门禁、状态唯一来源 |
+| [docs/development.md](docs/development.md) | 开发规程：测试隔离、发布证据、集成测试边界 |
 | [lib/README.md](lib/README.md) | **模块地图**：每个文件负责什么 |
 | [tests/README.md](tests/README.md) | 测试怎么组织、怎么跑 |
 | [tools/README.md](tools/README.md) | 构建与调试工具 |

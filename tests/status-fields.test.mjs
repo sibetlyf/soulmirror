@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -11,14 +12,12 @@ import { join } from 'node:path'
  * 于是既不说话也没有任何提示，用户只能疑惑"为什么没声音"。
  */
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-status-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
 const routes = []
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register() {} },
   logger: { info() {}, warn() {}, error() {} },
   get: () => undefined,
@@ -78,4 +77,4 @@ test('postMeeting 初始为 idle；结束录音后会进入 stopping/offline 等
   const st2 = await call('GET', '/api/soulmirror/status')
   assert.ok(['idle', 'stopping', 'offline', 'minutes', 'done', 'error'].includes(st2.body.postMeeting.phase))
 })
-test.after(() => { try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ } })
+// Environment, effects and temporary files are cleaned by isolatePlugin().

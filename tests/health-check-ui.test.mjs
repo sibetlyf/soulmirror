@@ -32,7 +32,7 @@ test('页面顶部有体检入口（单一 UI，不再有第二套小窗）', ()
   const at = client.indexOf('function MeetingPage(')
   assert.ok(at > 0, '找不到 MeetingPage')
   const seg = client.slice(at, at + 20000)
-  assert.match(seg, /h\(HealthCheck, null\)/, '主页面应有体检按钮')
+  assert.match(seg, /h\(HealthCheck\)/, '共用工作台诊断页应有体检按钮')
   assert.equal(client.includes('CompactPanel'), false, '小窗 UI 已移除')
 })
 

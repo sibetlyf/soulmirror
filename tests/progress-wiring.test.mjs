@@ -1,4 +1,4 @@
-﻿import { test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
@@ -41,15 +41,17 @@ test('进度进入 /status 的 postMeeting（界面才能拿到）', () => {
   assert.match(src, /setPostMeeting\(\{ phase: 'minutes', \.\.\.snap/, '纪要阶段应合并进度快照')
 })
 
-test('前端显示阶段、百分比、耗时与明细', () => {
-  assert.match(client, /pm\.stageLabel/, '应显示阶段名')
-  assert.match(client, /pm\.percent/, '应显示百分比')
-  assert.match(client, /已用 ' \+ elapsed \+ 's/, '应显示耗时')
-  assert.match(client, /pm\.detail/, '应显示明细')
-  assert.match(client, /height: 4/, '应有进度条')
+test('前端显示服务端阶段与明细，仅显示真实测量进度', async () => {
+  const { check } = await import('./ui-shared-contract.mjs')
+  check('progress')
+  assert.match(client, /s\.stateLabel/)
+  assert.match(client, /s\.detail/)
 })
 
-test('完成/失败时不再显示进度条（避免"完成了还显示 80%"）', () => {
-  const at = client.indexOf("pm.phase !== 'done' && pm.phase !== 'error'")
-  assert.ok(at > 0, '进度条应有显示条件')
+test('完成/失败时不残留伪进度（避免完成了还显示80%）', async () => {
+  const { buildViewModel } = await import('../lib/view-model.js')
+  for (const phase of ['done', 'error']) {
+    const v = buildViewModel({ journal: { runs: { x: { run: 'x', phase, step: 'offline', percent: 80, steps: { offline: { state: phase } } } } } })
+    assert.equal(v.steps[0].progress, null)
+  }
 })

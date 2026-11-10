@@ -1,4 +1,4 @@
-﻿import { test } from 'node:test'
+import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -14,7 +14,9 @@ import { emptyProfile, mergeProfile, renderProfile } from '../lib/persona-growth
  * 目标：每场会议后更像用户本人 —— 能代替她参会、也能按她的角度整理纪要。
  */
 
-const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+const host = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+const personaStep = readFileSync(new URL('../lib/postmeeting-persona.js', import.meta.url), 'utf8')
+const src = host + '\n' + personaStep
 
 test('画像文件 PROFILE.json 能读写', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sm-persona-'))
@@ -57,7 +59,7 @@ test('模型上下文用的是 fullPersonaBlock（不是只看 markdown）', () 
 })
 
 test('会后提取是五层结构化，且喂入已知画像避免重复', () => {
-  const at = src.indexOf('personaAutoUpdate && md && completer')
+  const at = src.indexOf('export async function updatePostMeetingPersona')
   assert.ok(at > 0, '找不到会后人格更新')
   const seg = src.slice(at, at + 20000)
 
@@ -78,10 +80,10 @@ test('合并结果里能看出增/强化/取代/过期四类统计', () => {
 })
 
 test('markdown 层仍同步追加（人可以直接翻看）', () => {
-  const at = src.indexOf('personaAutoUpdate && md && completer')
+  const at = src.indexOf('export async function updatePostMeetingPersona')
   const seg = src.slice(at, at + 8000)
-  assert.match(seg, /appendPersonaSection\(personaDir, 'user'/, '应继续追加 user')
-  assert.match(seg, /appendPersonaSection\(personaDir, 'state'/, '应继续追加 state')
+  assert.match(seg, /appendPersonaSection\(personaDir,\s*'user'/, '应继续追加 user')
+  assert.match(seg, /appendPersonaSection\(personaDir,\s*'state'/, '应继续追加 state')
 })
 
 test('没有画像时也能工作（首次会议）', () => {

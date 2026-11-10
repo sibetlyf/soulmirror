@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -5,9 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-appapi-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
@@ -23,7 +22,7 @@ const ctx = {
   effect: () => () => {},
   emit() {},
 }
-plugin.apply(ctx, {})
+applyIsolated(plugin, ctx, {})
 
 async function api(method, url, body) {
   let out = ''
@@ -75,6 +74,4 @@ test('POST /app 可以直接切到内置预设（飞书会议会自动补进 app
   assert.ok(s.body.apps.some((a) => a.name === '飞书会议'))
 })
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

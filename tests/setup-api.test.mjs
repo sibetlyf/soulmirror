@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync } from 'node:fs'
@@ -10,15 +11,13 @@ import { join } from 'node:path'
  */
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-setup-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
 
 const routes = []
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register() {} },
   logger: { info() {}, warn() {}, error() {} },
   get: (k) => (k === 'webServer' ? { port: 3096 } : undefined),
@@ -60,7 +59,7 @@ test('POST /setup config 生成配置文件并回到最新清单', async () => {
   assert.equal(r.status, 200)
   assert.ok(r.body.rows, '应带回最新清单')
   assert.equal(r.body.action, 'config')
-  assert.ok(existsSync(join(fakeHome, '.dsh', 'soulmirror', 'config.json')), '应真的生成配置')
+  assert.ok(existsSync(join(fakeHome, 'soulmirror', 'config.json')), '应真的生成配置')
 })
 
 test('POST /setup key 允许留空（清空），状态按来源如实反映', async () => {
@@ -88,6 +87,4 @@ test('POST /setup vb-cable 不尝试静默装驱动，只给指引', async () =>
   assert.match(r.body.message, /管理员|手动/)
 })
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

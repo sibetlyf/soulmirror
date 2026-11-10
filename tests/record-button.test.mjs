@@ -29,7 +29,8 @@ test('前端「开始录音」走 record，并把结果反馈到界面', () => {
   const seg = client.slice(at, at + 1800)
   assert.match(seg, /action === 'start' \? 'record' : action/, 'start 应映射到 record')
   assert.match(seg, /captureNotice/, '采集没起来要有可见提示')
-  assert.match(seg, /live\.set\(\{ enabled: true, armed: true \}\)/, '点击后应立即反映，不等轮询')
+  assert.match(seg, /commandNotice = '正在提交操作…'/, '点击后应显示提交反馈')
+  assert.doesNotMatch(seg, /live\.set\(\{ enabled: true, armed: true \}\)/, '不得在落盘前乐观伪造启用/采集状态')
 })
 
 test('IssueBanner 会把即时反馈合并进问题列表', () => {

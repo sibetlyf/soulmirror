@@ -20,7 +20,7 @@ test('stopAndOrganize 接受 wasCapturing，并由它负责停采', () => {
   assert.ok(at > 0)
   const seg = src.slice(at, at + 1200)
   assert.match(seg, /opts\.wasCapturing/, '应支持调用方声明前态')
-  assert.match(seg, /stopResult = await session\.stopCapture\(\)/, '停采应在它内部做')
+  assert.match(seg, /const stopped = await session\.stopCapture\(\)/, '停采应在它内部做')
 })
 
 test('两个停止工具不再自己先停一次', () => {

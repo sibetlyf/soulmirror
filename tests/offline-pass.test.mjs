@@ -20,9 +20,10 @@ test('speakers 必须先声明后使用（TDZ 回归）', () => {
   assert.ok(declareAt > 0, '找不到 speakers 声明')
   // 使用点若存在，必须晚于声明点
   if (useAt > 0) assert.ok(useAt > declareAt, 'speakers 在声明前被使用（TDZ ReferenceError）')
-  // 现在的写法应是简写属性，且位于声明之后
-  const shorthandAt = src.indexOf('speakers })', declareAt)
-  assert.ok(shorthandAt > declareAt, 'setPostMeeting 里应在声明之后用 speakers')
+  // 两条返回路径都必须先计算speaker计数；不绑旧setPostMeeting拼写。
+  const pass = src.slice(src.indexOf('async function runOfflinePass'), src.indexOf('async function stopAndOrganize'))
+  assert.match(pass, /const speakers = new Set\(/)
+  assert.ok(pass.indexOf('const speakers = new Set(') < pass.indexOf('setPostMeeting({ phase:', pass.indexOf('const speakers = new Set(')))
 })
 
 test('离线重转写不再整份 readFileSync 上传', () => {
@@ -47,19 +48,14 @@ test('超大录音跳过云端文件识别', () => {
   assert.match(src, /跳过云端文件识别/, '缺少跳过说明')
 })
 
-test('离线重转写有总超时，超时后仍会用实时纪要继续', () => {
-  assert.match(src, /offlineTimeoutMs/, '缺少离线超时配置')
-  // 现在调用是三选一（默认内联、可选子进程），都必须被超时包裹。
-  // 注意 withTimeout( 与表达式之间夹着注释，所以用窗口断言而不是跨行正则。
-  const callAt = src.indexOf('const off = await withTimeout(')
-  assert.ok(callAt > 0, '找不到离线调用')
-  const callSeg = src.slice(callAt, callAt + 900)
-  assert.match(callSeg, /offlineViaChild === true/, '应支持子进程开关')
-  assert.match(callSeg, /: runOfflinePass\(runDir/, '默认应走内联（目录用快照）')
-  assert.match(callSeg, /offlineTimeoutMs/, '应传超时')
-  assert.match(callSeg, /onTimeout/, '超时后要通知底层取消，而不是只结束等待')
-  const at = src.indexOf('function withTimeout(')
-  assert.ok(at > 0, '缺少 withTimeout 实现')
+test('离线重转写总超时由持久化管线管理，取消传到底层且不回退实时稿', () => {
+  assert.match(src, /timeouts:\{offline:Math.max\(60000,Number\(cfg.offlineTimeoutMs\)/)
+  const at = src.indexOf('offline: async task =>')
+  const body = src.slice(at,src.indexOf('minutes: async task =>',at))
+  assert.match(body,/isCancelled:task.isCancelled/)
+  assert.match(body,/if \(!r.ok\) throw new Error/)
+  assert.doesNotMatch(body,/session.transcript|buildMinutes\(/)
+  // 超时/迟到结果不能推进成功的行为见 postmeeting-reliability。
 })
 
 test('会后重转写优先交给后台 dsh 进程（节约主进程资源）', () => {
@@ -84,8 +80,9 @@ test('音频只保留一个文件：转 wav 时流式拷贝并删掉 pcm', () =>
   assert.match(seg, /unlink\(pcmPath\)/, '转完应删除 pcm（避免磁盘两份）')
 })
 
-test('readWavHeader 只读头部且算得对', () => {
+test('readWavHeader 只读头部且算得对', (t) => {
   const dir = mkdtempSync(join(tmpdir(), 'sm-wav-'))
+  t.after(() => rmSync(dir, { recursive: true, force: true }))
   const f = join(dir, 'a.wav')
   // 造一个 1 秒的 16k/16bit/单声道 WAV：44 字节头 + 32000 字节数据
   const buf = Buffer.alloc(44 + 32000)

@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { buildViewModel } from '../lib/view-model.js'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const src = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
@@ -198,7 +199,7 @@ test('大页面必须保留会议接入、会议号、模式开关（防"功能�
   }
   // 卡片里的交互入口用源码静态断言（渲染层面测不到）
   const source = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
-  for (const need of ["'入会'", 'switchMode(', "'自动识别会议号'", 'React.createElement(DevicePicker']) {
+  for (const need of ["'入会'", 'switchMode(', '自动识别会议号 / 手动输入', 'React.createElement(DevicePicker']) {
     assert.ok(source.includes(need), '大页面缺少源码入口 ' + need)
   }
   // 模式开关两个按钮都要在
@@ -244,6 +245,42 @@ test('模型调用失败必须在界面上可见（不能只写日志）', () =>
 })
 
 
+
+test('durable view survives live transport and is shared by main/sidebar/caption/status', () => {
+  const { exp } = loadClient()
+  const p = exp.__test
+  const view = buildViewModel({ journal: { enabled: true, lastSeq: 42, runs: { x: { run: 'x', phase: 'error', error: '离线识别 401', step: 'offline', steps: { offline: { state: 'error', detail: '离线识别 401' } } } } } })
+  p.live.set({ view, journal: { lastSeq: 42 }, display: view.display })
+  p.store.set(true)
+  assert.equal(p.live.view, view)
+  for (const name of ['MeetingPage', 'FloatPanel', 'LiveDock', 'StatusStrip', 'AfterMeetingCard']) {
+    const text = textOf(p[name]({})).join(' ')
+    assert.ok(text.includes(view.headline), name + ' must show the same server headline')
+  }
+  const main = textOf(p.MeetingPage({})).join(' ')
+  assert.match(main, /重试失败步骤/)
+  assert.match(main, /事件 #42/)
+  assert.match(main, /离线识别 401/)
+  const steps = textOf(p.PipelineSteps({ view })).join(' ')
+  assert.match(steps, /整段转写/)
+  assert.match(steps, /失败/)
+})
+
+test('old host clearly requests restart instead of guessing a new durable state', () => {
+  const { exp } = loadClient()
+  const v = exp.__test.getView({ capturing: true, enabled: true })
+  assert.equal(v.version, 0)
+  assert.match(v.headline, /重启 DSH/)
+  assert.equal(v.capturing, undefined)
+})
+
+test('new UI sends explicit record or queued organizer requests and never fake progress', () => {
+  assert.match(src, /action: 'record'/)
+  assert.match(src, /restart: !!action\.restart/)
+  assert.match(src, /dir: action\.dir \|\| runDir/)
+  assert.match(src, /已入队，进展将从事件日志同步/)
+  assert.doesNotMatch(src, /Math\.max\(2, Math\.min\(100, pct\)\)/)
+})
 
 test('只有一个会议助手（入口按钮 + 侧栏，不是第二套 UI）', () => {
   // 用户明确要求：一个页面、一套配置。

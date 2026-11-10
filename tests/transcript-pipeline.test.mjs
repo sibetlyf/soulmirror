@@ -13,7 +13,7 @@ import { MeetingSession } from '../lib/session.js'
  */
 
 function makeSession(dir) {
-  const s = Object.create(MeetingSession.prototype)
+  const s = new MeetingSession({ asr: { provider: 'none' }, devices: {}, dataDir: dir }, null)
   s.transcript = []
   s.dir = dir
   s.logger = null
@@ -36,8 +36,7 @@ test('一条最终结果：日志追加一次、onLine 调一次、不抛异常'
     assert.equal(s.transcript.length, 1)
     assert.equal(s.onLineCalls.length, 1, 'onLine 必须被调用')
 
-    // 等落盘（appendFile 是异步的）
-    await new Promise((r) => setTimeout(r, 120))
+    // 同步追加成功后才能展示，读取不需要等待。
     const p = join(dir, 'transcript.jsonl')
     assert.ok(statSync(p).size > 0, '账本必须真的落盘')
   } finally { rmSync(dir, { recursive: true, force: true }) }
@@ -52,7 +51,6 @@ test('碎片合并路径也落盘（replaces 标记）', async () => {
     const kind = s._pushLine({ t: new Date().toISOString(), text: '得这个方案可以', speaker: '说话人1' })
     assert.equal(s.transcript.length, 1, '应合并成一行')
     assert.ok(['merged-fragment', 'upgraded'].includes(kind), '实际 ' + kind)
-    await new Promise((r) => setTimeout(r, 120))
     assert.ok(statSync(join(dir, 'transcript.jsonl')).size > 0)
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
@@ -70,9 +68,11 @@ test('重复句不会变成两行（合并或判重都行），也不抛异常',
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
-test('没有目录时不落盘也不抛异常', () => {
+test('没有目录时明确失败，不向界面发布未持久化文本', () => {
   const s = makeSession('')
   const kind = s._pushLine({ t: new Date().toISOString(), text: '一句话', speaker: 'A' })
-  assert.equal(kind, 'added')
-  assert.equal(s.onLineCalls.length, 1)
+  assert.equal(kind, 'persist-failed')
+  assert.equal(s.onLineCalls.length, 0)
+  assert.equal(s.transcript.length, 0)
+  assert.match(s.lastError, /没有会议目录/)
 })

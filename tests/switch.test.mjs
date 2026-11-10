@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -5,16 +6,14 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-switch-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
 
 const routes = []
 const tools = []
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register(t) { tools.push(t) } },
   logger: { info() {}, warn() {} },
   get: (k) => (k === 'webServer' ? { port: 3085 } : undefined),
@@ -33,7 +32,7 @@ async function api(method, url, body) {
   return { code: res.code, body: JSON.parse(out || '{}') }
 }
 
-test('默认关闭：enabled=false', async () => {
+test('显式关闭配置：enabled=false', async () => {
   const r = await api('GET', '/api/soulmirror/status')
   assert.equal(r.body.enabled, false)
   assert.equal(r.body.armed, false)
@@ -48,7 +47,7 @@ test('关闭时：会动电脑/对外的工具被拦下', async () => {
   }
 })
 
-test('只读类工具在关闭时仍可用（状态/软件列表）', async () => {
+test('只读类工具在关闭时仍可用（状态/软件列表）', { skip: process.env.SOULMIRROR_INTEGRATION !== '1' && 'Requires explicit SOULMIRROR_INTEGRATION=1: desktop/audio/device integration; not part of safe default suite' }, async () => {
   for (const name of ['meeting_status', 'meeting_apps']) {
     const t = tools.find((x) => x.name === name)
     const r = await t.execute({}, {})
@@ -56,7 +55,7 @@ test('只读类工具在关闭时仍可用（状态/软件列表）', async () =
   }
 })
 
-test('打开开关：enabled/armed 变 true，工具放行', async () => {
+test('打开开关：enabled/armed 变 true，工具放行', { skip: process.env.SOULMIRROR_INTEGRATION !== '1' && 'Requires explicit SOULMIRROR_INTEGRATION=1: desktop/audio/device integration; not part of safe default suite' }, async () => {
   const on = await api('POST', '/api/soulmirror/auto', { action: 'start' })
   assert.equal(on.body.ok, true)
   assert.equal(on.body.enabled, true)
@@ -72,7 +71,7 @@ test('打开开关：enabled/armed 变 true，工具放行', async () => {
 })
 
 test('关闭开关：回到 false 并重新拦截', async () => {
-  const off = await api('POST', '/api/soulmirror/auto', { action: 'stop' })
+  const off = await api('POST', '/api/soulmirror/auto', { action: 'off' })
   assert.equal(off.body.enabled, false)
   const s = await api('GET', '/api/soulmirror/status')
   assert.equal(s.body.enabled, false)
@@ -82,6 +81,4 @@ test('关闭开关：回到 false 并重新拦截', async () => {
   assert.equal(r.ok, false)
 })
 
-test.after(() => {
-  try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ }
-})
+// Environment, effects and temporary files are cleaned by isolatePlugin().

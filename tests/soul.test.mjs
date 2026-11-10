@@ -94,10 +94,10 @@ test('四层人格文件齐全（SOUL / IDENTITY / USER / STATE）', () => {
 })
 
 test('会后人话会写进 USER 与 STATE（人格会长）', () => {
-  const at = src.indexOf('personaAutoUpdate && md && completer')
-  assert.ok(at > 0, '找不到人格自动更新')
-  // 会后更新块变长了（结构化提取 + markdown 追加），窗口要足够大
-  const seg = src.slice(at, at + 7000)
-  assert.match(seg, /appendPersonaSection\(personaDir, 'user'/, '应更新 USER')
-  assert.match(seg, /appendPersonaSection\(personaDir, 'state'/, '应更新 STATE')
+  // 画像沉淀已抽成独立模块（lib/postmeeting-persona.js），由会后管线调用
+  const persona = readFileSync(new URL('../lib/postmeeting-persona.js', import.meta.url), 'utf8')
+  assert.match(persona, /if \(!cfg\.personaAutoUpdate\)/, '应受 personaAutoUpdate 开关控制')
+  assert.match(persona, /appendPersonaSection\(personaDir,\s*'user'/, '应更新 USER')
+  assert.match(persona, /appendPersonaSection\(personaDir,\s*'state'/, '应更新 STATE')
+  assert.match(src, /updatePostMeetingPersona\(/, '会后管线要真的调用它')
 })

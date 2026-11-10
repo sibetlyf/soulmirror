@@ -1,3 +1,4 @@
+import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
@@ -11,15 +12,13 @@ import { join } from 'node:path'
  * 结果界面显示 Agent、后端认为发言关闭，叫了也不动。
  */
 const fakeHome = mkdtempSync(join(tmpdir(), 'sm-mode-'))
-process.env.SOULMIRROR_TEST = '1'
-process.env.USERPROFILE = fakeHome
-process.env.HOME = fakeHome
+isolatePlugin(fakeHome)
 
 const mod = await import('../index.js')
 const plugin = mod.default || mod
 
 const routes = []
-plugin.apply({
+applyIsolated(plugin, {
   tools: { register() {} },
   logger: { info() {}, warn() {}, error() {} },
   get: () => undefined,
@@ -66,4 +65,4 @@ test('直接开关发言，mode 也要跟着变', async () => {
   assert.equal(st2.body.mode, 'transcribe')
 })
 
-test.after(() => { try { rmSync(fakeHome, { recursive: true, force: true }) } catch { /* ignore */ } })
+// Environment, effects and temporary files are cleaned by isolatePlugin().
