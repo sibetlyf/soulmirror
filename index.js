@@ -59,6 +59,7 @@ import { createFinalizeRegistry, snapshotRun } from './lib/finalize-registry.js'
 import { createKeyStore, pickLegacyKeys, SLOTS as KEY_SLOTS } from './lib/credentials-bridge.js'
 import { buildMinutesTaskPrompt, writeMinutesSource, readMinutesResult, resetMinutesOutput, shouldUseBackgroundTask } from './lib/minutes-task.js'
 import { createProgress, describeProgress } from './lib/progress.js'
+import { buildPreflight } from './lib/preflight.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
 import { routeItem, readRules, renderRules } from './lib/tripartite.js'
@@ -230,7 +231,9 @@ export const Config = z.object({
   }).default({ x: 0.18, y: 0.28 }),
   /** 会话里出现会议链接/会议号就自动入会。 */
   autoJoin: z.object({
-    enabled: z.boolean().default(true),
+    // 默认关闭：检测到会议就录音即可，不必自动替你入会。
+    // 需要"贴链接自动入会"时在设置里单独打开。
+    enabled: z.boolean().default(false),
     /** 只在会话里出现链接时自动入（true）还是连会议号也自动入（false=都要）。 */
     urlOnly: z.boolean().default(false),
     /** 同一个会议多久内不重复自动入（毫秒）。 */
@@ -406,7 +409,7 @@ export function apply(ctx, config) {
     policy: config.policy || 'auto',
     autoWatch: config.autoWatch !== false,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
-    autoJoin: { enabled: true, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
+    autoJoin: { enabled: false, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
     autoCalibrate: config.autoCalibrate !== false,
     recalibrateThreshold: Number(config.recalibrateThreshold || 2),
     autoAppSelect: config.autoAppSelect !== false,
@@ -755,6 +758,19 @@ export function apply(ctx, config) {
         } catch (e) { out.tts.error = e.message }
         return json(200, out)
       }
+      if (req.method === 'GET' && sub === 'preflight') {
+        // 采集链路体检：说清"能不能转录、卡在哪、怎么修"
+        // ?net=1 会额外做一次 ASR 连通握手（默认不做，避免额外网络请求）
+        try {
+          const wantNet = /[?&]net=1/.test(req.url || '')
+          const env = await collectPreflightEnv({ probeNet: wantNet })
+          const report = buildPreflight(env)
+          lastPreflight = report
+          return json(200, { ok: report.ok, ...report })
+        } catch (e) {
+          return json(200, { ok: false, verdict: '体检失败：' + e.message, error: e.message })
+        }
+      }
       if (req.method === 'GET' && sub === 'status') {
         // 面板每秒轮询：探测结果缓存 15 秒，避免把 UI 拖到超时
         const nowMs = Date.now()
@@ -816,6 +832,8 @@ export function apply(ctx, config) {
           },
           minutes: { runs: minutesRuns, skipped: minutesKeyRuns },
           lastModelProbe,
+          // 采集链路体检（最近一次）：直接回答"为什么不转录"
+          lastPreflight,
           // 配置落点自查：独立环境里"保存了却读不到"多半是两个路径不一致
           config: (() => {
             try {
@@ -1638,6 +1656,61 @@ export function apply(ctx, config) {
   // 关键：装了插件 ≠ 允许它动电脑。只有用户显式开启（面板开关 / meeting_agent_start）
   // 之后，才允许自动采集、自动建会话、自动标定、自动入会这些会碰桌面的动作。
   let armed = false
+  /**
+   * 采集链路体检的输入。
+   *
+   * 为什么需要它：别人报"模型和设备都配对，会议开始却没转录"，
+   * 我本地却正常——差异全在机器侧（平台/桥接/端点/Key/网络）。
+   * 这里把可探测的事实收集起来，交给 lib/preflight.js 判 PASS/FAIL。
+   */
+  /** 最近一次采集体检结果（界面与 /status 可读） */
+  let lastPreflight = null
+
+  async function collectPreflightEnv({ probeNet = false } = {}) {
+    const env = {
+      platform: process.platform,
+      asrProvider: String(cfg.asr.provider || ''),
+      asrKey: resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key || '',
+      asrKeySource: keyInfo(cfg.asr).source,
+      lastCaptureError: session.lastError || '',
+      deviceCount: 0,
+      deviceName: session.deviceLabel || cfg.devices.capture || '',
+      meetingActive: false,
+    }
+    // 桥接：文件在不在、能不能列端点
+    try {
+      const dir = toolsDir()
+      const exe = join(dir, 'mbridge.exe')
+      env.bridgePresent = existsSync(exe)
+      if (env.bridgePresent) {
+        const r = await listDevices()
+        env.bridgeRuns = Array.isArray(r) && r.length > 0
+        env.deviceCount = (Array.isArray(r) ? r : []).filter((d) => d.flow === 'RENDER').length
+      } else {
+        env.bridgeRuns = false
+      }
+    } catch (e) {
+      env.bridgeRuns = false
+      env.lastCaptureError = env.lastCaptureError || ('桥接探测失败：' + e.message)
+    }
+    // 会议窗口
+    try {
+      const wins = await listWindows()
+      const app = await detectMeetingApp().catch(() => null)
+      env.meetingActive = !!(app && await meetingActive(app, wins))
+    } catch { /* ignore */ }
+    // 网络：只有显式要求时才测（会发一次 WS 握手）
+    env.asrReachable = null
+    if (probeNet) {
+      try {
+        const r = await probeAsrConn()
+        env.asrReachable = !!r.ok
+        if (!r.ok) env.asrError = r.error || ''
+      } catch (e) { env.asrReachable = false; env.asrError = e.message }
+    }
+    return env
+  }
+
   const isArmed = () => armed === true && cfg.enabled === true
 
 
@@ -5593,6 +5666,26 @@ export function apply(ctx, config) {
 let noMeetingTicks = 0
 const meetingWatchdog = setInterval(async () => {
   try {
+    // 采集在跑但迟迟没有转写：自动体检一次，把原因写进状态与日志
+    // （别人的机器上"没内容"多半是平台/桥接/端点/Key 的问题，不能让人靠猜）
+    if (session.capturing) {
+      const lastLine = session.transcript && session.transcript.length
+        ? Date.parse((session.transcript[session.transcript.length - 1] || {}).t || "") || 0
+        : 0
+      const idleSec = lastLine ? Math.round((Date.now() - lastLine) / 1000) : Math.round((Date.now() - (session.capturingSince || Date.now())) / 1000)
+      if (idleSec >= 90 && !lastPreflight) {
+        try {
+          const env = await collectPreflightEnv({ probeNet: true })
+          lastPreflight = buildPreflight(env)
+          if (!lastPreflight.ok) {
+            logger?.warn?.("[soulmirror] 采集了 " + idleSec + " 秒仍无转写 → " + lastPreflight.verdict)
+            session.lastError = lastPreflight.verdict
+          } else {
+            logger?.info?.("[soulmirror] 采集 " + idleSec + " 秒无转写，但体检全绿：可能只是没人说话")
+          }
+        } catch { /* 体检失败不影响采集 */ }
+      }
+    }
     if (!session.capturing && !session.running) { noMeetingTicks = 0; return }
     const wins = await listWindows()
     const apps = activeApps()
