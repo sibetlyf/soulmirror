@@ -340,8 +340,9 @@ const OUT = (extra = {}) => ({
 export function apply(ctx, config) {
   const logger = ctx.logger
   const cfg = {
-    // 总开关：默认关。必须在面板里打开之后，各功能才工作
-    enabled: config.enabled === true,
+    // 总开关：默认开——装上就能用，检测到会议自动录音。
+    // 只有用户显式关过（config.enabled === false）才保持关闭。
+    enabled: config.enabled !== false,
     appPath: config.appPath || '',
     windowTitle: config.windowTitle || '腾讯会议',
     windowClass: config.windowClass || 'VideoMainWindow|FloatSpeakingWnd|MeetingMainWindow|MeetingView',
@@ -1411,12 +1412,16 @@ export function apply(ctx, config) {
           cfg.autoWatch = true
           if (!lifecycle.timer) lifecycle.start()
           logger?.info?.('[soulmirror] 已开启会议功能（armed），允许自动操作')
-        } else if (action === 'stop') {
-          // 关闭：立刻解除，停止采集与所有自动动作
+        } else if (action === 'off') {
+          // 真正关闭会议功能（设置里的开关）：解除 armed、停止监听、持久化关闭
           armed = false
           cfg.enabled = false
           cfg.autoWatch = false
           lifecycle.stop()
+        } else if (action === 'stop') {
+          // 结束这场录音：只停采集 + 开始会后整理。
+          // 不再顺手关掉总开关——以前那样会把 enabled=false 持久化，
+          // 于是重启/重装后插件永远"未启用"，用户感觉"每次安装都不打开"。
           const stoppedDir = session.dir || ''
           const hadAudio = !!session.capturing
           logger?.info?.('[soulmirror] 已关闭会议功能（disarmed），不再自动操作')
