@@ -449,13 +449,13 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "97302a52624e6d7f4887e47d81471f3acbc0882d82b2c984c7b57377203aec72",
+      "sha256": "860b89fcec25353cd6df4e225f67d7191396cf5c1d5ec3cd994ea87568f94c8e",
       "bytes": 14608
     },
     {
       "path": "package.json",
-      "sha256": "fab305ba0642bf4323e268724c6a0d240275af1d0faadd5a03f0fef794e69d75",
-      "bytes": 1937
+      "sha256": "0bf19729f00fd94241eac6c3f76da7ff3cd675c3c65bb53cc15f8f04c15b788c",
+      "bytes": 1841
     },
     {
       "path": "README.md",
