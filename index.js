@@ -1412,6 +1412,30 @@ export function apply(ctx, config) {
         const bufA = []
         for await (const chunk of req) bufA.push(chunk)
         const action = JSON.parse(Buffer.concat(bufA).toString('utf8') || '{}').action
+        if (action === 'record') {
+          // 用户点「开始录音」：不仅允许自动操作，还要**立刻**开始采集。
+          // 以前 start 只做 arm，没有会议窗口时什么都不会发生 —— 看起来像按钮没反应。
+          armed = true
+          cfg.enabled = true
+          cfg.autoWatch = true
+          if (!lifecycle.timer) lifecycle.start()
+          // 清掉上一次的失败原因，避免刚开录就顶着"上次采集错误"
+          session.lastError = ''
+          try {
+            if (!session.capturing) await session.startCapture('manual')
+          } catch (e) {
+            logger?.warn?.('[soulmirror] 手动开始采集失败：' + e.message)
+            session.lastError = '采集启动失败：' + e.message
+          }
+          try { savePersisted({ autoWatch: cfg.autoWatch, enabled: cfg.enabled }) } catch { /* ignore */ }
+          logger?.info?.('[soulmirror] 手动开始录音（enabled=true armed=true）')
+          return json(200, {
+            ok: true, enabled: true, armed: true, capturing: !!session.capturing,
+            error: session.lastError || '',
+            auto: !!(cfg.autoWatch && lifecycle.timer),
+            lifecycle: lifecycle.snapshot(),
+          })
+        }
         if (action === 'start') {
           // 用户明确开启：这时才允许自动采集/入会/标定
           armed = true

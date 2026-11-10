@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "index.js",
-      "sha256": "69639dce49011099547df0d1171bc7cdab703c2e649ac3476ff2d39497ab917c",
-      "bytes": 341518
+      "sha256": "55a8ec5cac359ab1ea7f5edaac54e9308581c7a87f2f01d7c193c94325375ab4",
+      "bytes": 342783
     },
     {
       "path": "lib/action-items.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "0b6e46aa0e45375628883de7828234fe64bbf318b64084b7e17027cd881faf7f",
-      "bytes": 149263
+      "sha256": "a9abe7966b885048b331eac6e4c058ec30756d4af5fed1b73eafefff7ffbfc40",
+      "bytes": 150359
     },
     {
       "path": "lib/context-snapshot.js",
@@ -179,8 +179,8 @@
     },
     {
       "path": "lib/issues.js",
-      "sha256": "13c1e812f9c10350a015d20f40c4ac5afc8da39f7129fd5b20b2aabd28c94adc",
-      "bytes": 7943
+      "sha256": "59e33e9650fec6e919d861872c15b9de21f45006df5270497157bad9abb7120b",
+      "bytes": 8904
     },
     {
       "path": "lib/join-guard.js",
@@ -304,8 +304,8 @@
     },
     {
       "path": "lib/preflight.js",
-      "sha256": "729f9ec87a8834f0a1e369427c7793ca24dffdab8040931e7c71aed554035cd7",
-      "bytes": 5888
+      "sha256": "c5def323c078464011eb5fb7fbfbbc68a8bc1da3ab5a6edb61fc3c7a8f6b60de",
+      "bytes": 6565
     },
     {
       "path": "lib/proc.js",
@@ -449,7 +449,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "215fe0f4bcdc3098b07b4f81d5552b2bd2a9d36295cc533301ab5748981c689a",
+      "sha256": "e8e22fe65ccb359fc7a02178d39756933ebe7572eb343395a9cf474e2c8be3b3",
       "bytes": 14608
     },
     {
