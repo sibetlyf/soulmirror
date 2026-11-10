@@ -5254,7 +5254,13 @@ export function apply(ctx, config) {
       } else if (off.error) {
         results.offline = '跳过：' + off.error
       }
-    } catch { /* 离线失败不影响纪要 */ }
+    } catch (e) {
+      // 不能静默：否则界面会永远停在"云端识别中 79%"，而实际早已进入下一步
+      const why = '离线重转写异常：' + (e && e.message ? e.message : String(e))
+      lastMinutesFallbackReason = lastMinutesFallbackReason || why
+      logger?.warn?.('[soulmirror] ' + why)
+      setPostMeeting({ phase: 'minutes', error: '', dir: runDir, progressText: why.slice(0, 80) })
+    }
 
 
     // 2) 纪要：到这里"非流式转写"已经跑完（成功用它的结果，失败才回退实时转写）
@@ -5282,6 +5288,16 @@ export function apply(ctx, config) {
         if (runDir) {
           const r = await persistMinutesFile(join(runDir, 'minutes.md'), md)
           results.minutes = r.path
+          // 收尾：否则界面停在最后一个阶段，用户以为还在跑
+          setPostMeeting({
+            phase: 'done',
+            minutesPath: r.path,
+            progressText: '整理完成 · 来源 ' + (results.minutesSource || 'unknown'),
+            stage: 'done',
+            stageLabel: '整理完成',
+            percent: 100,
+            detail: '',
+          })
           if (r.reason) logger?.info?.('[soulmirror] ' + r.reason)
         }
         const ws = ensureMeetingWorkspace()
