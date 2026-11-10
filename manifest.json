@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "index.js",
-      "sha256": "d4ad266566f5bafbf444bd5b8a0c87a393db28493ddac9391464a36af181ce4e",
-      "bytes": 340624
+      "sha256": "69639dce49011099547df0d1171bc7cdab703c2e649ac3476ff2d39497ab917c",
+      "bytes": 341518
     },
     {
       "path": "lib/action-items.js",
@@ -424,8 +424,8 @@
     },
     {
       "path": "lib/upgrade.js",
-      "sha256": "761e5c976f063a09f9bae088fc1aa2dba2899419c27900e11e58c860a977d5d8",
-      "bytes": 5689
+      "sha256": "3401dfd3206fc57f690e16f058d3b5f1aa4d681d6297e3c63717f7e1cd0c7e57",
+      "bytes": 7803
     },
     {
       "path": "lib/vcard.js",
@@ -449,7 +449,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "667fa0ac795f2bce80b5a5aebb78e79e0f60ae462d17da62ce7d12ea53dc1b01",
+      "sha256": "4e1c4343ed1facc6107caf469ea444c37367eaff1205fb4116610c5e34b08627",
       "bytes": 14608
     },
     {

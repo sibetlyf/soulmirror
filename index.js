@@ -60,7 +60,7 @@ import { createKeyStore, pickLegacyKeys, SLOTS as KEY_SLOTS } from './lib/creden
 import { buildMinutesTaskPrompt, writeMinutesSource, readMinutesResult, resetMinutesOutput, shouldUseBackgroundTask } from './lib/minutes-task.js'
 import { createProgress, describeProgress } from './lib/progress.js'
 import { buildPreflight } from './lib/preflight.js'
-import { parseManifest, planUpgrade, applyUpgrade, describeUpgrade, sha256Hex, UPGRADE_REPO, UPGRADE_BRANCH } from './lib/upgrade.js'
+import { parseManifest, detectInstallKind, canUpgradeInPlace, describeInstallKind, planUpgrade, applyUpgrade, describeUpgrade, sha256Hex, UPGRADE_REPO, UPGRADE_BRANCH } from './lib/upgrade.js'
 import { collectIssues, topIssue, describeIssues } from './lib/issues.js'
 import { readLogText, linesToText } from './lib/transcript-log.js'
 import { mergeProfile, renderProfile, emptyProfile } from './lib/persona-growth.js'
@@ -232,6 +232,11 @@ export const Config = z.object({
     y: z.number().default(0.28),
   }).default({ x: 0.18, y: 0.28 }),
   /** 会话里出现会议链接/会议号就自动入会。 */
+  /** 增量升级的源：默认用官方仓库；fork / 私有部署可改。 */
+  upgrade: z.object({
+    repo: z.string().default(''),
+    branch: z.string().default(''),
+  }),
   /** 统一百炼 Key：识别 / 语音 / 模型都用它。各槽位仍可单独覆盖。 */
   keys: z.object({
     apiKey: z.string().default(''),
@@ -417,6 +422,7 @@ export function apply(ctx, config) {
     autoWatch: config.autoWatch !== false,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
     keys: { apiKey: '', ...(config.keys || {}) },
+  upgrade: { repo: String(config.upgrade?.repo || ''), branch: String(config.upgrade?.branch || '') },
   autoJoin: { enabled: false, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
     autoCalibrate: config.autoCalibrate !== false,
     recalibrateThreshold: Number(config.recalibrateThreshold || 2),
@@ -6356,9 +6362,16 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
         return { ok: r.ok, result: (r.ok ? '编译完成：' + r.path : '失败：' + (r.error || r.reason || '')) + '\n\n' + formatEnv(detectEnv()) }
       }
       if (a.action === 'upgrade') {
+        // 安装形态决定"能不能原地升级"：node_modules 里不许直接覆盖
+        const kind = detectInstallKind(pluginDir, { exists: existsSync })
+        if (!canUpgradeInPlace(kind) && a.force !== true) {
+          return { ok: false, result: describeInstallKind(kind, pluginDir) }
+        }
         // 增量升级：只替换 sha256 变了的文件；配置与会议记录一律不碰
         try {
-          const base = 'https://raw.githubusercontent.com/' + UPGRADE_REPO + '/' + UPGRADE_BRANCH + '/'
+          const repo = String((cfg.upgrade && cfg.upgrade.repo) || process.env.SOULMIRROR_UPGRADE_REPO || UPGRADE_REPO)
+              const branch = String((cfg.upgrade && cfg.upgrade.branch) || process.env.SOULMIRROR_UPGRADE_BRANCH || UPGRADE_BRANCH)
+              const base = 'https://raw.githubusercontent.com/' + repo + '/' + branch + '/'
           const getBuf = async (rel) => {
             const res = await fetch(base + rel + '?t=' + Date.now())
             if (!res.ok) throw new Error(rel + ' → HTTP ' + res.status)
