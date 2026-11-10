@@ -15,7 +15,7 @@ const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8'
 test('后端有 action=record：立刻开始采集，而不只是 arm', () => {
   const at = src.indexOf("if (action === 'record') {")
   assert.ok(at > 0, '应有 record 动作')
-  const seg = src.slice(at, at + 900)
+  const seg = src.slice(at, at + 1600)
   assert.match(seg, /session\.startCapture\(/, '必须真的启动采集')
   assert.match(seg, /armed = true/, '应同时 arm')
   assert.match(seg, /cfg\.enabled = true/, '应打开总开关')

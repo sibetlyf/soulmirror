@@ -851,7 +851,7 @@ export function apply(ctx, config) {
           // 采集链路体检（最近一次）：直接回答"为什么不转录"
           lastPreflight,
           // 宿主代码是否比运行进程新（true = 改了没重启，界面会提示重启）
-          host: { bootedAt: BOOT_AT, codeMtime: CODE_MTIME, stale: HOST_STALE },
+          host: hostState(),
           // 当前问题清单：第一条就是最该处理的（界面横幅与排查都用它）
           issues: (() => {
             try {
@@ -859,7 +859,7 @@ export function apply(ctx, config) {
                 ? Date.parse((session.transcript[session.transcript.length - 1] || {}).t || '') || 0
                 : 0
               return collectIssues({
-                host: { stale: HOST_STALE, bootedAt: BOOT_AT, codeMtime: CODE_MTIME },
+                host: hostState(),
                 preflight: lastPreflight,
                 capturing: !!session.capturing,
                 transcriptLines: (session.transcript || []).length,
@@ -1422,7 +1422,10 @@ export function apply(ctx, config) {
           // 清掉上一次的失败原因，避免刚开录就顶着"上次采集错误"
           session.lastError = ''
           try {
-            if (!session.capturing) await session.startCapture('manual')
+            if (!session.capturing) {
+              const r = await session.startCapture('manual')
+              if (r && r.ok === false) session.lastError = r.error || session.lastError
+            }
           } catch (e) {
             logger?.warn?.('[soulmirror] 手动开始采集失败：' + e.message)
             session.lastError = '采集启动失败：' + e.message
@@ -1731,7 +1734,7 @@ export function apply(ctx, config) {
     } catch { spkCache = { name: spkCache.name, at: now } }
     return spkCache.name
   }
-  const session = new MeetingSession(cfg, logger)
+  const session = new MeetingSession(cfg, logger, { getKey: () => keyFor(cfg.asr, 'asr') })
 
   // ── 是否"已开启会议功能" ─────────────────────────────────────────────
   // 关键：装了插件 ≠ 允许它动电脑。只有用户显式开启（面板开关 / meeting_agent_start）
@@ -6728,6 +6731,13 @@ let CODE_MTIME = 0
 try {
   CODE_MTIME = statSync(fileURLToPath(import.meta.url)).mtimeMs
 } catch { /* ignore */ }
-const HOST_STALE = CODE_MTIME > BOOT_AT + 3000   // 留 3 秒容差，避免误报
+// 运行期间也要能发现"代码已更新但没重启"：只在加载时比较一次的话，
+// 部署后 stale 永远是 false，界面不会提示重启（用户看到新界面 + 旧后端）。
+const CODE_FILE = (() => { try { return fileURLToPath(import.meta.url) } catch { return '' } })()
+function hostState() {
+  let m = CODE_MTIME
+  try { if (CODE_FILE) m = statSync(CODE_FILE).mtimeMs } catch { /* ignore */ }
+  return { bootedAt: BOOT_AT, codeMtime: m, stale: m > BOOT_AT + 3000 }
+}
 
 export default { name, inject, Config, apply }

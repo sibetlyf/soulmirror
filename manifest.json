@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "index.js",
-      "sha256": "55a8ec5cac359ab1ea7f5edaac54e9308581c7a87f2f01d7c193c94325375ab4",
-      "bytes": 342783
+      "sha256": "8cf086ff52a2b077bfd2179b97cda00b688190f9c2a0d892b8aef8fe98bbca0b",
+      "bytes": 343265
     },
     {
       "path": "lib/action-items.js",
@@ -359,8 +359,8 @@
     },
     {
       "path": "lib/session.js",
-      "sha256": "0e5a5bcd7661cc2a52312cd26d4c37d32067108bee2ff45e13ca16f4016e66ca",
-      "bytes": 34435
+      "sha256": "5c8ea0a70082cc80a8a3907aa088aa7e1d9c42c5b2d5d795c3e3cd268e9b5d4f",
+      "bytes": 35455
     },
     {
       "path": "lib/setup-rows.js",
@@ -449,7 +449,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "e8e22fe65ccb359fc7a02178d39756933ebe7572eb343395a9cf474e2c8be3b3",
+      "sha256": "815d098189698247b4ba4850772f0da9577a380b31d8271b0e12f72ece02e387",
       "bytes": 14608
     },
     {
