@@ -8,6 +8,7 @@
 |---|---|
 | [quickstart.md](quickstart.md) | 第一次跑通 |
 | [install.md](install.md) | 从零装起来 |
+| [upgrade.md](upgrade.md) | 升级：增量、不同安装方式 |
 | [ui.md](ui.md) | 找不到按钮、小窗大页面区别 |
 | [config.md](config.md) | 三个开关、密钥、配置项 |
 | [meeting-apps.md](meeting-apps.md) | 识别不到会议软件、入会失败 |

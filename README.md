@@ -107,14 +107,12 @@
 | `dsh-pet` | 桌面上的那个小家伙 | 没有宠物，主功能不受影响 |
 | `dsh-computer-use` | 入会坐标自愈标定 | 入会失败只报错，不自动重试 |
 
-**可选插件没装时，对应功能会明确拒绝并提示安装，不会静默降级。**
-面板「安装体检」里可以一键安装缺失的插件。
+**可选插件没装时，对应功能会明确拒绝并提示安装，不会静默降级**；面板「安装体检」可一键安装。
 
 ### 环境要求
 
 - Node.js 20+（跟随 DSH 版本要求）
-- 零第三方原生依赖：`mbridge.exe` 由系统自带 `csc` 编译，**已随包分发**
-- 配置与记录只写在 DSH 实例目录下，不污染用户其它位置
+- 零第三方原生依赖：`mbridge.exe` 随包分发（也可用系统 `csc` 重编）
 
 完整清单：[docs/requirements.md](docs/requirements.md)
 
@@ -124,12 +122,14 @@
 
 ```bash
 dsh plugin --profile <你的 profile> add <本插件>
-# 重启 dsh web → 侧栏底部「会议」→ 打开小窗
+# 重启 dsh web → 侧栏底部「🎙 会议」→ 右侧展开会议助手侧栏
 ```
 
-然后：填 Key → 点「测模型」确认连通 → 开会。
+然后：填一次百炼 Key（识别/语音/模型共用）→ 点「测模型」确认连通 → 开会。
+**升级不用卸载重装**：`soul_setup { action: "upgrade" }` 只替换 sha256 变了的文件，
+配置与会议记录不动；link / git / node_modules 三种安装方式的差异见 [docs/upgrade.md](docs/upgrade.md)。
 
-安装细节：[docs/install.md](docs/install.md) · 最短路径：[docs/quickstart.md](docs/quickstart.md)
+安装细节 [docs/install.md](docs/install.md) · 最短路径 [docs/quickstart.md](docs/quickstart.md)
 
 ---
 
