@@ -24,14 +24,12 @@ test('汇总输入覆盖关键故障源', () => {
   }
 })
 
-test('大页面与小窗都显示问题横幅，且在进度条前面', () => {
+test('页面显示问题横幅，且在进度条前面', () => {
   assert.match(client, /function IssueBanner\(props\)/, '应有横幅组件')
-  const big = client.slice(client.indexOf('function MeetingPage('), client.indexOf('function MeetingPage(') + 20000)
-  assert.match(big, /h\(IssueBanner, null\)/, '大页面应有横幅')
-  const small = client.slice(client.indexOf('function CompactPanel('), client.indexOf('function CompactPanel(') + 16000)
-  assert.match(small, /h\(IssueBanner, null\)/, '小窗应有横幅')
-  // 顺序：横幅在进度条之前
-  assert.ok(big.indexOf('h(IssueBanner, null)') < big.indexOf('h(ProgressBar, null)'), '大页面横幅应在进度条之前')
+  const at = client.indexOf('function MeetingPage(')
+  const big = client.slice(at, at + 20000)
+  assert.match(big, /h\(IssueBanner, null\)/, '页面应有横幅')
+  assert.ok(big.indexOf('h(IssueBanner, null)') < big.indexOf('h(ProgressBar, null)'), '横幅应在进度条之前')
 })
 
 test('横幅可展开全部条目并复制排查文本', () => {

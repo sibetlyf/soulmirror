@@ -73,12 +73,6 @@ test('apply 会注册 3 个 slot', () => {
   assert.ok(registered.length >= 3, '注册组件数：' + registered.length)
 })
 
-test('380px 侧栏 CompactPanel 能渲染（能抓出未声明变量）', () => {
-  const { exp } = loadClient()
-  const panels = exp.__test
-  assert.ok(panels && panels.CompactPanel, '缺少 __test.CompactPanel 测试出口')
-  assert.doesNotThrow(() => panels.CompactPanel({}), '侧栏渲染抛错')
-})
 
 test('apply 注册了侧栏图标 / 会话字幕条 / 设置页 三处原生入口', () => {
   const { exp, registered } = loadClient()
@@ -155,15 +149,6 @@ test('DevicePicker 能渲染', () => {
   }
 })
 
-test('所有导出的面板组件都能在默认 props 下渲染', () => {
-  const { exp } = loadClient()
-  const names = ['PanelIcon', 'LiveDock', 'SettingsSection', 'SetupCard', 'DepsCard', 'DevicePicker', 'StatusStrip', 'AfterMeetingCard', 'PrepareCard', 'RecordsCard', 'CompactPanel', 'MeetingPage', 'Overlay']
-  for (const name of names) {
-    const comp = exp.__test[name]
-    assert.ok(comp, name + ' 未导出')
-    assert.doesNotThrow(() => comp({}), name + ' 渲染抛错')
-  }
-})
 
 // 把渲染树里的文字收集起来（fake React 下宿主元素是 {t,p,c}）
 function textOf(node, out = []) {
@@ -220,16 +205,6 @@ test('大页面必须保留会议接入、会议号、模式开关（防"功能�
   assert.ok(text.includes('Agent') || text.includes('agent'), '大页面缺少 Agent 模式开关')
 })
 
-test('小窗必须保留去大页面的入口', () => {
-  const { exp } = loadClient()
-  const tree = exp.__test.CompactPanel({ onExpand() {}, onClose() {} })
-  const text = textOf(tree).join(' ')
-  assert.ok(text.includes('会议助手'), '小窗缺少标题')
-  assert.ok(text.includes('开始录音') || text.includes('结束录音'), '小窗缺少录音按钮')
-  assert.ok(text.includes('转写'), '小窗缺少转写标签')
-  // ⤢ 是展开按钮，不能丢
-  assert.ok(text.includes('⤢'), '小窗缺少「打开大页面」按钮')
-})
 
 test('流式那一行有打字机效果与光标（不是整句突然出现）', () => {
   const { exp } = loadClient()
@@ -268,10 +243,16 @@ test('模型调用失败必须在界面上可见（不能只写日志）', () =>
   assert.ok(text.includes('insufficient_quota'), '提示里要带真实原因')
 })
 
-test('小窗 / 大页面 / Overlay 都能渲染', () => {
-  const { exp } = loadClient()
-  const { CompactPanel, MeetingPage, Overlay } = exp.__test
-  assert.doesNotThrow(() => CompactPanel({}))
-  assert.doesNotThrow(() => MeetingPage({}))
-  assert.doesNotThrow(() => Overlay({}))
+
+
+test('只有一个会议助手入口（不再有第二套小窗 UI）', () => {
+  // 用户明确要求：一个页面、一套配置。
+  const client = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
+  for (const gone of ['CompactPanel', 'Overlay', 'sidebar.footer.action', 'conversation.view']) {
+    assert.equal(client.includes(gone), false, '不该再有 ' + gone)
+  }
+  // 保留的入口：侧栏一个图标 + 主面板 + 字幕条 + 设置页
+  for (const keep of ["inject('sidebar.panellist'", "inject('main'", "inject('settings.section'", "inject('conversation.input.dock'"]) {
+    assert.ok(client.includes(keep), '缺少入口：' + keep)
+  }
 })

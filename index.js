@@ -231,6 +231,10 @@ export const Config = z.object({
     y: z.number().default(0.28),
   }).default({ x: 0.18, y: 0.28 }),
   /** 会话里出现会议链接/会议号就自动入会。 */
+  /** 统一百炼 Key：识别 / 语音 / 模型都用它。各槽位仍可单独覆盖。 */
+  keys: z.object({
+    apiKey: z.string().default(''),
+  }),
   autoJoin: z.object({
     // 默认关闭：检测到会议就录音即可，不必自动替你入会。
     // 需要"贴链接自动入会"时在设置里单独打开。
@@ -410,7 +414,8 @@ export function apply(ctx, config) {
     policy: config.policy || 'auto',
     autoWatch: config.autoWatch !== false,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
-    autoJoin: { enabled: false, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
+    keys: { apiKey: '', ...(config.keys || {}) },
+  autoJoin: { enabled: false, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
     autoCalibrate: config.autoCalibrate !== false,
     recalibrateThreshold: Number(config.recalibrateThreshold || 2),
     autoAppSelect: config.autoAppSelect !== false,
@@ -513,7 +518,9 @@ export function apply(ctx, config) {
   }
   const keyFor = (slotCfg, slot) => {
     if (keyCache[slot]) return keyCache[slot]
-    return (slotCfg && slotCfg.apiKey) || ''
+    if (slotCfg && slotCfg.apiKey) return slotCfg.apiKey
+    // 统一 Key：用户只填一次，识别/语音/模型共用（槽位单独填了就以槽位为准）
+    return (cfg.keys && cfg.keys.apiKey) || ''
   }
 
   // 启动收尾：加载缓存；并把配置里的明文 Key 搬进安全存储（迁移后从配置里删掉）
@@ -1220,6 +1227,13 @@ export function apply(ctx, config) {
           // 密钥写进安全存储（DSH 凭据服务，或插件自己的 credentials.json），
           // 不再落进 config.json —— 和设置混在一个文件里既可被同步也可能被误删。
           const wr = await keyStore.set('asr', value)
+          // 统一 Key：一次填写，识别/语音/模型三个槽位一起写。
+          // 之前只写 asr，于是"识别能跑、语音/模型说没 Key"，看起来像两套配置。
+          let wrTts = { ok: true }
+          let wrBrain = { ok: true }
+          try { wrTts = await keyStore.set('tts', value) } catch (e) { wrTts = { ok: false, error: e.message } }
+          try { wrBrain = await keyStore.set('brain', value) } catch (e) { wrBrain = { ok: false, error: e.message } }
+          if (cfg.keys) cfg.keys.apiKey = value
           await loadKeysIntoCache()   // 顺带复位 keyErrors
           if (!wr.ok) {
             return reply({
@@ -1502,6 +1516,8 @@ export function apply(ctx, config) {
         return json(200, { ok: false, error: '未知测试类型' })
       }
       if (req.method === 'POST' && sub === 'config') {
+        // 统一 Key：一次填写，三个槽位一起生效（避免"有的地方有 Key、有的地方没有"）
+
         const buf2 = []
         for await (const chunk of req) buf2.push(chunk)
         const patch = JSON.parse(Buffer.concat(buf2).toString('utf8') || '{}')

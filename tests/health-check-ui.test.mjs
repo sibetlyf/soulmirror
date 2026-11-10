@@ -28,13 +28,12 @@ test('体检结果直接显示在页面上（不用去翻日志）', () => {
   assert.match(seg, /体检请求失败/, '请求失败也要说人话')
 })
 
-test('大页面与小窗都有体检入口', () => {
-  for (const fn of ['function MeetingPage(', 'function CompactPanel(']) {
-    const at = client.indexOf(fn)
-    assert.ok(at > 0, '找不到 ' + fn)
-    const seg = client.slice(at, at + 20000)
-    assert.match(seg, /h\(HealthCheck, null\)/, fn + ' 应有体检按钮')
-  }
+test('页面顶部有体检入口（单一 UI，不再有第二套小窗）', () => {
+  const at = client.indexOf('function MeetingPage(')
+  assert.ok(at > 0, '找不到 MeetingPage')
+  const seg = client.slice(at, at + 20000)
+  assert.match(seg, /h\(HealthCheck, null\)/, '主页面应有体检按钮')
+  assert.equal(client.includes('CompactPanel'), false, '小窗 UI 已移除')
 })
 
 test('后端 preflight 路由不因查询参数失配（?net=1 也要命中）', () => {

@@ -21,10 +21,9 @@ test('大页面渲染 ProgressBar', () => {
   assert.match(seg, /h\(ProgressBar, null\)/, '大页面必须显示进度条')
 })
 
-test('小窗渲染 ProgressBar', () => {
-  const at = client.indexOf('function CompactPanel(')
-  const seg = client.slice(at, at + 16000)
-  assert.match(seg, /h\(ProgressBar, null\)/, '小窗必须显示进度条')
+test('只有一个页面在渲染进度条（不再有第二套 UI）', () => {
+  const count = (client.match(/h\(ProgressBar, null\)/g) || []).length
+  assert.equal(count, 1, '进度条应只在主页面渲染一次，实际 ' + count + ' 处')
 })
 
 test('会后整理进行中时显示阶段/百分比/耗时', () => {
