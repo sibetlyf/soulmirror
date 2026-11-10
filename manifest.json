@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "94a86818485b1204dfd189f82e94d54e6865f7f667fa9bc130f92ec8a9b50e4c",
-      "bytes": 123319
+      "sha256": "79f3566d8ed1f353028c953207138f7948217cd86cbf27db1d8c05de25ff4ecf",
+      "bytes": 123777
     },
     {
       "path": "lib/context-snapshot.js",
@@ -474,7 +474,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "382426a0b885c4a0440f3c7bf1cc084dc28ac0c4d0a433481510198276aa2632",
+      "sha256": "8be19cc50f457ae850c2702601efa87650feb2a9f39e4909284728de5848371c",
       "bytes": 15377
     },
     {
