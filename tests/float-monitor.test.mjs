@@ -54,9 +54,17 @@ test('悬浮窗可关闭，且下一场会自动恢复', () => {
   assert.match(body, /if \(!capturing && !running\) setClosed\(false\)/, '结束后复位，下一场自动出现')
 })
 
-test('悬浮窗只在会议中或整理中出现（平时不打扰）', () => {
+test('悬浮窗始终可见（未启用时也显示，否则用户"没看到"）', () => {
   const body = floatBody()
-  assert.match(body, /if \(!capturing && !running\) return null/, '空闲时不渲染')
+  // 只在用户主动关闭时不渲染，其余情况都要在
+  assert.match(body, /if \(closed\) return null/, '关闭后不渲染')
+  assert.equal(/if \(!capturing && !running\) return null/.test(body), false,
+    '不该因为没在开会就完全消失（用户会以为插件坏了）')
+})
+
+test('未启用时显示"去设置开启"，而不是空白', () => {
+  const body = floatBody()
+  assert.match(body, /未启用 · 去设置开启/, '要明确说明未启用')
 })
 
 test('入口仍是 4 个（悬浮窗不是额外页面入口）', () => {
