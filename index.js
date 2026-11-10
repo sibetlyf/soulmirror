@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url'
 
 const execFileAsync = promisify(execFile)
 
-import { bridge, ensureBridge, listDevices, toolsDir, micUsage, defaultRenderDevice, meetingMicActive } from './lib/bridge.js'
+import { bridge, ensureBridge, listDevices, toolsDir, micUsage, defaultRenderDevice, meetingMicActive, bridgeExe } from './lib/bridge.js'
 import {
   listWindows, pickMeetingWindows, dump, focus, click, setText, pressKey, typeText,
   ensureApp, resolveAppPath, setWindowSelector, toggleMic, currentSpeaker, clickXY, clickRatio, clientRect, shotWindow,
@@ -1704,10 +1704,10 @@ export function apply(ctx, config) {
       meetingActive: false,
     }
     // 桥接：文件在不在、能不能列端点
+    // 注意：bridgeExe 是现成常量（toolsDir 也是常量，别当函数调）。
+    // 之前写成 toolsDir() 抛 TypeError 被 catch 吞掉，体检就一直报"文件不存在"。
     try {
-      const dir = toolsDir()
-      const exe = join(dir, 'mbridge.exe')
-      env.bridgePresent = existsSync(exe)
+      env.bridgePresent = existsSync(bridgeExe)
       if (env.bridgePresent) {
         const r = await listDevices()
         env.bridgeRuns = Array.isArray(r) && r.length > 0
@@ -1717,6 +1717,8 @@ export function apply(ctx, config) {
       }
     } catch (e) {
       env.bridgeRuns = false
+      // 文件明明在却列不出端点 → 这是"跑不起来"，不要误报成"文件不存在"
+      env.bridgePresent = existsSync(bridgeExe)
       env.lastCaptureError = env.lastCaptureError || ('桥接探测失败：' + e.message)
     }
     // 会议窗口
