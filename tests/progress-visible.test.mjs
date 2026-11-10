@@ -21,9 +21,18 @@ test('大页面渲染 ProgressBar', () => {
   assert.match(seg, /h\(ProgressBar, null\)/, '大页面必须显示进度条')
 })
 
-test('只有一个页面在渲染进度条（不再有第二套 UI）', () => {
+test('进度条只出现在主页面与悬浮监视窗（没有第三套 UI）', () => {
   const count = (client.match(/h\(ProgressBar, null\)/g) || []).length
-  assert.equal(count, 1, '进度条应只在主页面渲染一次，实际 ' + count + ' 处')
+  // 主页面 1 处 + 悬浮窗 1 处；多出来就说明又长了第三套 UI
+  assert.equal(count, 2, '进度条应只有主页面与悬浮窗两处，实际 ' + count + ' 处')
+
+  const page = client.slice(client.indexOf('function MeetingPage('), client.indexOf('function MeetingPage(') + 20000)
+  assert.match(page, /h\(ProgressBar, null\)/, '主页面应有进度条')
+
+  const floatAt = client.indexOf('function FloatPanel()')
+  assert.ok(floatAt > 0, '应有悬浮监视窗')
+  const floatSeg = client.slice(floatAt, floatAt + 2600)
+  assert.match(floatSeg, /h\(ProgressBar, null\)/, '悬浮窗应有进度条')
 })
 
 test('会后整理进行中时显示阶段/百分比/耗时', () => {
