@@ -31,7 +31,10 @@ test('进度条只出现在主页面与悬浮监视窗（没有第三套 UI）',
 
   const floatAt = client.indexOf('function FloatPanel()')
   assert.ok(floatAt > 0, '应有悬浮监视窗')
-  const floatSeg = client.slice(floatAt, floatAt + 2600)
+  // 悬浮窗函数体：到下一个同级 function 声明为止（固定长度会截断）
+  const rest = client.slice(floatAt + 10)
+  const next = rest.search(/\n {4}function [A-Z]/)
+  const floatSeg = client.slice(floatAt, next > 0 ? floatAt + 10 + next : client.length)
   assert.match(floatSeg, /h\(ProgressBar, null\)/, '悬浮窗应有进度条')
 })
 

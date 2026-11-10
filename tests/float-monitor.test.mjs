@@ -28,11 +28,12 @@ test('悬浮窗存在并已注册到 shell.overlay', () => {
   assert.match(seg, /FloatPanel/, 'overlay 应渲染 FloatPanel')
 })
 
-test('悬浮窗显示状态 / 句数 / 时长', () => {
+test('悬浮窗显示状态 / 时长 / 转写内容', () => {
   const body = floatBody()
   assert.match(body, /转录中|正在收尾|生成纪要中/, '应有状态文案')
-  assert.match(body, /lines\.length \+ ' 句'/, '应显示句数')
-  assert.match(body, /sentMs/, '应显示时长')
+  assert.match(body, /useElapsed/, '应显示时长')
+  assert.match(body, /linesAll\.map/, '应渲染转写列表')
+  assert.match(body, /等第一句/, '没内容时也要说明（不是空白）')
 })
 
 test('悬浮窗复用问题横幅与进度条（故障可见）', () => {
