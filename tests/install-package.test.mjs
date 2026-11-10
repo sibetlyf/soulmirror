@@ -70,3 +70,13 @@ test('peer 依赖必须全部标记 optional（否则 pnpm 会去下载 DSH 内�
     assert.equal(meta[name] && meta[name].optional, true, 'peer 必须 optional：' + name)
   }
 })
+
+test('文档给出三种安装方式，并把不经过 git 审批的排在前面', () => {
+  const doc = readFileSync(new URL('../docs/install.md', import.meta.url), 'utf8')
+  assert.match(doc, /方式一：clone 后 link/, '应推荐 link 安装（不经过 pnpm git 审批）')
+  assert.match(doc, /方式二：tarball 地址/, '应提供 tarball 一条命令的装法')
+  assert.match(doc, /方式三：/, '应说明 github: 简写的限制')
+  assert.ok(doc.indexOf('方式一') < doc.indexOf('方式三'), '推荐顺序应为 link → tarball → github:')
+  assert.match(doc, /allowBuilds:/, '应给出 allowBuilds 的 YAML 示例')
+  assert.match(doc, /soulmirror: true/, '应包含 soulmirror 这一条')
+})

@@ -4,20 +4,39 @@
 
 ## 🔧 装起来
 
-```bash
-# 直接装（公开仓库，无需 token；已实测）
-dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
-```
+> `dsh plugin --profile <名字> ...` 只是把后面的参数转给 profile 目录里的 pnpm，
+> 所以 `add` / `update` / `rm` 都能直接用。
 
-想改代码 / 想用增量升级，就换成本地 link：
+按可靠性排序，**推荐第一种**：
+
+### 方式一：clone 后 link（推荐）
 
 ```bash
 git clone https://github.com/sibetlyf/soulmirror.git ~/.dsh/plugins/soulmirror
 dsh plugin --profile web add link:~/.dsh/plugins/soulmirror
 ```
 
-> `dsh plugin --profile <名字> ...` 只是把后面的参数转给 profile 目录里的 pnpm，
-> 所以 `add` / `update` / `rm` 都可以直接用。
+不经过 pnpm 的"git 依赖构建审批"，也不受 `files` 白名单限制；
+可以改代码，也能用增量升级（`soul_setup { action: "upgrade" }`）。
+
+### 方式二：tarball 地址（一条命令）
+
+```bash
+dsh plugin --profile web add "https://github.com/sibetlyf/soulmirror/archive/refs/heads/main.tar.gz"
+```
+
+同样不需要构建审批（pnpm 把它当普通 tarball，不当 git 依赖）。
+代价：拿到的是整个仓库（约 1.8MB，含 tests/）。
+
+### 方式三：`github:` 简写
+
+```bash
+dsh plugin --profile web add "github:sibetlyf/soulmirror#main"
+```
+
+最简洁，但 **pnpm 会把 git 来源的依赖统统视为"需要构建审批"**，
+在没配置过 `allowBuilds` 的机器上会报 `ERR_PNPM_IGNORED_BUILDS`。
+遇到就改用方式一或二，或按下面的说明放行。
 
 重启 `dsh web`，再跑一次 `soul_setup { action: "auto" }`。Windows 会用系统自带 `csc`
 把 `tools/mbridge.exe` 编译出来，macOS / Linux 只做依赖检查。
@@ -86,3 +105,31 @@ allowBuilds:
 ```
 
 然后重跑。被拦的包是 DSH 自身依赖，放行前值得确认它们来自官方来源。
+
+### 为什么 `github:` 这种方式最容易撞上审批
+
+pnpm 把**所有 git 来源的依赖**视为"可能需要在本地构建"，即便包里根本没有
+`postinstall` / `prepare`。所以在一台没配置过 `allowBuilds` 的机器上，
+哪怕我们这边完全干净，装完仍可能看到：
+
+```text
+[ERR_PNPM_IGNORED_BUILDS] Ignored build scripts: ... , soulmirror@https://codeload.github.com/...
+```
+
+两条路，任选：
+
+1. **换安装方式**（最省事）：用上面的「方式一 clone 后 link」或「方式二 tarball 地址」，
+   它们不经过 git 依赖通道，不需要任何审批。
+2. **就地放行**：把 pnpm 打印出来的每一条都写进 `<profile>/pnpm-workspace.yaml`，然后重跑：
+
+   ```yaml
+   allowBuilds:
+     soulmirror: true
+     '@deepseek-ai/dsh-subprocess-local': true
+     '@google/genai': true
+     koffi: true
+     node-pty: true
+     protobufjs: true
+   ```
+
+   放行等于允许这些包在安装时执行脚本，请确认来源可信（前五个是 DSH 自身依赖）。
