@@ -36,10 +36,10 @@ test('结束录音不再关闭总开关', () => {
 test('真正关闭走 action=off，并持久化', () => {
   const at = src.indexOf("} else if (action === 'off') {")
   assert.ok(at > 0, '应有 off 分支')
-  const seg = src.slice(at, at + 400)
-  assert.match(seg, /armed = false/)
-  assert.match(seg, /cfg\.enabled = false/)
-  assert.match(seg, /lifecycle\.stop\(\)/)
+  const seg = src.slice(at, src.indexOf("} else if (action === 'stop')", at))
+  // 关闭也必须先落盘再解除 armed：setEnabled(false) 成功后才改内存
+  assert.match(seg, /setEnabled\(false/)
+  assert.match(seg, /lifecycle\.stop\(\)/, '关闭后要停监听')
 })
 
 test('界面录音按钮由持久化采集状态驱动，总开关为独立操作', async () => {

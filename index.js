@@ -674,6 +674,29 @@ export function apply(ctx, config, deps = {}) {
     }
   }
 
+  /**
+   * 改总开关：**先写盘，成功后才改内存与日志**。
+   *
+   * 以前是先改内存再 try{savePersisted()}catch{}，于是写失败时
+   * 界面显示"已开启"、config.json 里还是关的，重启后又变回去。
+   * @returns {{ok: boolean, enabled: boolean, error: string}}
+   */
+  function setEnabled(next, patch = {}) {
+    const want = next === true
+    const prev = { enabled: cfg.enabled, autoWatch: cfg.autoWatch }
+    const body = { enabled: want, ...patch }
+    const sv = savePersisted(body)
+    if (!sv.ok) {
+      logger?.warn?.('[soulmirror] 开关没有保存成功，保持原状：' + (sv.error || '未知原因'))
+      return { ok: false, enabled: cfg.enabled === true, error: sv.error || '写入配置失败' }
+    }
+    cfg.enabled = want
+    if (patch.autoWatch !== undefined) cfg.autoWatch = patch.autoWatch === true
+    armed = want
+    journal.append('plugin.enabled', { enabled: want })
+    return { ok: true, enabled: want, error: '', prev }
+  }
+
   journal.append('plugin.enabled',{enabled:cfg.enabled === true})
   cfg.display = normalizeDisplay(cfg.display)
   // Automatic joining is never implied by enabling meeting capture.
@@ -1448,9 +1471,10 @@ export function apply(ctx, config, deps = {}) {
         if (action === 'record') {
           // 用户点「开始录音」：不仅允许自动操作，还要**立刻**开始采集。
           // 以前 start 只做 arm，没有会议窗口时什么都不会发生 —— 看起来像按钮没反应。
-          armed = true
-          cfg.enabled = true
-          cfg.autoWatch = true
+          const on = setEnabled(true, { autoWatch: true })
+          if (!on.ok) {
+            return json(200, { ok: false, enabled: cfg.enabled === true, armed: isArmed(), capturing: !!session.capturing, error: '开关没能保存：' + on.error })
+          }
           if (!testMode && !lifecycle.timer) lifecycle.start()
           // 清掉上一次的失败原因，避免刚开录就顶着"上次采集错误"
           session.lastError = ''
@@ -1463,7 +1487,6 @@ export function apply(ctx, config, deps = {}) {
             logger?.warn?.('[soulmirror] 手动开始采集失败：' + e.message)
             session.lastError = '采集启动失败：' + e.message
           }
-          try { savePersisted({ autoWatch: cfg.autoWatch, enabled: cfg.enabled }) } catch { /* ignore */ }
           logger?.info?.('[soulmirror] 手动开始录音（enabled=true armed=true）')
           return json(200, {
             ok: !!session.capturing, enabled: true, armed: true, capturing: !!session.capturing,
@@ -1474,16 +1497,14 @@ export function apply(ctx, config, deps = {}) {
         }
         if (action === 'start') {
           // 用户明确开启：这时才允许自动采集/入会/标定
-          armed = true
-          cfg.enabled = true
-          cfg.autoWatch = true
+          const on = setEnabled(true, { autoWatch: true })
+          if (!on.ok) return json(200, { ok: false, enabled: cfg.enabled === true, armed: isArmed(), error: '开关没能保存：' + on.error })
           if (!testMode && !lifecycle.timer) lifecycle.start()
           logger?.info?.('[soulmirror] 已开启会议功能（armed），允许自动操作')
         } else if (action === 'off') {
-          // 真正关闭会议功能（设置里的开关）：解除 armed、停止监听、持久化关闭
-          armed = false
-          cfg.enabled = false
-          cfg.autoWatch = false
+          // 真正关闭会议功能（设置里的开关）：先落盘关闭，再停监听
+          const off = setEnabled(false, { autoWatch: false })
+          if (!off.ok) return json(200, { ok: false, enabled: cfg.enabled === true, armed: isArmed(), error: '开关没能保存：' + off.error })
           lifecycle.stop()
         } else if (action === 'stop') {
           // 结束这场录音：只停采集 + 开始会后整理。
@@ -1504,8 +1525,7 @@ export function apply(ctx, config, deps = {}) {
               .catch((e) => setPostMeeting({ phase: 'error', error: e.message }))
           }
         }
-        try { savePersisted({ autoWatch: cfg.autoWatch, enabled: cfg.enabled }) } catch { /* ignore */ }
-        return json(200, { ok: true, enabled: cfg.enabled === true, armed, auto: !!(cfg.autoWatch && lifecycle.timer), lifecycle: lifecycle.snapshot() })
+        return json(200, { ok: true, enabled: cfg.enabled === true, armed: isArmed(), auto: !!(cfg.autoWatch && lifecycle.timer), lifecycle: lifecycle.snapshot() })
       }
       if (req.method === 'POST' && sub === 'test') {
         const buf = []
@@ -2586,8 +2606,8 @@ export function apply(ctx, config, deps = {}) {
     const act = menuAction(label)
     logger?.info?.("[soulmirror] 桌宠菜单：" + label + " → " + act.type)
     if (act.type === "auto") {
-      if (act.action === "start") { armed = true; cfg.enabled = true }
-      if (act.action === "stop") { armed = false; cfg.enabled = false }
+      // 桌宠菜单也必须走同一个落盘入口，否则"宠物点了开"重启就丢
+      setEnabled(act.action === "start", { autoWatch: act.action === "start" ? cfg.autoWatch : false })
       try { await session[act.action === "start" ? "startCapture" : "stopCapture"]() } catch { /* ignore */ }
       await pushWorkStatus(true)
       return

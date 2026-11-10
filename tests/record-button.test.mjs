@@ -17,8 +17,9 @@ test('后端有 action=record：立刻开始采集，而不只是 arm', () => {
   assert.ok(at > 0, '应有 record 动作')
   const seg = src.slice(at, at + 1600)
   assert.match(seg, /session\.startCapture\(/, '必须真的启动采集')
-  assert.match(seg, /armed = true/, '应同时 arm')
-  assert.match(seg, /cfg\.enabled = true/, '应打开总开关')
+  // 开录即开总开关，但必须先落盘（setEnabled），否则重启会悄悄变回去
+  assert.match(seg, /setEnabled\(true/, '应打开总开关并落盘')
+  assert.match(seg, /on\.ok/, '写盘失败要如实返回，不能谎称已开启')
   assert.match(seg, /capturing: !!session\.capturing/, '响应里要回采集状态，前端才能判断成功')
   assert.match(seg, /session\.lastError = ''/, '开录前清掉上次错误，避免刚开就顶着旧错误')
 })

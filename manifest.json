@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "index.js",
-      "sha256": "cf7770df8496a1192d314abb3e7602b9a702cebd502eaebcd1d36d0f2178e445",
-      "bytes": 330007
+      "sha256": "c5a873c5fa947264b0ca0165287355d7e08e7c797c94bd2b721a18179e6133d0",
+      "bytes": 331278
     },
     {
       "path": "lib/action-items.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "79f3566d8ed1f353028c953207138f7948217cd86cbf27db1d8c05de25ff4ecf",
-      "bytes": 123777
+      "sha256": "2191977984751b69f91667a54e8895f72d8b21b6f03ed211472002c7b0193010",
+      "bytes": 124475
     },
     {
       "path": "lib/context-snapshot.js",
@@ -199,8 +199,8 @@
     },
     {
       "path": "lib/knowledge.js",
-      "sha256": "5370e7266684a47dff19641ffc0ed4dec3c4425d605a711c7ef735a1f58c801c",
-      "bytes": 12814
+      "sha256": "7be853379f0fe480f0d3b2c743cc084206722c669996ca1dd147bf4b9814430d",
+      "bytes": 13058
     },
     {
       "path": "lib/lifecycle.js",
@@ -474,7 +474,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "8be19cc50f457ae850c2702601efa87650feb2a9f39e4909284728de5848371c",
+      "sha256": "cef751704937ab492ace7a627849477f4b4421ecc349c5d01f593f043fe279d7",
       "bytes": 15377
     },
     {

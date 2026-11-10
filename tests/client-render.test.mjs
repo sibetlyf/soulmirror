@@ -293,3 +293,37 @@ test('只有一个会议助手（入口按钮 + 侧栏，不是第二套 UI）',
     assert.ok(client.includes(keep), '缺少入口：' + keep)
   }
 })
+
+test('配置刷新必须永远返回 Promise（否则配置页白屏：reading \'then\'）', async () => {
+  const { exp } = loadClient()
+  const store = exp.__test.cfgStore
+  const g = globalThis
+  const prevFetch = g.fetch
+  try {
+    // 没有 fetch：也不能返回 undefined
+    delete g.fetch
+    assert.equal(typeof store.ensure(true).then, 'function', '没有 fetch 时也要返回可 then 的东西')
+
+    // 有缓存且不强制刷新：直接返回，但仍然必须是 Promise
+    store.data = { enabled: true }
+    assert.equal(typeof store.ensure(false).then, 'function', '走缓存时也必须是 Promise')
+
+    // 正常请求：解决后要拿到配置
+    g.fetch = async () => ({ json: async () => ({ enabled: true, asr: { provider: 'dashscope' } }) })
+    store.loading = false
+    const c = await store.ensure(true)
+    assert.equal(c.asr.provider, 'dashscope')
+
+    // 接口报错：要 reject，让界面显示原因，而不是静默成功
+    g.fetch = async () => ({ json: async () => ({ error: '读不到配置' }) })
+    store.loading = false
+    await assert.rejects(() => store.ensure(true), /读不到配置/)
+    assert.match(store.error, /读不到配置/)
+  } finally {
+    if (prevFetch === undefined) delete g.fetch
+    else g.fetch = prevFetch
+    store.data = null
+    store.error = ''
+    store.loading = false
+  }
+})
