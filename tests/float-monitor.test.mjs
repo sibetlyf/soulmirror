@@ -51,14 +51,14 @@ test('悬浮窗不含任何配置控件', () => {
 
 test('悬浮窗可关闭，且下一场会自动恢复', () => {
   const body = floatBody()
-  assert.match(body, /setClosed\(true\)/, '应能关闭')
-  assert.match(body, /if \(!capturing && !running\) setClosed\(false\)/, '结束后复位，下一场自动出现')
+  assert.match(body, /store\.set\(false\)/, '应能收起')
+  assert.match(body, /if \(capturing \|\| running\) store\.set\(true\)/, '采集开始时自动展开')
 })
 
 test('悬浮窗始终可见（未启用时也显示，否则用户"没看到"）', () => {
   const body = floatBody()
   // 只在用户主动关闭时不渲染，其余情况都要在
-  assert.match(body, /if \(closed\) return null/, '关闭后不渲染')
+  assert.match(body, /if \(!ui\.open\) return null/, '未打开时不渲染')
   assert.equal(/if \(!capturing && !running\) return null/.test(body), false,
     '不该因为没在开会就完全消失（用户会以为插件坏了）')
 })
@@ -68,7 +68,7 @@ test('未启用时显示"去设置开启"，而不是空白', () => {
   assert.match(body, /未启用 · 去设置开启/, '要明确说明未启用')
 })
 
-test('入口仍是 4 个（悬浮窗不是额外页面入口）', () => {
+test('入口结构：页面 + 配置页 + 字幕条 + 悬浮侧栏 + 开关按钮', () => {
   const injects = [...client.matchAll(/slots\.inject\('([^']+)'/g)].map((m) => m[1]).sort()
-  assert.deepEqual(injects, ['conversation.input.dock', 'main', 'settings.section', 'shell.overlay', 'sidebar.panellist'])
+  assert.deepEqual(injects, ['conversation.input.dock', 'main', 'settings.section', 'shell.overlay', 'sidebar.footer.action', 'sidebar.panellist'])
 })

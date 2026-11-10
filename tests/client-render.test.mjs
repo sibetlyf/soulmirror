@@ -245,10 +245,10 @@ test('模型调用失败必须在界面上可见（不能只写日志）', () =>
 
 
 
-test('只有一个会议助手入口（不再有第二套小窗 UI）', () => {
+test('只有一个会议助手（入口按钮 + 侧栏，不是第二套 UI）', () => {
   // 用户明确要求：一个页面、一套配置。
   const client = readFileSync(join(here, '..', 'lib', 'client.js'), 'utf8')
-  for (const gone of ['CompactPanel', 'Overlay', 'sidebar.footer.action', 'conversation.view']) {
+  for (const gone of ['CompactPanel', 'Overlay', 'conversation.view']) {
     assert.equal(client.includes(gone), false, '不该再有 ' + gone)
   }
   // 保留的入口：侧栏一个图标 + 主面板 + 字幕条 + 设置页

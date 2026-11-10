@@ -31,7 +31,7 @@ const REQUIRED = [
   ['会后整理', /h\(AfterMeetingCard\)/],
   ['未整理补救', /h\(RecoveryCard\)/],
   ['状态横条', /h\(StatusStrip/],
-  ['关闭按钮', /setClosed\(true\)/],
+  ['收起按钮', /store\.set\(false\)/],
 ]
 
 test('悬浮窗具备大页面除配置外的全部区块', () => {

@@ -43,6 +43,6 @@ test('侧边栏宽度合理（≤ 420px，避免挤压主内容）', () => {
 
 test('保持可关闭 + 阴影朝左（贴在右侧的视觉暗示）', () => {
   const body = floatBody()
-  assert.match(body, /setClosed\(true\)/, '应能关闭')
+  assert.match(body, /store\.set\(false\)/, '应能收起')
   assert.match(body, /boxShadow: '-8px 0 24px/, '阴影应朝左')
 })

@@ -34,7 +34,7 @@ test('保存一次 Key 同时写 asr / tts / brain 三个槽位', () => {
 
 test('只有 4 个入口，且没有第二套 UI', () => {
   const injects = [...client.matchAll(/slots\.inject\('([^']+)'/g)].map((m) => m[1])
-  assert.deepEqual(injects.sort(), ['conversation.input.dock', 'main', 'settings.section', 'shell.overlay', 'sidebar.panellist'],
+  assert.deepEqual(injects.sort(), ['conversation.input.dock', 'main', 'settings.section', 'shell.overlay', 'sidebar.footer.action', 'sidebar.panellist'],
     '入口应只剩 4 个，实际：' + injects.join(', '))
   for (const gone of ['CompactPanel', 'function Entry(']) {
     assert.equal(client.includes(gone), false, '不该再有 ' + gone)
