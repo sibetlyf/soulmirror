@@ -1032,6 +1032,20 @@ export function apply(ctx, config, deps = {}) {
           lifecycle: lifecycle.snapshot(),
         }
         __payload.display = normalizeDisplay(cfg.display)
+        // 产物位置：录音/纪要到底存在哪里，界面要能显示并一键打开（用户明确要求）
+        __payload.artifacts = (() => {
+          const dir = session.dir || lastSessionDir || postMeeting.dir || ''
+          const pick = (name) => {
+            if (!dir) return null
+            const path = join(dir, name)
+            let bytes = 0
+            try { bytes = statSync(path).size } catch { bytes = 0 }
+            return { name, path, bytes, exists: bytes > 0 }
+          }
+          const audio = pick('audio.wav')
+          if (audio && audio.exists) audio.seconds = Math.max(0, Math.round((audio.bytes - 44) / 32000))  // 16k/16bit/单声道
+          return { dir, audio, minutes: pick('minutes.md'), transcript: pick('transcript-offline.jsonl') }
+        })()
         __payload.view = buildViewModel({journal:journal.projection(),runtime:__payload,display:cfg.display})
         // 只缓存"真实探测"的结果；light 请求不刷新缓存，否则缓存永远自己变新
         if (!useCachedProbe) {
@@ -1701,6 +1715,13 @@ export function apply(ctx, config, deps = {}) {
           const workspaceId = captureWorkspace(data)
           return json(200, { ok: true, data, voices: voiceListOf(data), workspaceId })
         } catch (e) { return json(200, { ok: false, error: e.message }) }
+      }
+      if (req.method === 'POST' && sub === 'open-path') {
+        const bufP = []
+        for await (const chunk of req) bufP.push(chunk)
+        const bodyP = JSON.parse(Buffer.concat(bufP).toString('utf8') || '{}')
+        const r = await openOnHost(bodyP.path, { reveal: bodyP.reveal === true })
+        return json(200, r)
       }
       if (req.method === 'POST' && sub === 'open') {
         const bufO = []
@@ -2825,6 +2846,28 @@ export function apply(ctx, config, deps = {}) {
       }
     }),
   }))
+
+  /**
+   * 在宿主机上打开一个文件/目录，或在文件管理器里定位它。
+   * 面板上的"打开录音""在文件夹中显示"都走这里；宿主没有该能力时如实报错。
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async function openOnHost(path, { reveal = false } = {}) {
+    const target = String(path || '')
+    if (!target) return { ok: false, error: '没有路径' }
+    // 只允许打开插件自己数据目录里的东西：不能变成任意路径执行器
+    if (!target.startsWith(CONFIG_DIR)) return { ok: false, error: '只允许打开会议数据目录内的文件' }
+    const sc = ctx.get('sessionController')
+    if (!sc || typeof sc.openWorkspacePath !== 'function') {
+      return { ok: false, error: '宿主不支持打开文件（请升级 DSH）' }
+    }
+    try {
+      await sc.openWorkspacePath({ path: target, ...(reveal ? { action: 'reveal' } : {}) })
+      return { ok: true }
+    } catch (e) {
+      return { ok: false, error: e && e.message ? e.message : String(e) }
+    }
+  }
 
   /**
    * 启动会议客户端（已运行就只汇报窗口），不加入任何会议。
