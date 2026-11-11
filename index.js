@@ -42,6 +42,11 @@ import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
 import { saveMinutes as persistMinutesFile } from './lib/minutes-file.js'
 import { buildMinutesSystemPrompt, buildMinutesUserPrompt, minutesMeta, finalizeMinutes, localStamp } from './lib/minutes-format.js'
+import { loadSpeakerMap, saveSpeakerMap, loadPeople, rememberPeople, listSpeakers, applySpeakerMap, normalizeLabel, sanitizeName } from './lib/speaker-map.js'
+import { buildSpace, DEFAULT_MODEL_ID } from './lib/voiceprint/space.js'
+import { openLibrary } from './lib/voiceprint/store.js'
+import { createEmbedder, modelStatus } from './lib/voiceprint/embed.js'
+import { identifySpeakers, enrollSample, readWavSamples } from './lib/voiceprint/service.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
@@ -113,6 +118,17 @@ export const inject = ['tools', 'webServer']
 export const Config = z.object({
   /** 总开关：关闭后所有写操作工具直接拒绝。 */
   enabled: z.boolean().default(true),
+  /** 本地声纹：默认关闭；模型要用户自己装，装不上就明确报原因。 */
+  voiceprint: z.object({
+    enabled: z.boolean().default(false),
+    /** 嵌入模型 id（见 lib/voiceprint/space.js 的 EMBEDDER_MODELS） */
+    modelId: z.string().default('wespeaker-resnet34'),
+    /** ONNX 模型文件路径；留空则用 <数据目录>/voiceprint/models/<modelId>.onnx */
+    modelPath: z.string().default(''),
+    /** 认人门槛：默认照参考项目的校准值（0.60 + margin 0.15） */
+    acceptSimilarity: z.number().min(0).max(1).default(0.60),
+    matchMargin: z.number().min(0).max(1).default(0.15),
+  }).default({}),
   display: z.object({width:z.number().default(420),density:z.string().default('comfortable'),activityLimit:z.number().default(30),showActivity:z.boolean().default(true),showDiagnostics:z.boolean().default(true),autoOpen:z.boolean().default(true)}),
   /** 会议客户端 exe 路径（空 = 自动探测腾讯会议）。 */
   appPath: z.string().default(''),
@@ -1716,6 +1732,133 @@ export function apply(ctx, config, deps = {}) {
           return json(200, { ok: true, data, voices: voiceListOf(data), workspaceId })
         } catch (e) { return json(200, { ok: false, error: e.message }) }
       }
+      // ── 本地声纹（P2a）：人员库 / 注册 / 删除 / 模型状态 ──────────
+      if (sub === 'voiceprint' || sub === 'voiceprint-enroll' || sub === 'voiceprint-delete') {
+        const bodyOf = async () => {
+          const chunks = []
+          for await (const c of req) chunks.push(c)
+          try { return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}') } catch { return {} }
+        }
+        const space = buildSpace({ modelId: cfg.voiceprint?.modelId })
+        const library = openLibrary(CONFIG_DIR)
+        const embedder = createEmbedder({ modelPath: voiceprintModelPath(), modelId: cfg.voiceprint?.modelId })
+
+        if (sub === 'voiceprint' && req.method === 'GET') {
+          const people = library.people().map((p) => {
+            const samples = library.listSamples(p.personId, { space })
+            return {
+              personId: p.personId, displayName: p.displayName, createdAt: p.createdAt,
+              samples: samples.length,
+              seconds: Math.round(samples.reduce((a, s) => a + (Number(s.seconds) || 0), 0)),
+              lastAt: samples.length ? samples[samples.length - 1].createdAt : '',
+            }
+          })
+          const stats = library.stats(space)
+          return json(200, {
+            ok: true,
+            model: {
+              modelId: space.embedder_model_id, spaceId: space.spaceId, dim: space.dimension,
+              installed: embedder.ok, reason: embedder.reason || '', hint: embedder.hint || '',
+              file: modelStatus(embedder.ok ? voiceprintModelPath() : voiceprintModelPath()),
+            },
+            people, stats,
+            // 换过模型后旧样本用不了，必须明说
+            staleSpaces: stats.staleSpaces.map((s) => ({ modelId: s.embedder_model_id, samples: s.samples })),
+          })
+        }
+
+        if (sub === 'voiceprint-enroll' && req.method === 'POST') {
+          const body = await bodyOf()
+          const personName = sanitizeName(body.name)
+          const personId = String(body.personId || '')
+          if (!personName && !personId) return json(200, { ok: false, reason: 'need-name', message: '请先填名字' })
+          const dir = String(body.dir || '')
+          if (dir && !dir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+          try {
+            // 两种来源：①面板录的一段（WAV base64）②从会议录音里挑一段
+            let pcm = null
+            if (body.wav && String(body.wav).startsWith('data:audio')) {
+              const b64 = String(body.wav).split(',')[1] || ''
+              const buf = Buffer.from(b64, 'base64')
+              pcm = readPcm16Mono(buf)
+            } else if (dir && existsSync(join(dir, 'audio.wav'))) {
+              pcm = readWavSamples(join(dir, 'audio.wav'), Number(body.startSec) || 0, Number(body.endSec) || 1e9)
+            }
+            if (!pcm || !pcm.length) return json(200, { ok: false, reason: 'no-audio', message: '没有收到音频' })
+            const result = await enrollSample({
+              library, space, embedder, personName, personId, pcm,
+              consent: { captureMethod: body.captureMethod || 'panel-recording', noticeVersion: 'v1', grantedAt: new Date().toISOString() },
+            })
+            if (!result.ok) return json(200, result)
+            rememberPeople(CONFIG_DIR, [result.personName])
+            logger?.info?.('[soulmirror] 声纹注册成功：' + result.personName + ' · ' + result.seconds + ' 秒')
+            return json(200, result)
+          } catch (e) {
+            logger?.warn?.('[soulmirror] 声纹注册失败：' + e.message)
+            return json(200, { ok: false, reason: 'error', message: '注册失败：' + e.message })
+          }
+        }
+
+        if (sub === 'voiceprint-delete' && req.method === 'POST') {
+          const body = await bodyOf()
+          try {
+            if (body.sampleId) library.deleteSample(String(body.sampleId))
+            else if (body.personId) library.deletePerson(String(body.personId))
+            else return json(400, { ok: false, error: '要说明删人还是删样本' })
+            return json(200, { ok: true })
+          } catch (e) { return json(200, { ok: false, error: e.message }) }
+        }
+      }
+      // 说话人名册：云端分人只给"说话人1/2/3"，这里把编号映射成姓名（P1）
+      if (sub === 'speakers') {
+        const spDir = String(url.searchParams.get('dir') || session.dir || lastSessionDir || postMeeting.dir || '')
+        if (spDir && !spDir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+        if (req.method === 'GET') {
+          const lines = (() => {
+            try { return readLogText(readFileSync(join(spDir, 'transcript-offline.jsonl'), 'utf8')).lines } catch { return [] }
+          })()
+          const map = loadSpeakerMap(spDir)
+          const speakers = listSpeakers(lines).map((s) => ({ ...s, name: map.byLabel[s.label] || '' }))
+          return json(200, {
+            ok: true, dir: spDir, speakers,
+            people: loadPeople(CONFIG_DIR),
+            // 没有映射时界面要能说清"这些人还没有名字"
+            mapped: Object.keys(map.byLabel).length,
+            at: map.at,
+          })
+        }
+        const bufS = []
+        for await (const chunk of req) bufS.push(chunk)
+        const bodyS = JSON.parse(Buffer.concat(bufS).toString('utf8') || '{}')
+        const dirS = String(bodyS.dir || spDir || '')
+        if (!dirS || !dirS.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+        try {
+          const next = { ...loadSpeakerMap(dirS).byLabel }
+          if (bodyS.label !== undefined) {
+            const key = normalizeLabel(bodyS.label)
+            const name = sanitizeName(bodyS.name)
+            if (!key) return json(400, { ok: false, error: '没有说明是哪个说话人' })
+            if (name) next[key] = name
+            else delete next[key]
+          } else if (bodyS.byLabel && typeof bodyS.byLabel === 'object') {
+            for (const [label, name] of Object.entries(bodyS.byLabel)) {
+              const key = normalizeLabel(label)
+              const value = sanitizeName(name)
+              if (!key) continue
+              if (value) next[key] = value
+              else delete next[key]
+            }
+          }
+          const savedMap = saveSpeakerMap(dirS, next)
+          // 记进全局人名清单，只为下次输入提示（不含声纹，不能用来跨会认人）
+          rememberPeople(CONFIG_DIR, Object.values(savedMap.byLabel))
+          logger?.info?.('[soulmirror] 说话人名册已保存：' + JSON.stringify(savedMap.byLabel))
+          return json(200, { ok: true, dir: dirS, byLabel: savedMap.byLabel, at: savedMap.at, note: '重新整理纪要后生效' })
+        } catch (e) {
+          logger?.warn?.('[soulmirror] 说话人名册保存失败：' + e.message)
+          return json(200, { ok: false, error: '保存失败：' + e.message })
+        }
+      }
       if (req.method === 'POST' && sub === 'open-path') {
         const bufP = []
         for await (const chunk of req) bufP.push(chunk)
@@ -2846,6 +2989,32 @@ export function apply(ctx, config, deps = {}) {
       }
     }),
   }))
+
+  /**
+   * 浏览器上传的 WAV → Float32Array（只认 16bit 单声道；别的直接说明不支持）。
+   * 服务端只做格式解析，不改音频内容。
+   */
+  function readPcm16Mono(buffer) {
+    const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || [])
+    if (buf.length < 44 || buf.toString('ascii', 0, 4) !== 'RIFF') throw new Error('不是 WAV 数据')
+    const channels = buf.readUInt16LE(22) || 1
+    const bits = buf.readUInt16LE(34) || 16
+    if (channels !== 1) throw new Error('录音必须是单声道（当前 ' + channels + ' 声道）')
+    if (bits !== 16) throw new Error('录音必须是 16bit（当前 ' + bits + 'bit）')
+    let offset = 12
+    let dataStart = 44
+    let dataSize = buf.length - 44
+    while (offset + 8 <= buf.length) {
+      const id = buf.toString('ascii', offset, offset + 4)
+      const size = buf.readUInt32LE(offset + 4)
+      if (id === 'data') { dataStart = offset + 8; dataSize = Math.min(size || (buf.length - dataStart), buf.length - dataStart); break }
+      offset += 8 + size + (size % 2)
+    }
+    const frames = Math.floor(dataSize / 2)
+    const out = new Float32Array(frames)
+    for (let i = 0; i < frames; i++) out[i] = buf.readInt16LE(dataStart + i * 2) / 32768
+    return out
+  }
 
   /**
    * 在宿主机上打开一个文件/目录，或在文件管理器里定位它。
@@ -5453,22 +5622,76 @@ export function apply(ctx, config, deps = {}) {
       if (!r.ok) throw new Error(r.error || '整段转写失败')
       return {...r,status:'done',result:r.sentences+' 句 · '+r.speakers+' 位说话人'}
     },
+    /**
+     * 认人：把云端分出的说话人簇，用**本地声纹库**对上名字。
+     *
+     * 三条产品原则：
+     *   · 认不出**不影响纪要**（这步允许跳过，不 throw）
+     *   · 认出的名字写进 speaker-map（和人工名册同一个文件），
+     *     所以后续重跑纪要会自然用上，不需要第二套状态
+     *   · 没装模型/证据不足都要留下可读的原因，界面据此展示
+     */
+    identify: async task => {
+      task.assertActive()
+      if (cfg.voiceprint && cfg.voiceprint.enabled === false) return {status:'skip',reason:'配置里未启用本机声纹'}
+      const lines = readLogText(await readFile(join(task.dir,'transcript-offline.jsonl'),'utf8')).lines
+        .filter(x=>x && x.text && x.speaker)
+      if (!lines.length) return {status:'skip',reason:'没有带说话人的转写'}
+      const wavFile = join(task.dir,'audio.wav')
+      if (!existsSync(wavFile)) return {status:'skip',reason:'没有录音文件，无法做声纹'}
+
+      const embedder = createEmbedder({ modelPath: voiceprintModelPath() ,modelId: cfg.voiceprint?.modelId })
+      const space = buildSpace({ modelId: cfg.voiceprint?.modelId })
+      const library = openLibrary(CONFIG_DIR)
+      const results = await identifySpeakers({ library, space, embedder, wavFile, lines, logger })
+      task.assertActive()
+
+      // 认出来的名字并进名册（人工填的不覆盖：人工优先）
+      const map = loadSpeakerMap(task.dir)
+      const auto = {}
+      for (const r of results) {
+        if (r.name && !map.byLabel[r.label]) auto[r.label] = r.name
+      }
+      if (Object.keys(auto).length) saveSpeakerMap(task.dir, { ...auto, ...map.byLabel })
+
+      const assigned = results.filter(r=>r.name).length
+      const payload = {
+        ok: true,
+        model: { modelId: space.embedder_model_id, spaceId: space.spaceId, installed: embedder.ok, reason: embedder.reason || '' },
+        speakers: results,
+        assigned, total: results.length,
+      }
+      try { await writeFile(join(task.dir,'speakers.json'), JSON.stringify(payload,null,2), 'utf8') } catch (e) {
+        logger?.warn?.('[soulmirror] 说话人识别结果落盘失败：' + e.message)
+      }
+      if (!embedder.ok) {
+        // 没装模型：如实说明，不假装认过
+        return {status:'skip',reason:'声纹模型未安装，说话人保持匿名',result:'0/'+results.length}
+      }
+      return {status:'done',result:assigned+'/'+results.length+' 位已认出',assigned,total:results.length}
+    },
     minutes: async task => {
       task.assertActive()
       const offline = readLogText(await readFile(join(task.dir,'transcript-offline.jsonl'),'utf8')).lines
         .filter(x=>x && x.text)
       if (!offline.length) throw new Error('没有已落盘的非流式转写，不能生成纪要')
-      // 说话人标签只用来让模型分辨谁在说，不允许写进纪要正文（读起来像草稿）
-      const transcript = offline.map(x => (x.speaker ? '[' + x.speaker + '] ' : '') + x.text).join('\n')
-      const meta = minutesMeta({ meta: { ...(loadMeta(task.dir) || {}), title: (loadMeta(task.dir) || {}).title || session.display || '' }, cfg, dir: task.dir })
+      // 用户给"说话人N"填过名字就用名字（名册先落盘），没填就保留编号标记：
+      // 标记只是给模型分辨谁在说，提示词明令不许写进正文。
+      const speakerMap = loadSpeakerMap(task.dir)
+      const named = applySpeakerMap(offline, speakerMap.byLabel)
+      const transcript = named.map(x => (x.speaker ? '[' + x.speaker + '] ' : '') + x.text).join('\n')
+      const known = minutesMeta({ meta: { ...(loadMeta(task.dir) || {}), title: (loadMeta(task.dir) || {}).title || session.display || '' }, cfg, dir: task.dir })
+      // 与会人员：配置里的用户名 + 用户在这一场会里填过的人名（没有就不编）
+      const mapped = Object.values(speakerMap.byLabel).map(sanitizeName).filter(Boolean)
+      known.attendees = Array.from(new Set([...(known.attendees || []), ...mapped]))
       const raw = await minutesCompleter([
         { role: 'system', content: buildMinutesSystemPrompt() },
-        { role: 'user', content: buildMinutesUserPrompt({ transcript, meta }) },
+        { role: 'user', content: buildMinutesUserPrompt({ transcript, meta: known }) },
       ], { dir: task.dir })
       task.assertActive()
       if (!raw || !String(raw).trim()) throw new Error('DSH 会话模型返回空纪要')
       // 后处理：剥掉"说话人1："这类标签，补上"四、纪要人"的真实作者与时间
-      const md = finalizeMinutes(raw, { author: meta.author, at: meta.endedAt || localStamp('') })
+      const md = finalizeMinutes(raw, { author: known.author, at: known.endedAt || localStamp('') })
       if (!md.trim()) throw new Error('纪要清洗后为空，未保存')
       const saved = await persistMinutesFile(join(task.dir,'minutes.md'),md)
       task.assertActive()
@@ -5698,6 +5921,18 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
   /** 桌面探测缓存：liveApp / 会议号 / 窗口列表 / 是否在会中，避免每秒轮询都跑 PowerShell */
   let desktopProbe = { at: 0, value: null }
   const probeCache = { at: 0, value: null, slow: false }
+
+  /**
+   * 本地声纹模型路径：优先配置里指定的，否则按约定放数据目录。
+   * 找不到就明确报 model-missing（绝不在没模型时假装认过人）。
+   */
+  function voiceprintModelPath() {
+    const configured = String((cfg.voiceprint && cfg.voiceprint.modelPath) || '').trim()
+    if (configured) return configured
+    const modelId = String((cfg.voiceprint && cfg.voiceprint.modelId) || DEFAULT_MODEL_ID)
+    return join(CONFIG_DIR, 'voiceprint', 'models', modelId + '.onnx')
+  }
+
 
   // ── 识别预算：开会一小时也在花钱，得有个上限 ────────────────────────
   const budget = {

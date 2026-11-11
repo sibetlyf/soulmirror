@@ -26,10 +26,17 @@ test('汇总输入覆盖关键故障源', () => {
 
 test('页面显示问题横幅，且在进度条前面', () => {
   assert.match(client, /function IssueBanner\(props\)/, '应有横幅组件')
-  const at = client.indexOf('function MeetingPage(')
-  const big = client.slice(at, at + 20000)
-  assert.match(big, /v\.issues \|\| \[\]/, '页面应从共用view读取问题')
-  assert.ok(big.indexOf("role: 'alert'") < big.indexOf("h(PipelineSteps"), '问题应在管线步骤之前')
+  // 从共用工作台开始找，不按固定字节数截断：卡片越加越多，固定窗口会误报。
+  const at = client.indexOf('function MeetingWorkspace(')
+  const big = at > 0 ? client.slice(at) : client
+  // 先找到"从 view 读 issues"的位置，再断言它后面的 alert 出现在管线步骤之前
+  const issuesAt = big.indexOf('v.issues || []')
+  assert.ok(issuesAt > -1, '页面应从共用view读取问题')
+  const alertAt = big.indexOf("role: 'alert'", issuesAt)
+  const stepsAt = big.indexOf('h(PipelineSteps', issuesAt)
+  assert.ok(alertAt > -1, '问题横幅要真的渲染出来')
+  assert.ok(stepsAt > -1, '管线步骤要真的渲染出来')
+  assert.ok(alertAt < stepsAt, '问题应在管线步骤之前')
 })
 
 test('横幅可展开全部条目并复制排查文本', () => {

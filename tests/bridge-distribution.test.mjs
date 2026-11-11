@@ -52,7 +52,8 @@ test('存在 .git 时，exe 必须被 git 跟踪（防止再次漏提交）', (t
   }
   let out = ''
   try {
-    out = execFileSync('git', ['ls-files', 'tools/mbridge.exe'], { cwd: root, encoding: 'utf8' })
+    // 给 git 一个上限：仓库锁住或 git 卡住时，整条测试线不能被它拖死
+    out = execFileSync('git', ['ls-files', 'tools/mbridge.exe'], { cwd: root, encoding: 'utf8', timeout: 8000, killSignal: 'SIGKILL' })
   } catch {
     t.skip('拿不到 git 信息，跳过')
     return

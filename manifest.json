@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "index.js",
-      "sha256": "0f6a720904285fa5eb21b38a6be3a0023fefa61716132a673eaa71797a46c9a5",
-      "bytes": 336252
+      "sha256": "8d4a43338cc37460c9fa9a53e0b9e1b1a962c48d620d31e12bf8828b7d41fca6",
+      "bytes": 349286
     },
     {
       "path": "lib/action-items.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "47f5ecaaca35680413234e8e3eb7ba5502fa7df2d683529d4039acaa6c6d14ba",
-      "bytes": 133201
+      "sha256": "deee7b161c33eef68f38e3c5354af9ccfab0e8e40b3a114497d66e66651a65a1",
+      "bytes": 148340
     },
     {
       "path": "lib/context-snapshot.js",
@@ -194,8 +194,8 @@
     },
     {
       "path": "lib/journal.js",
-      "sha256": "5b7bfdb493f065ce71dfd8757350bd5145903f9eff90bda0fabdf1741a48701f",
-      "bytes": 22110
+      "sha256": "d77b473a8c5a1dc7b1fde01b82185a9c5bfc50c82be2d7f98a3ca4b28693721c",
+      "bytes": 22250
     },
     {
       "path": "lib/knowledge.js",
@@ -408,6 +408,11 @@
       "bytes": 9387
     },
     {
+      "path": "lib/speaker-map.js",
+      "sha256": "db4f5589d6ebf4f37863dc9e0fa4fb9c028a4bf8a08f376fe73680929bb6f854",
+      "bytes": 6919
+    },
+    {
       "path": "lib/t2s.js",
       "sha256": "bf67d24124b573aa066e58358a0c94ed7ce68300f881db973875466d9c7c462d",
       "bytes": 958
@@ -464,8 +469,43 @@
     },
     {
       "path": "lib/view-model.js",
-      "sha256": "ed0691ab296bf8278f9d2a2f15e354a277a80ef8db70884667499693393a44b4",
-      "bytes": 7885
+      "sha256": "001b23e7d73da3ac53685540bdf1702b4d866b80706274298df178fbc21a453c",
+      "bytes": 7914
+    },
+    {
+      "path": "lib/voiceprint/embed.js",
+      "sha256": "90757d0d228482998490c976c635f18eb964e9e43c174627f92ebee3170c8e41",
+      "bytes": 6892
+    },
+    {
+      "path": "lib/voiceprint/fbank.js",
+      "sha256": "442b4c67b0b03b4036d331795abbe01f2e2ca6252b4443d6313affe01e9aac42",
+      "bytes": 6840
+    },
+    {
+      "path": "lib/voiceprint/match.js",
+      "sha256": "645922aa07282ec1147f2c72300ee662859d7a1c396746ffaa68045ccaae2d81",
+      "bytes": 11648
+    },
+    {
+      "path": "lib/voiceprint/quality.js",
+      "sha256": "7451da8bef262e692b08e6699f599dc36548418ffb679458f1c50bb36d266d45",
+      "bytes": 3946
+    },
+    {
+      "path": "lib/voiceprint/service.js",
+      "sha256": "8bee4721073bae921a7e445a6e1af71a24b6d106446d96431c6e136e3c57b5af",
+      "bytes": 10181
+    },
+    {
+      "path": "lib/voiceprint/space.js",
+      "sha256": "e211c7ec3b43bbddcd4a489136c99c63f901a94f534e1a78e4177a7eab1ac2bc",
+      "bytes": 3667
+    },
+    {
+      "path": "lib/voiceprint/store.js",
+      "sha256": "6c990ffec04c7b04e605c6c2eb3528dca399ee1b20b7c21fb75728f0ba27aa20",
+      "bytes": 8931
     },
     {
       "path": "lib/workspace.js",
@@ -479,7 +519,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "492bce44e4f73f1d1dd5a70021e70e0e21baf6601a0b6842ee8c94517c8b2322",
+      "sha256": "a2c4f719f15c954b79ed7542528b4f1c84ef305742c2870453135fd515be2236",
       "bytes": 15533
     },
     {
