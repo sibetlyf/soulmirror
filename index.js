@@ -841,9 +841,19 @@ export function apply(ctx, config, deps = {}) {
           return json(200,value)
         }
         // 未开启时不做实时探测：少一次 PowerShell 调用，也完全不碰桌面
-        const liveApp = cfg.enabled && !testMode ? await detectMeetingApp() : meetingApp(cfg.activeApp || '')
-        const codeInfo = testMode ? {code:"",source:"test"} : await currentMeetingCode(liveApp)
-        const statusWins = await listWindows()
+        // 桌面探测是 PowerShell，慢（几百毫秒到几秒）。面板每秒轮询，
+        // 每次都探测就会让"点开关"看起来要等好几秒。这里把探测结果单独缓存：
+        // ?light=1 只读缓存，强刷或诊断页才触发实时探测。
+        const wantLight = /[?&]light=1/.test(String(req.url || ''))
+        const probeFresh = desktopProbe.value && (nowMs - (desktopProbe.at || 0)) < (Number(cfg.desktopProbeMs) || 10000)
+        const useCachedProbe = wantLight && probeFresh
+        const liveApp = useCachedProbe
+          ? desktopProbe.value.liveApp
+          : (cfg.enabled && !testMode ? await detectMeetingApp() : meetingApp(cfg.activeApp || ''))
+        const codeInfo = useCachedProbe
+          ? desktopProbe.value.codeInfo
+          : (testMode ? { code: '', source: 'test' } : await currentMeetingCode(liveApp))
+        const statusWins = useCachedProbe ? desktopProbe.value.wins : await listWindows()
         // 挑标题用于展示：排除"标题就是进程名"或空标题的窗口（腾讯会议会留一个 wemeetapp 的后台窗）
         const procName = String(liveApp.proc || '').toLowerCase()
         const liveWin = pickMeetingWindows(statusWins, liveApp.title, liveApp.proc)
@@ -1007,7 +1017,7 @@ export function apply(ctx, config, deps = {}) {
             since: lifecycle.startedAt,
             code: codeInfo.code,
             codeSource: codeInfo.source,
-            inMeeting: testMode ? false : await meetingActive(liveApp, statusWins),
+            inMeeting: testMode ? false : (useCachedProbe ? !!desktopProbe.value.inMeeting : await meetingActive(liveApp, statusWins)),
           },
           models: { asr: cfg.asr.provider + ' / ' + resolveAsrModel(cfg.asr), tts: cfg.tts.provider + ' / ' + cfg.tts.model + ' / ' + cfg.tts.voice },
           devices: { capture: cfg.devices.capture || '默认渲染设备', speak: cfg.devices.speak },
@@ -1022,6 +1032,11 @@ export function apply(ctx, config, deps = {}) {
         }
         __payload.display = normalizeDisplay(cfg.display)
         __payload.view = buildViewModel({journal:journal.projection(),runtime:__payload,display:cfg.display})
+        // 只缓存"真实探测"的结果；light 请求不刷新缓存，否则缓存永远自己变新
+        if (!useCachedProbe) {
+          desktopProbe.at = Date.now()
+          desktopProbe.value = { liveApp, codeInfo, wins: statusWins, inMeeting: !!__payload.meeting.inMeeting }
+        }
         probeCache.value = __payload
         probeCache.at = Date.now()
         probeCache.slow = (Date.now() - statusStartedAt) > 3000
@@ -5627,6 +5642,8 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
   }
 
   // 状态接口的探测结果缓存（见 GET /status）
+  /** 桌面探测缓存：liveApp / 会议号 / 窗口列表 / 是否在会中，避免每秒轮询都跑 PowerShell */
+  let desktopProbe = { at: 0, value: null }
   const probeCache = { at: 0, value: null, slow: false }
 
   // ── 识别预算：开会一小时也在花钱，得有个上限 ────────────────────────

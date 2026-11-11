@@ -22,7 +22,11 @@ test('面板状态卡里就有总开关，且是无障碍的 switch', () => {
   assert.match(client, /'aria-checked': v\.enabled/, '开关要如实反映当前状态')
   assert.match(client, /toggleEnabled\(v\.enabled\)/, '点击要按当前状态切换')
   assert.match(client, /会议助手：开|会议助手：关/, '开关上要写字，不能只有颜色')
-  assert.match(client, /action: currentlyOn \? 'off' : 'start'/, '关闭走 off、开启走 start')
+  assert.match(client, /action: want \? 'start' : 'off'/, '关闭走 off、开启走 start')
+  // 连点与延迟：必须有请求序号丢弃旧响应，并用服务端已落盘的 enabled 立即对齐
+  assert.match(client, /var toggleSeq = 0/, '开关请求要有序号')
+  assert.match(client, /if \(seq !== toggleSeq\) return/, '旧响应不能覆盖新状态')
+  assert.match(client, /live\.set\(\{ view: view, enabled: nowOn \}\)/, '要用已确认的值立即更新界面')
 })
 
 test('关掉时要说清后果：不自动检测、不录音', () => {
