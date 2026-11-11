@@ -4,8 +4,8 @@
   "files": [
     {
       "path": "index.js",
-      "sha256": "f74353ffd0ce212b8f71795e61192e4eb0c33bfad5f018715065b4510d209fd6",
-      "bytes": 333176
+      "sha256": "68a858b6640a1b55e9727f205f714210ec94749c485f3dc0fedcc509d09efd2b",
+      "bytes": 334057
     },
     {
       "path": "lib/action-items.js",
@@ -248,9 +248,14 @@
       "bytes": 2774
     },
     {
+      "path": "lib/minutes-format.js",
+      "sha256": "27dd71de487db53190eee589a610440f09cfd93e5fb68cf7691050c73bdb3e54",
+      "bytes": 8279
+    },
+    {
       "path": "lib/minutes-task.js",
-      "sha256": "69293da20a375749229ff21310171796afdebd8b0a16bd8698e4553112b8b182",
-      "bytes": 4737
+      "sha256": "95eb95f3e61e4f9e6ec5b55782a5ffe36783cc5dab43c3efe31a4c41ceda1eea",
+      "bytes": 4650
     },
     {
       "path": "lib/model-probe.js",
@@ -269,8 +274,8 @@
     },
     {
       "path": "lib/offline-asr.js",
-      "sha256": "b7366ff073b2d9bc07c03264829053daeee616d1dd216fd9e84dac50be52183b",
-      "bytes": 5670
+      "sha256": "a7d962cbe80eb6839cfd5245991e59df038baf5023b91bcd3d371f4f908c48d6",
+      "bytes": 5595
     },
     {
       "path": "lib/offline-audio.js",
@@ -474,7 +479,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "a7cbe11a9222b4f4931190565fa24d09b628d2bebd3fbf8cd4c084ebdd7832f8",
+      "sha256": "386f772e49d358708c575d7c1438bba68182a5268ac20f79adf153231b729431",
       "bytes": 15377
     },
     {

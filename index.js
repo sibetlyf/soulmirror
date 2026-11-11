@@ -41,6 +41,7 @@ import { DemoController } from './lib/demo.js'
 import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
 import { saveMinutes as persistMinutesFile } from './lib/minutes-file.js'
+import { buildMinutesSystemPrompt, buildMinutesUserPrompt, minutesMeta, finalizeMinutes, localStamp } from './lib/minutes-format.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
@@ -4707,8 +4708,8 @@ export function apply(ctx, config, deps = {}) {
     if (completer) {
       try {
         const out = await completer([
-          { role: 'system', content: '你是会议纪要助手。输出 Markdown：## 决议 / ## 待办 / ## 风险 / ## 未决问题，没有就写“无”。不要编造。' },
-          { role: 'user', content: text },
+          { role: 'system', content: buildMinutesSystemPrompt() },
+          { role: 'user', content: buildMinutesUserPrompt({ transcript: text, meta: minutesMeta({ meta: { title: session.display, startedAt: session.startedAt }, cfg, dir: session.dir }) }) },
         ])
         if (out) { lastMinutesMd = out; return out }
     } catch (e) {
@@ -5411,16 +5412,25 @@ export function apply(ctx, config, deps = {}) {
     },
     minutes: async task => {
       task.assertActive()
-      const lines = readLogText(await readFile(join(task.dir,'transcript-offline.jsonl'),'utf8')).lines
-        .filter(x=>x && x.text).map(x=>(x.speaker ? x.speaker+'：' : '')+x.text)
-      if (!lines.length) throw new Error('没有已落盘的非流式转写，不能生成纪要')
-      const md = await minutesCompleter([{role:'system',content:'根据完整会议转写生成中文 Markdown 纪要，含决议、待办（负责人及期限，未知则注明）、风险、未决问题。不得编造。'}, {role:'user',content:lines.join('\n')}],{dir:task.dir})
+      const offline = readLogText(await readFile(join(task.dir,'transcript-offline.jsonl'),'utf8')).lines
+        .filter(x=>x && x.text)
+      if (!offline.length) throw new Error('没有已落盘的非流式转写，不能生成纪要')
+      // 说话人标签只用来让模型分辨谁在说，不允许写进纪要正文（读起来像草稿）
+      const transcript = offline.map(x => (x.speaker ? '[' + x.speaker + '] ' : '') + x.text).join('\n')
+      const meta = minutesMeta({ meta: { ...(loadMeta(task.dir) || {}), title: (loadMeta(task.dir) || {}).title || session.display || '' }, cfg, dir: task.dir })
+      const raw = await minutesCompleter([
+        { role: 'system', content: buildMinutesSystemPrompt() },
+        { role: 'user', content: buildMinutesUserPrompt({ transcript, meta }) },
+      ], { dir: task.dir })
       task.assertActive()
-      if (!md || !String(md).trim()) throw new Error('DSH 会话模型返回空纪要')
+      if (!raw || !String(raw).trim()) throw new Error('DSH 会话模型返回空纪要')
+      // 后处理：剥掉"说话人1："这类标签，补上"四、纪要人"的真实作者与时间
+      const md = finalizeMinutes(raw, { author: meta.author, at: meta.endedAt || localStamp('') })
+      if (!md.trim()) throw new Error('纪要清洗后为空，未保存')
       const saved = await persistMinutesFile(join(task.dir,'minutes.md'),md)
       task.assertActive()
       saveMeta(task.dir,{minutesAt:new Date().toISOString(),minutesSource:'dsh-session',minutesPath:saved.path})
-      return {status:'done',result:'已保存',path:saved.path,source:'dsh-session',sentences:lines.length}
+      return {status:'done',result:'已保存',path:saved.path,source:'dsh-session',sentences:offline.length}
     },
     knowledge: async task => {
       if (!cfg.knowledge.enabled || cfg.knowledge.mode === 'off') return {status:'skip',reason:'配置已关闭知识库写入'}
@@ -5767,9 +5777,10 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
       if (completer) {
         try {
           out = await completer([
-            { role: 'system', content: '你是会议纪要助手。输出 Markdown，包含四节：## 决议 / ## 待办 / ## 风险 / ## 未决问题。没有就写“无”。不要编造。' },
-            { role: 'user', content: text },
+            { role: 'system', content: buildMinutesSystemPrompt() },
+            { role: 'user', content: buildMinutesUserPrompt({ transcript: text, meta: minutesMeta({ meta: { title: session.display, startedAt: session.startedAt }, cfg, dir: session.dir }) }) },
           ])
+          if (out && out.trim()) out = finalizeMinutes(out, { author: cfg.userName || 'SoulMirror（自动整理）', at: localStamp('') })
         } catch (e) { out = '' }
       }
       if (!out) {
