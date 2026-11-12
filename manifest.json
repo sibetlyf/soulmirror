@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.2.2",
+  "version": "1.2.3",
   "files": [
     {
       "path": "index.js",
-      "sha256": "44e092f6afb181d1ef3a0bb5299ab0015aa685b370a71c8c3047ad8fe2f168f1",
-      "bytes": 388218
+      "sha256": "8c060371a4a6d5acbfa9446c63d9429d4ffad7d94b69cdfb25fa97358f6366a0",
+      "bytes": 401780
     },
     {
       "path": "lib/action-items.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "1542881ecd296b70f4499134cb0e3a0fdf83b98703324b5788188f127aa164d7",
-      "bytes": 172657
+      "sha256": "0bb0a2d5c9922b43e49ecfd414316dbcbd852ca4b0044a26c177439847baefe4",
+      "bytes": 187132
     },
     {
       "path": "lib/context-snapshot.js",
@@ -194,8 +194,8 @@
     },
     {
       "path": "lib/journal.js",
-      "sha256": "d77b473a8c5a1dc7b1fde01b82185a9c5bfc50c82be2d7f98a3ca4b28693721c",
-      "bytes": 22250
+      "sha256": "77f6bf10b8b73a2f6d77032c0696dd77fe8823654278448444f69fa8d00978ae",
+      "bytes": 22548
     },
     {
       "path": "lib/knowledge.js",
@@ -358,6 +358,11 @@
       "bytes": 5443
     },
     {
+      "path": "lib/recordings.js",
+      "sha256": "39802832c8229d1c3e2fefa34aa697d05a6cd302f27190126fb4f5eeb6583cc9",
+      "bytes": 20861
+    },
+    {
       "path": "lib/recovery.js",
       "sha256": "67b7549c699261da07476acab66ddcdf14575662dc4c6dd7ca35d2e51e098ae3",
       "bytes": 2930
@@ -464,13 +469,13 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "ace30f0afce1ce69858c7d133402c4745f13bd9fb61b753f3e03e5cc23ab982c",
+      "sha256": "b7238ba164f31c90fe995f72d972be3a10ab31698aa562c342757ba5b27bbe92",
       "bytes": 3947
     },
     {
       "path": "lib/view-model.js",
-      "sha256": "908c04d77f91acb56a6146a6eb2cd18bca8ec67302eb25adf6e2b3548071f503",
-      "bytes": 9562
+      "sha256": "c8b14041df79f530e8d32a9ade46986f46e563bca556a2d954aa5adc7d40c32e",
+      "bytes": 9723
     },
     {
       "path": "lib/voiceprint/embed.js",
@@ -539,12 +544,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "92481684bba10d5a949fe886022497ab25a4d2975e265719a16cd36e8c33e388",
-      "bytes": 17297
+      "sha256": "23c53aa835922af4c351f14de242be8fc1b35a0e9d13484686a19e194c695333",
+      "bytes": 17614
     },
     {
       "path": "package.json",
-      "sha256": "d1ef3fe4e9e922bcbae0dd5b5e10de1d17ac74fb9c64df68516f8c170665b833",
+      "sha256": "380a4b65c68fd1622e27a0802a3d90ec1a985e7911f56389ce9486e8012f135d",
       "bytes": 2455
     },
     {

@@ -16,13 +16,13 @@ import { createPostMeeting } from './lib/postmeeting.js'
 import { updatePostMeetingPersona } from './lib/postmeeting-persona.js'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync, openAsBlob, readdirSync } from 'node:fs'
+import { existsSync, statSync, readFileSync, writeFileSync, mkdirSync, openAsBlob, readdirSync, lstatSync, rmSync } from 'node:fs'
 import {appendFile, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir } from 'node:os'
 import v8 from 'node:v8'
-import { join, dirname, basename } from 'node:path'
+import { join, dirname, basename, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 
@@ -64,6 +64,11 @@ import { formatAudioDiag } from './lib/audio-diag.js'
 import { readWavPcm, readWavHeader, transcribeOffline, buildOfflineMinutes, getLastMinutesError } from './lib/offline-asr.js'
 import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
 import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
+import {
+  classifyNoAudio, inspectRecord, listRecordings,
+  writeWavFromPcm, copyWavStream, wrapWavStream, nextImportDir, isDirectChildDir,
+  validateImportSource,
+} from './lib/recordings.js'
 import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
 import { buildSnapshot } from './lib/context-snapshot.js'
 import { createDshCompleter } from './lib/dsh-llm.js'
@@ -1119,6 +1124,16 @@ export function apply(ctx, config, deps = {}) {
           if (audio && audio.exists) audio.seconds = Math.max(0, Math.round((audio.bytes - 44) / 32000))  // 16k/16bit/单声道
           return { dir, audio, minutes: pick('minutes.md'), transcript: pick('transcript-offline.jsonl') }
         })()
+        // 这段录音能不能整理：三种"没有可用录音"由宿主判定（界面据此不显示点了必然失败的按钮）
+        // 还没有会议目录时不判定（否则会一直显示"没有可用录音"的空提示）
+        __payload.recording = __payload.artifacts.dir ? (() => {
+          const rec = inspectRecord(__payload.artifacts.dir)
+          return {
+            dir: rec.dir, ok: rec.ok, reason: rec.reason, message: rec.message, hint: rec.hint,
+            wavBytes: rec.wavBytes, pcmBytes: rec.pcmBytes, bytes: rec.bytes, seconds: rec.seconds,
+            captureBytes: rec.captureBytes, silentRatio: rec.silentRatio, verdict: rec.verdict,
+          }
+        })() : null
         // 声纹：就绪状态（缺模型/缺运行库/没开启）+ 这一场会的认人结果（来自 speakers.json）
         // 全部由宿主算好再由 view-model 传给界面——客户端不猜"大概认出了谁"。
         await attachVoiceprintStatus(__payload)
@@ -1363,10 +1378,66 @@ export function apply(ctx, config, deps = {}) {
         for await (const c of req) chunks.push(c)
         const body = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
         const dir = String(body.dir || session.dir || postMeeting.dir || '')
-        if (!dir || !existsSync(join(dir, 'audio.wav'))) return json(400, { ok:false, error:'没有可用录音文件' })
-        const known = listRecords(session.dataRoot(), 10000)
-        if (dir !== session.dir && !(Array.isArray(known) && known.some(r => r.dir === dir))) return json(400, {ok:false,error:'不是已知会议目录'})
+        if (!dir) {
+          return json(200, {
+            ok: false, reason: 'no-audio-file', error: '还没有会议目录', message: '还没有会议目录：先录一场，或改用「之前的录音」导入一段',
+            hint: '从「之前的录音」里选一场，或导入本机的音频文件',
+          })
+        }
+        const root = recordsRoot()
+        if (!isDirectChildDir(root, dir) && dir !== session.dir) {
+          return json(400, {
+            ok: false, reason: 'bad-path', error: '不是已知会议目录',
+            message: '只允许整理会议数据目录下的记录', hint: '从「之前的录音」列表里选一场，而不是手填路径',
+          })
+        }
+        // 先判定这段录音到底能不能整理：0 字节 / 没有音频文件 / 整场静音，三种修法完全不同。
+        // 判定不过就不排队 —— 否则用户点一次必然失败，只得到"没有录音文件"。
+        const state = inspectRecord(dir)
+        if (state.reason) {
+          return json(200, {
+            ok: false, reason: state.reason, error: state.message, message: state.message, hint: state.hint, dir,
+            wavBytes: state.wavBytes, pcmBytes: state.pcmBytes,
+          })
+        }
         return json(200, pipeline.enqueue(dir, { reason:'用录音重新整理', restart:body.restart !== false }))
+      }
+      // ── 之前的录音：列出历史录音（会议 + 导入），并说明还有几条没音频 ──
+      if (req.method === 'GET' && sub === 'recordings') {
+        // 没有音频的记录也列出来（否则用户找不到、也删不掉它），但只作为"事实 + 原因"，
+        // 界面按 hasAudio 决定不出"转写并出纪要"，并单独汇总 unsupportedCount。
+        return json(200, { ok: true, ...listRecordings(recordsRoot(), { limit: 60 }) })
+      }
+      // ── 导入本机音频 / 用已有录音重新整理（只读解析与复制，不执行任何 shell） ──
+      if (req.method === 'POST' && sub === 'import-recording') {
+        const bufI = []
+        for await (const c of req) bufI.push(c)
+        let body = {}
+        try { body = JSON.parse(Buffer.concat(bufI).toString('utf8') || '{}') } catch { body = {} }
+        try {
+          if (body.recordDir !== undefined && body.recordDir !== null && String(body.recordDir).trim()) {
+            return json(200, await reorganizeRecord(String(body.recordDir || ''), { restart: body.restart !== false }))
+          }
+          return json(200, await importRecordingFile(body.path))
+        } catch (e) {
+          logger?.warn?.('[soulmirror] 导入/整理录音异常：' + e.message)
+          return json(200, { ok:false, reason:'io-error', message:'导入/整理失败：' + e.message, hint:'看宿主日志；确认文件没被占用、磁盘可写' })
+        }
+      }
+      // ── 删除一条空记录（没有音频的那场）：先落日志再删，删后能追查 ──
+      if (req.method === 'POST' && sub === 'records/delete') {
+        const bufD = []
+        for await (const c of req) bufD.push(c)
+        let body = {}
+        try { body = JSON.parse(Buffer.concat(bufD).toString('utf8') || '{}') } catch { body = {} }
+        // 二次确认：界面上先 confirm，接口层也要求显式 confirm，避免一个误调用把记录删了
+        if (!(body.confirm === true || body.confirmed === true)) {
+          return json(200, {
+            ok: false, reason: 'confirm-required', message: '删除需要二次确认（请求里带 confirm:true）',
+            hint: '在「会后整理」上点「删除这条空记录」并确认；不要直接调接口删数据',
+          })
+        }
+        return json(200, deleteRecordDir(body.dir, { force: body.force === true }))
       }
       if (req.method === 'POST' && sub === 'setup') {
         const bufS = []
@@ -5765,7 +5836,13 @@ export function apply(ctx, config, deps = {}) {
     if (offlineBusy) return { ok: false, error: '上一次离线转写还没结束' }
     if (!dir) return { ok: false, error: '没有会议目录' }
     const wav = join(dir, 'audio.wav')
-    if (!existsSync(wav)) return { ok: false, error: '没有录音文件（本次可能没采到音频）' }
+    if (!existsSync(wav)) {
+      // 这里也要说准确：0 字节（没采集）/ 没有音频文件 / 整场静音，三种修法完全不同
+      const pcmBytes = (() => { try { return statSync(join(dir, 'audio.pcm')).size } catch { return 0 } })()
+      const why = classifyNoAudio({ meta: loadMeta(dir), wavBytes: 0, pcmBytes })
+      const message = why ? why.message : '没有录音文件（本次可能没采到音频）'
+      return { ok: false, reason: why ? why.reason : 'no-audio-file', error: message + (why && why.hint ? '｜' + why.hint : '') }
+    }
     const key = resolveDashScopeKey({ ...cfg.asr, apiKey: keyFor(cfg.asr, 'asr') }).key
     if (!key) {
       const why = keyProblem('asr')
@@ -5920,6 +5997,174 @@ export function apply(ctx, config, deps = {}) {
     }
     const r = pipeline.enqueue(dir, {reason})
     return { ...r, organized:r.ok, dir, reason:r.error || reason }
+  }
+
+  /**
+   * 会议数据根目录：会议目录写在 session.dataRoot()（默认配置下就是 CONFIG_DIR）。
+   * 这里不用 CONFIG_DIR 写死，是为了 dataDir 覆盖/多实例时也一致。
+   */
+  function recordsRoot() {
+    try { return session.dataRoot() || CONFIG_DIR } catch { return CONFIG_DIR }
+  }
+
+  /** 这条记录是不是正在用（正在录音/正在整理）：这种目录不能删 */
+  function recordDirInUse(dir) {
+    try {
+      if (session.dir && session.dir === dir && (session.capturing || session.running)) return '正在录音'
+    } catch { /* ignore */ }
+    try {
+      const cur = pipeline.status().current
+      if (cur && cur.dir === dir) return '正在整理'
+    } catch { /* ignore */ }
+    return ''
+  }
+
+  /** 只允许操作会议根下的**直接子目录**；拒绝目录、符号链接、非会议目录 */
+  function resolveRecordDir(input) {
+    const raw = String(input || '').trim()
+    if (!raw) return { ok:false, reason:'bad-path', message:'没有指定录音目录', hint:'从「之前的录音」列表里选一场' }
+    const root = recordsRoot()
+    if (!isDirectChildDir(root, raw)) {
+      return { ok:false, reason:'bad-path', message:'只允许操作会议数据目录下的子目录', hint:'从「之前的录音」列表里选一场，而不是手填路径' }
+    }
+    const dir = resolvePath(raw)
+    let st
+    try { st = lstatSync(dir) } catch { return { ok:false, reason:'not-found', message:'找不到这个会议目录', hint:'刷新「之前的录音」看它还在不在' } }
+    if (st.isSymbolicLink()) return { ok:false, reason:'not-a-file', message:'不接受符号链接指向的目录', hint:'直接用真实的会议目录' }
+    if (!st.isDirectory()) return { ok:false, reason:'not-found', message:'这不是一个会议目录', hint:'从「之前的录音」列表里选一场' }
+    return { ok:true, dir }
+  }
+
+  /**
+   * 导入一段本机录音：转成 audio.wav（16k/16bit/单声道）→ 写 meta.json → 才入队整理。
+   * 不合规的 WAV 明确拒绝并给 ffmpeg 命令，绝不自动转码。
+   */
+  async function importRecordingFile(input) {
+    const v = await validateImportSource(input)
+    if (!v.ok) return v
+    const fmt = v.format || null
+    const root = recordsRoot()
+    const dir = nextImportDir(root)
+    const nowIso = new Date().toISOString()
+    let bytes = 0, seconds = 0
+    try {
+      mkdirSync(dir, { recursive: true })
+      if (v.ext === '.pcm') {
+        const r = await writeWavFromPcm(v.path, join(dir, 'audio.wav'))
+        bytes = r.bytes
+        seconds = r.seconds
+      } else if (fmt && fmt.dataOffset === 44) {
+        const r = await copyWavStream(v.path, join(dir, 'audio.wav'))
+        bytes = r.bytes
+        seconds = r.seconds
+      } else {
+        // 非标准 44 字节头：只换头、原样搬 data，不改音频内容
+        const r = await wrapWavStream(v.path, join(dir, 'audio.wav'), fmt)
+        bytes = r.bytes
+        seconds = r.seconds
+      }
+      // 先落盘再展示：meta 写成功以后才入队
+      saveMeta(dir, {
+        source: 'import',
+        originalPath: v.path,
+        importedAt: nowIso,
+        title: basename(v.path),
+        startedAt: nowIso,
+        endedAt: nowIso,
+        bytes,
+        seconds,
+        capture: { device: 'imported-file', verdict: '来自导入的录音文件', bytes, durationSec: seconds },
+      })
+      // 入队前再确认音频真的在盘上（否则队列先跑起来，文件还没落盘）
+      if (!existsSync(join(dir, 'audio.wav'))) throw new Error('导入后没有找到 audio.wav，未入队')
+    } catch (e) {
+      // 半成品目录不能留：否则下次扫描会把它当"没音频的会议"
+      try { rmSync(dir, { recursive: true, force: true }) } catch { /* ignore */ }
+      logger?.warn?.('[soulmirror] 导入录音失败：' + e.message)
+      return { ok:false, reason:'io-error', message:'导入失败：' + e.message, hint:'确认文件没被别的程序占用、磁盘可写；目录已回滚' }
+    }
+    const q = pipeline.enqueue(dir, { reason:'导入录音' })
+    if (!q.ok) {
+      logger?.warn?.('[soulmirror] 导入的录音已落盘，但入队失败：' + (q.error || ''))
+      return {
+        ok:false, dir, reason:'enqueue-failed',
+        message:'录音已保存到 ' + dir + '，但排队整理失败：' + (q.error || '未知原因'),
+        hint:'在「之前的录音」里点这一场的「转写并出纪要」重试',
+      }
+    }
+    logger?.info?.('[soulmirror] 导入录音：' + basename(v.path) + ' → ' + dir + '（' + seconds + ' 秒 / ' + bytes + ' 字节）')
+    // queued 用真实值：enqueue 可能返回"已排队但前面还有"，界面要能看出差别
+    return { ok:true, dir, queued: q.queued !== false, queuedAhead: q.queuedAhead || null, seconds, bytes }
+  }
+
+  /** 用已有录音重新整理（列表里的「转写并出纪要」；不新建目录） */
+  async function reorganizeRecord(input, { restart = true } = {}) {
+    const resolved = resolveRecordDir(input)
+    if (!resolved.ok) return resolved
+    const dir = resolved.dir
+    const state = inspectRecord(dir)
+    // 没有可用录音 / 整场静音：把原因和下一步直接返回，不排一个必然失败的队
+    if (state.reason) {
+      return {
+        ok:false, dir, reason: state.reason, message: state.message, hint: state.hint,
+        wavBytes: state.wavBytes, pcmBytes: state.pcmBytes,
+      }
+    }
+    // 只有裸 PCM（采集被强杀、没来得及封装）：先封装成 audio.wav，否则整理步骤必然说"没有录音文件"
+    if (state.wavBytes === 0 && state.pcmBytes > 0) {
+      try {
+        const r = await writeWavFromPcm(join(dir, 'audio.pcm'), join(dir, 'audio.wav'))
+        saveMeta(dir, { audioFromPcm: true, audioBytes: r.bytes, durationSec: r.seconds })
+      } catch (e) {
+        return { ok:false, dir, reason:'io-error', message:'把 audio.pcm 封装成 WAV 失败：' + e.message, hint:'检查磁盘空间与权限；或重新导入这段录音' }
+      }
+    }
+    const q = pipeline.enqueue(dir, { reason:'用这段录音重新整理', restart: !!restart })
+    if (!q.ok) {
+      return {
+        ok:false, dir, reason: q.done ? 'already-done' : 'enqueue-failed',
+        message: q.error || '排队整理失败', hint:'这一场已经整理完成；要重新生成请再点一次「转写并出纪要」',
+      }
+    }
+    const after = inspectRecord(dir)
+    return { ok:true, dir, queued: !!q.queued, seconds: after.seconds, bytes: after.bytes }
+  }
+
+  /** 删除一条空记录：只允许会议根的直接子目录；删除前把 dir 与 meta.capture 一起落盘 */
+  function deleteRecordDir(input, { force = false } = {}) {
+    const resolved = resolveRecordDir(input)
+    if (!resolved.ok) return resolved
+    const dir = resolved.dir
+    const busy = recordDirInUse(dir)
+    if (busy) return { ok:false, reason:'in-use', message:'这条记录' + busy + '，现在不能删', hint:'等录音/整理结束后再删' }
+    const meta = loadMeta(dir)
+    const capture = (meta && meta.capture) || null
+    const state = inspectRecord(dir)
+    // 这条还留有音频或纪要：用户要的是"删掉采不到音频的空记录"，
+    // 所以必须显式 force，防止一条能救的记录被顺手删掉
+    if ((state.hasAudio || state.hasMinutes) && !force) {
+      return {
+        ok:false, reason:'has-content',
+        message:'这条记录里还有' + (state.hasAudio ? '录音' : '') + (state.hasAudio && state.hasMinutes ? '和' : '') + (state.hasMinutes ? '纪要' : '') + '，不能按"空记录"删掉',
+        hint:'确认确实要删就带 force:true（界面对空记录以外的条目会二次确认）',
+      }
+    }
+    // 先落盘再动手：删掉以后只剩这条日志能追查当时到底有没有采到音频
+    try {
+      journal.append('records.delete', {
+        dir, capture, reason:'用户删除空记录', bytes: state.bytes,
+        wavBytes: state.wavBytes, pcmBytes: state.pcmBytes, noAudio: state.reason || '',
+      })
+    } catch (e) {
+      return { ok:false, reason:'log-failed', message:'删除前写日志失败：' + e.message, hint:'磁盘可能写满或只读；这次没有删除任何东西' }
+    }
+    try { rmSync(dir, { recursive: true, force: false }) } catch (e) {
+      return { ok:false, reason:'delete-failed', message:'删除失败：' + e.message, hint:'关掉可能占用这个目录的程序后重试' }
+    }
+    if (existsSync(dir)) return { ok:false, reason:'delete-failed', message:'删除后目录仍然存在', hint:'检查是否有程序占用或权限不足' }
+    pendingRecoveryAt = 0
+    logger?.info?.('[soulmirror] 已删除空记录：' + dir)
+    return { ok:true, dir, removed:true }
   }
 
   const pipeline = createPostMeeting({ journal, logger, timeouts:{offline:Math.max(60000,Number(cfg.offlineTimeoutMs)||600000),minutes:300000,knowledge:120000,persona:120000}, steps: {
