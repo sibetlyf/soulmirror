@@ -146,6 +146,12 @@ export function voiceprintReasonText(reason, detail = {}) {
     }
     case 'mixed-voices':
       return '这一段混了两个人的声音，先不认（免得认错人）'
+    case 'domain-mismatch':
+      return '与库里「' + String(d.bestName || '某人') + '」的相似度只有 ' + (num(d.bestScore) || '—')
+        + '（门槛 ' + (num(d.acceptThreshold) || '—') + '）——这不是"差一点"，而是几乎不像同一个人。'
+        + '常见原因：注册用的麦克风与会议录音的采集链不同（环回采集做过增益/降噪），'
+        + '或者那条样本其实不是这个人的声音。建议改用这场会的「说话人N」重新入库（同一音频链路，比得上）；'
+        + '再用「录一段注册」录一次也可以，但请用开会时同一个麦克风。'
     case 'below-threshold':
       return '与库里最像的「' + String(d.bestName || '某人') + '」相似度 ' + (num(d.bestScore) || '—')
         + '，低于门槛 ' + (num(d.acceptThreshold) || '—')
