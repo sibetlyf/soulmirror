@@ -111,7 +111,7 @@
 
 ### 环境要求
 
-- Node.js 20+（跟随 DSH 版本要求）
+- Node.js **22+**（与 `package.json` 的 `engines` 一致；低于 22 会直接报错）
 - 零第三方原生依赖：`mbridge.exe` 随包分发（也可用系统 `csc` 重编）
 
 完整清单：[docs/requirements.md](docs/requirements.md)
@@ -129,7 +129,7 @@ git clone https://github.com/sibetlyf/soulmirror.git ~/.dsh/plugins/soulmirror
 dsh plugin --profile web add link:~/.dsh/plugins/soulmirror
 ```
 
-然后：填一次百炼 Key（识别/语音/模型共用）→ 点「测模型」确认连通 → 开会。
+装不上先看 [安装排错](docs/install-troubleshooting.md)（`add` 装的是整个 profile，任一依赖 404 就会整体失败）。然后填一次百炼 Key → 点「测模型」→ 开会。
 
 **升级不用卸载重装**：`soul_setup { action: "upgrade" }` 只替换 sha256 变了的文件、配置与会议记录不动；三种安装方式见 [docs/upgrade.md](docs/upgrade.md)。
 

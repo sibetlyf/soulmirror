@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.2.3",
+  "version": "1.2.4",
   "files": [
     {
       "path": "index.js",
@@ -469,7 +469,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "b7238ba164f31c90fe995f72d972be3a10ab31698aa562c342757ba5b27bbe92",
+      "sha256": "ca5798afbd4ba1fc48fc606f5e975ec34f2299224dad4251c6253740ba6dd6bc",
       "bytes": 3947
     },
     {
@@ -544,18 +544,18 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "23c53aa835922af4c351f14de242be8fc1b35a0e9d13484686a19e194c695333",
+      "sha256": "2baf3f33fa9603d6841fb825e09c34fdc763712cd2fea6c433a4ffc7bd754cc4",
       "bytes": 17614
     },
     {
       "path": "package.json",
-      "sha256": "380a4b65c68fd1622e27a0802a3d90ec1a985e7911f56389ce9486e8012f135d",
-      "bytes": 2455
+      "sha256": "d36a27ecdd17aef33ec775a9b7270c1ce526992000a094bdbc7cc16f9856e50c",
+      "bytes": 2240
     },
     {
       "path": "README.md",
-      "sha256": "d4629ab24a8f665c2b392949ae4b511fba9aa9e26d06edd9a5af65a27ff66148",
-      "bytes": 8274
+      "sha256": "ce11218a4d289f962a5b11a05e677ced86cae2d9679f2673e0a73cb7f17c1f7d",
+      "bytes": 8414
     },
     {
       "path": "tools/hold.ps1",
