@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "files": [
     {
       "path": "index.js",
-      "sha256": "0f17f00c2ae4e1299391b8d12666b3d1cf5a889ee13f0ed5471962249cd64ce7",
-      "bytes": 412475
+      "sha256": "cea3c18221a6f3a54d02305991bf9fad40d5b22c41b8353fa7d04e04883da771",
+      "bytes": 438438
     },
     {
       "path": "lib/action-items.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "25ed7c4fa19eecc6f602f33f6ae4720563b1bdb2f3852ed80bd65fd7e99583ae",
-      "bytes": 216057
+      "sha256": "23269620820f6c5ee52bd0fb98ee80a0e1342131a2f007607849dfda17ee77cc",
+      "bytes": 232224
     },
     {
       "path": "lib/context-snapshot.js",
@@ -364,8 +364,8 @@
     },
     {
       "path": "lib/recordings.js",
-      "sha256": "39802832c8229d1c3e2fefa34aa697d05a6cd302f27190126fb4f5eeb6583cc9",
-      "bytes": 20861
+      "sha256": "55e1650f3b58d089a88bb85dda396383562b1231bcc76282ae19fae479bb415e",
+      "bytes": 30931
     },
     {
       "path": "lib/recovery.js",
@@ -474,7 +474,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "9874ae9565ac89fa41cf3999ce277d9f62187870ca19554a487342bd690d4a2a",
+      "sha256": "e3a917ce7480601e574e83aeae3d3247fa648be6162b714d1845fdc8c508d5c1",
       "bytes": 3947
     },
     {
@@ -554,12 +554,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "d89a1c1b7c58fcef2a372dca257fe4f73e571a4a70a0bbe7540d457d47477343",
+      "sha256": "f2db3a12b2b7722573c8da715f51961d81b38e59a4f05b81c0e59396ff90ed16",
       "bytes": 17948
     },
     {
       "path": "package.json",
-      "sha256": "add19f4415966233b4113329cbc9838b3dd24a4ff2e65da49302dd5084ba45d0",
+      "sha256": "c6541df20802c431d01d53ec8f49474eb80ef0223dbc6bd86235ea192e2eb1d1",
       "bytes": 2240
     },
     {

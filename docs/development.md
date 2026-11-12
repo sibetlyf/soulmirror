@@ -141,7 +141,78 @@ node scripts/fetch-voiceprint-model.mjs --model-only           # 只装模型（
 非致命项：声纹不参与"能不能转录"，只影响"会后能不能认出人"，所以 `fatal: false`；
 一句话结论会用它自己的 `verdict`（如"声纹模型未安装"），不再只显示文件名。
 
-## 7. 发布证据清单
+## 7. 保存位置（录音 / 纪要 / 导出可配置）
+用户要求"手动选择纪要和录音等保存位置"。这一项的难点不是加输入框，而是**不能丢历史、不能越界、不能静默失败**。
+
+**两个键**
+
+| 键 | 语义 | 空值 |
+|---|---|---|
+| `storage.recordsRoot` | 新会议的录音 / 纪要 / 转写写这里 | 默认数据目录（`dataDir` → `~/.dsh/soulmirror`） |
+| `storage.exportDir` | 导出的纪要 / 转写文件写这里 | 仍然由浏览器下载（原行为） |
+
+**单一真源**：`index.js#recordsRoot()` 是唯一出口（`storageState().effectiveRoot`），别处不再手拼
+`join(CONFIG_DIR, ...)` 当会议根。`session.dataRoot()` 读的是 `cfg.dataDir`，所以生效自定义根时把
+`cfg.dataDir` 指向它（没配自定义位置时保持原值，不改老行为）。配置、日志、声纹库、workspace 仍然在 `CONFIG_DIR`。
+
+**绝不丢历史**：所有"读取/列表"同时扫两个根，并且去重 + 按时间倒序 + 标注来源：
+
+| 位置 | 用什么 |
+|---|---|
+| `lib/recordings.js#listRecordings` | 接单根或 `[{path, kind}]`；每条带 `root: default|custom`，并给 `byRoot` 计数 |
+| `GET /records` | `listRecordsMerged()`（两个根的 `listRecords` 合并去重排序） |
+| `GET /recordings` | `listRecordings(recordsRoots())` + `storage` |
+| 纪要连续性 | `collectHistoryByRoots()`（`minutes-history.js` 签名不动，在调用处按根调用后合并） |
+| 未整理会议扫描 / 人格回填 | `scanPendingRecovery`、`readdirSync` 也按根循环 |
+
+**越界防护按"实际根"收紧，不放松**：`resolveRecordDir`、`/offline`、`/records/delete`、
+`/record`、`/record/export` 的白名单都改为"默认根或配置根的直接子目录"（`isDirectChildDir`），
+嵌套目录、`..` 穿越到根外、根本身一律 `bad-path`；`resolve()` 之后再判断，所以 `..` 解析回根内是允许的。
+`/open-path` 额外放行"配置的会议根 / 导出根"（仍然只走宿主 `openWorkspacePath`，不拼 explorer 命令）。
+
+**校验（`lib/recordings.js#validateStorageDir`）**，失败一律 `{ok:false, reason, message, hint}`：
+
+| reason | 触发 | 用户看到的下一步 |
+|---|---|---|
+| `bad-path` | 空 / 相对路径 / 不存在的目录 | 挑一个已存在文件夹（**不自动创建**，避免拼错后写错地方） |
+| `is-file` | 指向文件 | 换成文件夹 |
+| `inside-app` | 在 DSH / 插件安装目录内（`node_modules`、插件根、`process.execPath` 目录） | 换自己新建的目录（升级会覆盖/锁住） |
+| `not-writable` | 探针写入/回读/删除失败 | 查权限、只读盘、OneDrive 占位、杀软拦截 |
+| `no-space` | 剩余 < 200MB（`MIN_STORAGE_FREE_BYTES`） | 换盘或清理 |
+
+探针是**真写一次再删**（不用 `accessSync` 猜"看起来可写"），探针文件叫 `.soulmirror-write-probe-*`。
+写不进、回读不一致、删不掉都算失败（留下的探针会污染会议列表）。`statfsSync` 拿不到空间时返回
+`freeUnknown: true` 而不是假装有空间；空间判定在探针之前（省一次写）。
+
+**接口**：`POST /api/soulmirror/storage`，`{ action: validate|save|reset, kind: records|export, path }`
+
+- `save` 先校验再落盘（`patchToStore` 白名单加 `storage`）；落盘失败返回 `save-failed`，**不改运行时值**。
+- 校验不过 → 原配置保持不变，响应带 `reason/message/hint`；界面就地显示，不"看起来保存了"。
+- 运行时另有一层：`/status` 的 `storage.{recordsRoot(=effectiveRoot), effectiveRoot, defaultRoot, configured, custom, fallback, reason, message, hint, exportDir, export*}`；
+  `/config` 读回带 `storage`（用户值 + 生效值）。配置目录被删/权限丢了 → `fallback=true` 并回退默认根，
+  响应与界面都写明"已回退"，绝不静默。
+
+**不自动搬旧数据**（有意不做"把旧会议复制到新位置"）：跨盘/大文件复制会引入第二份真相，
+一旦中途失败还要回滚，而源文件本来就在；用户要搬可以直接在资源管理器里移动。
+选择"以后写这里 + 两个根都列出"能让旧会议继续可见、可整理、可删除，风险面最小。
+
+**界面**：`lib/client.js#StorageCard`（设置页 + 面板设置页）：当前实际路径、「选择文件夹」（输入/粘贴绝对路径）、
+「校验并保存」、「只校验」、「恢复默认」、「在文件夹中显示」，并写清"已有 N 场仍在原位置"。
+「之前的录音」每条带 `自定义位置` 标记、头部写明"新会议写到哪 + 旧会议数量"；产物卡显示这场属于哪个位置与导出位置。
+
+**已知边界**（不是 bug，但要能解释）：网络盘/OneDrive 目录探针通过后仍可能因断线/占位文件在中途写失败；
+组策略限制的目录只能靠真写发现；`statfsSync` 在少数文件系统上拿不到剩余空间；移动/重命名自定义根会让配置失效 → 回退默认根并提示。
+
+**验证命令**（全部在 `mkdtemp` 里，不碰用户数据）：
+```sh
+npm run check:scope
+node --test tests/recordings-import.test.mjs tests/view-contract.test.mjs tests/hooks-order.test.mjs
+```
+另外用临时脚本跑过 7 组行为：默认/自定义/非法路径（含每条 reason）、两根列表去重与排序、
+`/offline` 白名单（直接子目录放行；嵌套/`..` 穿越/根本身拒绝）、导入落自定义根且默认根数量不变、
+真写失败 `not-writable`、配置目录删除后回退并明确说明、导出落盘与空配置原行为。
+
+## 8. 发布证据清单
 - [ ] 原失败用例修后通过；scope 零问题；相关及全量回归命令、通过/失败数。
 - [ ] 无真实音频/网络/Key 副作用；临时目录清理；测试自然退出。
 - [ ] manifest/打包清单正确；实际部署文件与源码 SHA-256/版本一致。

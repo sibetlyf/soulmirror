@@ -69,7 +69,7 @@ import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, load
 import {
   classifyNoAudio, inspectRecord, listRecordings,
   writeWavFromPcm, copyWavStream, wrapWavStream, nextImportDir, isDirectChildDir,
-  validateImportSource,
+  isWithinDir, validateImportSource, validateStorageDir, MIN_STORAGE_FREE_BYTES,
 } from './lib/recordings.js'
 import { renderExport, exportFileName, searchRecords } from './lib/record-export.js'
 import { buildSnapshot } from './lib/context-snapshot.js'
@@ -415,6 +415,17 @@ export const Config = z.object({
   policy: z.union(['observe', 'suggest', 'auto']).default('auto'),
   /** 数据目录（空 = ~/.dsh/soulmirror）。 */
   dataDir: z.string().default(''),
+  /**
+   * 保存位置（界面可手动选择；空 = 沿用原行为）。
+   *   recordsRoot  会议保存位置：新会议的录音 / 纪要 / 转写都写这里。
+   *                旧会议不会自动搬走——默认根里的历史记录仍然列出、仍然可以整理与删除。
+   *   exportDir    导出位置：导出的纪要 / 转写文件写这里；空 = 仍然由浏览器下载。
+   * 两个值都必须通过后端校验（绝对路径、非安装目录、真写一次、剩余 ≥200MB）才允许保存。
+   */
+  storage: z.object({
+    recordsRoot: z.string().default(''),
+    exportDir: z.string().default(''),
+  }),
   /** 保留音频切片（默认删）。 */
   keepAudio: z.boolean().default(false),
 })
@@ -529,6 +540,11 @@ export function apply(ctx, config, deps = {}) {
     userName: config.userName || '',
     wakeWords: Array.isArray(config.wakeWords) ? config.wakeWords : [],
     dataDir: config.dataDir || '',
+    // 保存位置：空 = 沿用原行为（默认数据目录 / 浏览器下载）
+    storage: {
+      recordsRoot: String(config.storage?.recordsRoot || ''),
+      exportDir: String(config.storage?.exportDir || ''),
+    },
     keepAudio: config.keepAudio === true,
     silenceRms: (config.asr && config.asr.silenceRms) || 0.004,
   }
@@ -715,6 +731,29 @@ export function apply(ctx, config, deps = {}) {
       autoStopSilenceSec: cfg.autoStopSilenceSec,
       autoStopGraceSec: cfg.autoStopGraceSec,
       display: normalizeDisplay(cfg.display),
+      // 保存位置：既要给"用户填的值"（重启后能读回），也要给"实际生效值"
+      storage: (() => {
+        const st = storageState()
+        return {
+          recordsRoot: String((cfg.storage && cfg.storage.recordsRoot) || ''),
+          exportDir: String((cfg.storage && cfg.storage.exportDir) || ''),
+          effectiveRoot: st.effectiveRoot,
+          defaultRoot: st.defaultRoot,
+          custom: !!st.customRoot,
+          sameAsDefault: !!st.sameDefault,
+          fallback: st.fallback,
+          reason: st.fallbackReason,
+          message: st.fallbackMessage,
+          hint: st.fallbackHint,
+          exportConfigured: !!st.configuredExport,
+          exportEffective: st.export.ok ? st.export.path : '',
+          exportFallback: st.exportFallback,
+          exportReason: st.exportFallback ? (st.export.reason || '') : '',
+          exportMessage: st.exportFallback ? (st.export.message || '') : '',
+          exportHint: st.exportFallback ? (st.export.hint || '') : '',
+          minFreeBytes: st.minFreeBytes,
+        }
+      })(),
       // 声纹总开关：界面要能读回**已落盘**的值（开启动作由 /config 写入）
       voiceprint: { enabled: !!(cfg.voiceprint && cfg.voiceprint.enabled === true) },
       extra: cfg._extra || {},
@@ -813,6 +852,14 @@ export function apply(ctx, config, deps = {}) {
     const keep = {}
     for (const k of ['display', 'enabled', 'policy', 'apps', 'activeApp', 'meetingCode', 'meetingCodeManual', 'userName', 'wakeWords', 'autoWatch', 'autoStop', 'autoStopSilenceSec', 'autoStopGraceSec']) if (patch[k] !== undefined) keep[k] = patch[k]
     for (const k of Object.keys(EDITABLE)) if (patch[k] !== undefined) keep[k] = pick(patch[k], EDITABLE[k])
+    // 保存位置：只开放这两个路径键（不含任何执行/命令语义）。空串 = 恢复默认。
+    if (patch.storage && typeof patch.storage === 'object') {
+      const want = {}
+      if (patch.storage.recordsRoot !== undefined) want.recordsRoot = String(patch.storage.recordsRoot || '').trim()
+      if (patch.storage.exportDir !== undefined) want.exportDir = String(patch.storage.exportDir || '').trim()
+      // 部分键也没关系：deepMerge 会与已存的值合并，不会把另一个位置抹掉
+      if (Object.keys(want).length) keep.storage = want
+    }
     // 声纹只开放总开关：模型 id/路径不允许界面写（避免变成第二个状态源）
     if (patch.voiceprint && patch.voiceprint.enabled !== undefined) keep.voiceprint = { enabled: patch.voiceprint.enabled === true }
     return keep
@@ -1138,8 +1185,19 @@ export function apply(ctx, config, deps = {}) {
           }
           const audio = pick('audio.wav')
           if (audio && audio.exists) audio.seconds = Math.max(0, Math.round((audio.bytes - 44) / 32000))  // 16k/16bit/单声道
-          return { dir, audio, minutes: pick('minutes.md'), transcript: pick('transcript-offline.jsonl') }
+          const st = storageState()
+          return {
+            dir,
+            // 这一场的目录在哪个根里：default=默认数据目录，custom=用户配置的保存位置
+            root: dir ? recordRootOf(dir) : '',
+            audio, minutes: pick('minutes.md'), transcript: pick('transcript-offline.jsonl'),
+            // 导出位置（空 = 仍然由浏览器下载）
+            exportDir: st.export.ok ? st.export.path : '',
+            exportFallback: st.exportFallback,
+          }
         })()
+        // 保存位置：实际生效的会议根 + 是否回退 + 原因（界面直接读这个，不自己拼路径）
+        __payload.storage = storageSummary()
         // 这段录音能不能整理：三种"没有可用录音"由宿主判定（界面据此不显示点了必然失败的按钮）
         // 还没有会议目录时不判定（否则会一直显示"没有可用录音"的空提示）
         __payload.recording = __payload.artifacts.dir ? (() => {
@@ -1366,28 +1424,74 @@ export function apply(ctx, config, deps = {}) {
       // ── 回看：历史会议列表 / 单场详情 ──
       if (req.method === 'GET' && sub === 'records') {
         const q = String(url.searchParams.get('q') || '').trim()
-        const all = listRecords(CONFIG_DIR, 60)
-        if (!q) return json(200, { ok: true, records: all.slice(0, 30), query: '', total: all.length })
+        // 同时扫默认根与配置根：换了保存位置以后，旧会议不能从列表里消失
+        const all = listRecordsMerged(60)
+        if (!q) return json(200, { ok: true, records: all.slice(0, 30), query: '', total: all.length, storage: storageSummary() })
         // 搜索命中要说明"为什么中"：目标 / 会邀 / 纪要 / 转写
         const hits = searchRecords(all, q, (dir) => loadRecord(dir, { transcriptLimit: 2000 }), 30)
-        return json(200, { ok: true, records: hits, query: q, total: hits.length })
+        return json(200, { ok: true, records: hits, query: q, total: hits.length, storage: storageSummary() })
       }
 
-      // 导出：?dir=&format=md|txt  →  返回文本与建议文件名（前端用 Blob 下载）
+      /**
+       * 导出：?dir=&format=md|txt
+       *   · 没配置 storage.exportDir → 原行为：返回文本，由前端 Blob 下载；
+       *   · 配置了 → 真的写到那个目录，并回传真实落盘路径（界面可「在文件夹中显示」）；
+       *   · 配置了但不可用 → 回退浏览器下载，并在 note 里说明原因（不静默）。
+       */
       if (req.method === 'GET' && sub === 'record/export') {
         const dir = String(url.searchParams.get('dir') || '')
-        if (!dir || !dir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+        if (!recordPathAllowed(dir)) {
+          return json(400, {
+            ok: false, reason: 'bad-path', error: '目录不合法',
+            message: '只允许导出会议数据目录里的记录', hint: '在「历史会议与恢复」里打开一场，再点导出',
+          })
+        }
         const rec = loadRecord(dir, { transcriptLimit: 5000 })
         if (!rec) return json(404, { ok: false, error: '读不到记录' })
         const format = String(url.searchParams.get('format') || 'md') === 'txt' ? 'text' : 'markdown'
         const text = renderExport(rec, { format })
-        return json(200, { ok: true, format, fileName: exportFileName(rec, format), text })
+        const fileName = exportFileName(rec, format)
+        const st = storageState()
+        if (!st.export.ok) {
+          // 未配置 = 原行为（浏览器下载）；配置了但失效 = 回退 + 说明
+          const note = st.exportFallback
+            ? '导出位置不可用，已回退为浏览器下载：' + (st.export.message || '原因未知')
+            : ''
+          return json(200, {
+            ok: true, format, fileName, text, written: false, exportFallback: st.exportFallback,
+            reason: st.exportFallback ? (st.export.reason || 'bad-path') : '',
+            message: note, hint: st.exportFallback ? (st.export.hint || '') : '',
+          })
+        }
+        try {
+          const out = join(st.export.path, fileName)
+          writeFileSync(out, text, 'utf8')
+          const back = readFileSync(out, 'utf8')
+          if (back !== text) throw new Error('回读内容与写入不一致')
+          const bytes = statSync(out).size
+          return json(200, {
+            ok: true, format, fileName, text, written: true,
+            path: out, bytes, exportDir: st.export.path,
+          })
+        } catch (e) {
+          return json(200, {
+            ok: false, format, fileName, text, written: false,
+            reason: 'io-error', message: '导出写盘失败：' + (e && e.message ? e.message : String(e)),
+            hint: '检查导出位置是否可写、磁盘是否已满；这次没有生成文件。界面可先回退用浏览器下载',
+            exportDir: st.export.path,
+          })
+        }
       }
       if (req.method === 'GET' && sub === 'record') {
         const dir = String(url.searchParams.get('dir') || '')
-        if (!dir || !dir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+        if (!recordPathAllowed(dir)) {
+          return json(400, {
+            ok: false, reason: 'bad-path', error: '目录不合法',
+            message: '只允许读取会议数据目录里的记录', hint: '在「历史会议与恢复」里打开一场，而不是手填路径',
+          })
+        }
         const r = loadRecord(dir)
-        return json(200, r ? { ok: true, record: r } : { ok: false, error: '读不到记录' })
+        return json(200, r ? { ok: true, record: r, root: recordRootOf(dir) } : { ok: false, error: '读不到记录' })
       }
       if (req.method === 'POST' && sub === 'offline') {
         const chunks = []
@@ -1400,13 +1504,14 @@ export function apply(ctx, config, deps = {}) {
             hint: '从「之前的录音」里选一场，或导入本机的音频文件',
           })
         }
-        const root = recordsRoot()
+        // 白名单按"实际根"判断：默认根与配置根的直接子目录都接受，演练目录与本次会话目录照旧
+        const inRoot = !!recordRootOf(dir)
         const demoRoot = join(CONFIG_DIR, 'demo')
         const inDemo = isDirectChildDir(demoRoot, dir)
-        if (!isDirectChildDir(root, dir) && !inDemo && dir !== session.dir) {
+        if (!inRoot && !inDemo && dir !== session.dir) {
           return json(400, {
             ok: false, reason: 'bad-path', error: '不是已知会议目录',
-            message: '只允许整理会议数据目录下的记录', hint: '从「之前的录音」列表里选一场，而不是手填路径',
+            message: '只允许整理会议数据目录下的记录（默认位置与已配置的保存位置）', hint: '从「之前的录音」列表里选一场，而不是手填路径',
           })
         }
         // 先判定这段录音到底能不能整理：0 字节 / 没有音频文件 / 整场静音，三种修法完全不同。
@@ -1424,7 +1529,12 @@ export function apply(ctx, config, deps = {}) {
       if (req.method === 'GET' && sub === 'recordings') {
         // 没有音频的记录也列出来（否则用户找不到、也删不掉它），但只作为"事实 + 原因"，
         // 界面按 hasAudio 决定不出"转写并出纪要"，并单独汇总 unsupportedCount。
-        return json(200, { ok: true, ...listRecordings(recordsRoot(), { limit: 60 }) })
+        // 默认根 + 配置根都扫：每条带 root，界面标注它在哪个位置。
+        return json(200, {
+          ok: true,
+          ...listRecordings(recordsRoots(), { limit: 60 }),
+          storage: storageSummary(),
+        })
       }
       // ── 导入本机音频 / 用已有录音重新整理（只读解析与复制，不执行任何 shell） ──
       if (req.method === 'POST' && sub === 'import-recording') {
@@ -1813,8 +1923,140 @@ export function apply(ctx, config, deps = {}) {
         const patch = JSON.parse(Buffer.concat(buf2).toString('utf8') || '{}')
         // 保存时把 ASR 模型的两个字段对齐，避免旧字段读到过期值
         if (patch.asr) patch.asr = withSyncedModel({ ...cfg.asr, ...patch.asr })
-        savePersisted(patch)
+        // 保存位置也走同一套校验：界面不该成为唯一防线（直接打 /config 也不能塞进非法路径）
+        if (patch.storage && typeof patch.storage === 'object') {
+          const bad = []
+          for (const [key, kind] of [['recordsRoot', 'records'], ['exportDir', 'export']]) {
+            if (patch.storage[key] === undefined) continue
+            const raw = String(patch.storage[key] || '').trim()
+            if (!raw) { patch.storage[key] = ''; continue }   // 空 = 恢复默认，允许
+            const v = validateStorageDir(raw, { protectedDirs: PROTECTED_APP_DIRS, minFreeBytes: MIN_STORAGE_FREE_BYTES })
+            if (!v.ok) {
+              bad.push({ kind, path: raw, reason: v.reason, message: v.message, hint: v.hint })
+              continue
+            }
+            patch.storage[key] = v.path
+          }
+          if (bad.length) {
+            return json(200, {
+              ...publicConfig(),
+              ok: false, reason: bad[0].reason,
+              error: '保存位置不可用：' + bad[0].message,
+              message: (bad[0].kind === 'export' ? '导出位置' : '会议保存位置') + '不可用：' + bad[0].message,
+              hint: bad[0].hint, rejected: bad,
+            })
+          }
+        }
+        const sv = savePersisted(patch)
+        // 保存失败要如实报错：只在内存里改、重启后变回去，是用户最恨的那种"保存了但不生效"。
+        // 仍然把整份配置带回去（界面照旧能渲染），额外加 ok:false + 原因。
+        if (!sv.ok) {
+          return json(200, {
+            ...publicConfig(),
+            ok: false, reason: 'save-failed', saveError: sv.error || '未知原因',
+            error: '写入配置失败：' + (sv.error || '未知原因'),
+            message: '写入配置失败，改动没有保存：' + (sv.error || '未知原因'),
+            hint: '检查 ' + CONFIG_FILE + ' 是否可写（安装目录只读、磁盘满都会这样）后重试',
+          })
+        }
+        if (patch.storage !== undefined) storageState({ refresh: true })
         return json(200, publicConfig())
+      }
+      /**
+       * 保存位置：**先校验再保存**。校验不过就明确拒绝，原配置保持不变（不静默改、不静默回退）。
+       *   action: validate | save | reset        kind: records | export
+       *   path: 绝对路径（save/validate 必填；reset 不需要）
+       */
+      if (req.method === 'POST' && sub === 'storage') {
+        const bufZ = []
+        for await (const c of req) bufZ.push(c)
+        let body = null
+        try { body = JSON.parse(Buffer.concat(bufZ).toString('utf8') || '{}') } catch { body = null }
+        if (!body || typeof body !== 'object') {
+          return json(400, {
+            ok: false, reason: 'bad-request', message: '请求体不是合法 JSON', hint: '重试一次；持续失败看宿主日志',
+          })
+        }
+        const kind = String(body.kind || 'records') === 'export' ? 'export' : 'records'
+        const action = String(body.action || 'save')
+        const keyIn = kind === 'export' ? 'exportDir' : 'recordsRoot'
+        const label = kind === 'export' ? '导出位置' : '会议保存位置'
+
+        if (action === 'reset') {
+          const sv = savePersisted({ storage: { [keyIn]: '' } })
+          if (!sv.ok) {
+            return json(200, {
+              ok: false, kind, action, saved: false, reason: 'save-failed',
+              message: '校验不需要，但写入配置失败：' + (sv.error || '未知原因'),
+              hint: '检查 ' + CONFIG_FILE + ' 是否可写后重试；这次没有改动' + label,
+              storage: storageSummary(),
+            })
+          }
+          storageState({ refresh: true })
+          return json(200, {
+            ok: true, kind, action, saved: true,
+            path: kind === 'export' ? '' : defaultRecordsRoot(),
+            message: kind === 'export' ? '已恢复默认：导出改为浏览器下载' : '已恢复默认：新会议写回默认位置（旧会议不受影响）',
+            storage: storageSummary(),
+          })
+        }
+
+        const raw = String(body.path || '').trim()
+        const v = validateStorageDir(raw, { protectedDirs: PROTECTED_APP_DIRS, minFreeBytes: MIN_STORAGE_FREE_BYTES })
+        if (!v.ok) {
+          // 明确拒绝：reason + 人话 + 下一步，原配置保持不变
+          return json(200, {
+            ok: false, kind, action, saved: false, path: raw,
+            reason: v.reason, message: label + '不可用：' + v.message, hint: v.hint,
+            storage: storageSummary(),
+          })
+        }
+        if (action === 'validate') {
+          return json(200, {
+            ok: true, kind, action, saved: false, path: v.path,
+            freeBytes: v.freeBytes, freeUnknown: v.freeUnknown,
+            message: label + '校验通过（已写入并删除一个临时探针文件）',
+            storage: storageSummary(),
+          })
+        }
+        if (action !== 'save') {
+          return json(400, {
+            ok: false, reason: 'bad-action', message: '未知操作：' + action, hint: '用 action=validate|save|reset',
+          })
+        }
+        const sv = savePersisted({ storage: { [keyIn]: v.path } })
+        if (!sv.ok) {
+          return json(200, {
+            ok: false, kind, action, saved: false, path: v.path, reason: 'save-failed',
+            message: '校验通过，但写入配置文件失败：' + (sv.error || '未知原因'),
+            hint: '检查 ' + CONFIG_FILE + ' 是否可写；这次没有改动' + label + '（重启后也不会变）',
+            storage: storageSummary(),
+          })
+        }
+        const st = storageState({ refresh: true })
+        if (kind === 'records') {
+          const sameDefault = samePathDir(v.path, st.defaultRoot)
+          return json(200, {
+            ok: true, kind, action, saved: true,
+            path: st.effectiveRoot, effectiveRoot: st.effectiveRoot, rootKind: st.customRoot ? 'custom' : 'default',
+            fallback: st.fallback, reason: st.fallbackReason, hint: st.fallbackHint,
+            message: sameDefault
+              ? '已保存：这个路径就是默认保存位置，新会议仍写在默认位置'
+              : (st.fallback
+                ? '已保存，但校验后又不可用，已回退默认位置：' + (st.fallbackMessage || '')
+                : '已保存：以后的新会议（录音 / 纪要 / 转写）写到 ' + st.effectiveRoot + '；已有会议仍在原位置，仍可查看与整理'),
+            storage: storageSummary(),
+          })
+        }
+        return json(200, {
+          ok: true, kind, action, saved: true,
+          path: st.export.ok ? st.export.path : '',
+          fallback: st.exportFallback, reason: st.export.reason || '', hint: st.export.hint || '',
+          message: st.export.ok
+            ? '已保存：导出文件写到 ' + st.export.path
+            : '已保存，但导出位置当前不可用，导出会回退为浏览器下载：' + (st.export.message || ''),
+          storage: storageSummary(),
+        })
       }
       if (req.method === 'POST' && sub === 'meeting') {
         const bufM = []
@@ -2317,6 +2559,226 @@ export function apply(ctx, config, deps = {}) {
     return spkCache.name
   }
   const session = new MeetingSession(cfg, logger, { getKey: () => keyFor(cfg.asr, 'asr'), onEvent: (type,data) => journal.append(type,data) })
+
+  // ── 保存位置：会议根的唯一真源 + 导出位置 ──────────────────────────────
+  // 用户要求"支持手动选择纪要和录音等保存位置"。四条硬约束：
+  //   ① 单一真源：所有"会议根"判断只从这里出，别处不再手拼 join(CONFIG_DIR, ...)；
+  //   ② 绝不丢历史：读取/列表同时扫「默认根 + 配置根」，只有**新会议**写进配置根；
+  //   ③ 不静默回退：配置的路径不可用就回退默认根，但响应与界面必须写明原因；
+  //   ④ 校验要真：写一次探针再删，不用 accessSync 猜"看起来可写"。
+  const BASE_DATA_DIR = String(cfg.dataDir || '').trim()
+  // 校验带缓存：/status 每秒轮询，不能每秒写一次探针。目录被删/被移走时会立刻重算（见 storageState）。
+  // 权限被中途改掉最多 5 分钟后才在状态里体现；但真写入仍会当场失败并可见（不靠缓存兜底）。
+  const STORAGE_CACHE_MS = 300000
+  /** DSH / 插件自己的安装目录：升级或重装会覆盖、锁住这些文件，不能当保存位置 */
+  const PROTECTED_APP_DIRS = (() => {
+    const out = []
+    try { out.push(resolvePath(pluginDir)) } catch { /* ignore */ }
+    // 插件装进 node_modules 时整棵 node_modules 都算安装目录（含 DSH 自带的 @deepseek-ai/dsh）
+    try {
+      let cur = resolvePath(dirname(fileURLToPath(import.meta.url)))
+      for (let i = 0; i < 8 && cur; i++) {
+        if (basename(cur).toLowerCase() === 'node_modules') { out.push(cur); break }
+        const up = dirname(cur)
+        if (!up || up === cur) break
+        cur = up
+      }
+    } catch { /* ignore */ }
+    try { out.push(resolvePath(dirname(process.execPath))) } catch { /* ignore */ }
+    return out
+  })()
+  const storageCache = { key: '', at: 0, state: null }
+
+  /** 默认会议根：用户原本的 dataDir（高级配置），没有就是插件数据目录 */
+  function defaultRecordsRoot() {
+    return BASE_DATA_DIR || CONFIG_DIR
+  }
+
+  /** 两个路径是否指向同一个目录（Windows 不区分大小写，先 resolve） */
+  function samePathDir(a, b) {
+    if (!a || !b) return false
+    return isWithinDir(a, b) && isWithinDir(b, a)
+  }
+
+  /**
+   * 保存位置的当前真实状态（带缓存：/status 会被轮询，不能每次都写探针）。
+   * 配置的目录被删/被移动时**立刻**重算，不等缓存过期——否则界面还会说"已生效"。
+   *
+   * @param {{refresh?: boolean}} [o] refresh=true 表示忽略缓存（配置刚改过）
+   */
+  function storageState({ refresh = false } = {}) {
+    const configured = String((cfg.storage && cfg.storage.recordsRoot) || '').trim()
+    const configuredExport = String((cfg.storage && cfg.storage.exportDir) || '').trim()
+    const def = defaultRecordsRoot()
+    const cacheKey = configured + '\u0000' + configuredExport
+    const now = Date.now()
+    const cached = storageCache.state
+    const vanished = !!(cached && configured && cached.custom.ok && !existsSync(configured))
+    if (!refresh && cached && storageCache.key === cacheKey && (now - storageCache.at) < STORAGE_CACHE_MS && !vanished) {
+      return cached
+    }
+    /** 校验一个配置值；空值 = "未配置"，不是失败 */
+    const checkOne = (raw, missingHint) => {
+      if (!raw) return { ok: false, configured: false, path: '', reason: '', message: '', hint: '', freeBytes: null }
+      if (!existsSync(raw)) {
+        return {
+          ok: false, configured: true, path: raw, reason: 'missing',
+          message: '配置的目录不存在了：' + raw, hint: missingHint, freeBytes: null,
+        }
+      }
+      const v = validateStorageDir(raw, { protectedDirs: PROTECTED_APP_DIRS, minFreeBytes: MIN_STORAGE_FREE_BYTES })
+      if (v.ok) {
+        return { ok: true, configured: true, path: v.path, freeBytes: v.freeBytes, freeUnknown: v.freeUnknown, reason: '', message: '', hint: '' }
+      }
+      return { ok: false, configured: true, path: raw, reason: v.reason, message: v.message, hint: v.hint, freeBytes: null }
+    }
+    const custom = checkOne(configured, '重新选一个文件夹，或点「恢复默认」回到默认位置（旧会议仍在默认位置，仍可查看与整理）')
+    const exportCheck = checkOne(configuredExport, '重新选一个文件夹，或点「恢复默认」改回浏览器下载')
+    const sameDefault = !!configured && samePathDir(configured, def)
+    const customRoot = (custom.ok && !samePathDir(custom.path, def)) ? custom.path : ''
+    const effectiveRoot = customRoot || def
+    // 配置了但不可用 → 已回退默认根；配置成"默认位置本身"不算回退
+    const fallback = !!configured && !customRoot && !sameDefault
+    const state = {
+      configured, configuredExport,
+      defaultRoot: def,
+      effectiveRoot,
+      customRoot,
+      sameDefault,
+      custom,
+      export: exportCheck,
+      fallback,
+      fallbackReason: fallback ? (custom.reason || 'bad-path') : '',
+      fallbackMessage: fallback ? (custom.message || '配置的保存位置不可用') : '',
+      fallbackHint: fallback ? (custom.hint || '换一个可写的文件夹，或恢复默认') : '',
+      exportFallback: !!configuredExport && !exportCheck.ok,
+      minFreeBytes: MIN_STORAGE_FREE_BYTES,
+      checkedAt: now,
+    }
+    storageCache.key = cacheKey
+    storageCache.at = now
+    storageCache.state = state
+    // session.dataRoot() 读的就是 cfg.dataDir：让它真的把**新会议**写进生效根。
+    // 没配自定义位置时保持原值不动（不改变已有行为）。
+    const wantDataDir = customRoot ? effectiveRoot : BASE_DATA_DIR
+    if (cfg.dataDir !== wantDataDir) {
+      cfg.dataDir = wantDataDir
+      logger?.info?.('[soulmirror] 会议保存位置生效：' + effectiveRoot + (customRoot ? '（自定义）' : '（默认）'))
+    }
+    if (!cached || cached.fallback !== fallback || cached.effectiveRoot !== effectiveRoot) {
+      if (fallback) logger?.warn?.('[soulmirror] 会议保存位置不可用，已回退默认：' + (custom.reason || '') + '｜' + (custom.message || ''))
+    }
+    return state
+  }
+
+  /** 所有会议根（默认根在前）：读取、列表、白名单都按这个集合判断 */
+  function recordsRoots() {
+    const st = storageState()
+    const out = [{ path: st.defaultRoot, kind: 'default' }]
+    if (st.customRoot) out.push({ path: st.customRoot, kind: 'custom' })
+    return out
+  }
+
+  /** dir 是哪个会议根的直接子目录（'' = 都不是） */
+  function recordRootOf(dir) {
+    const raw = String(dir || '')
+    if (!raw) return ''
+    for (const r of recordsRoots()) if (isDirectChildDir(r.path, raw)) return r.kind
+    return ''
+  }
+
+  /**
+   * 记录目录能不能读 / 导出：默认根、配置根或演练根（CONFIG_DIR/demo）的**直接子目录**。
+   * 以前这里是 `dir.startsWith(CONFIG_DIR)`（比"直接子目录"更宽），随保存位置一起收紧到直接子目录。
+   */
+  function recordPathAllowed(dir) {
+    const raw = String(dir || '').trim()
+    if (!raw) return false
+    if (recordRootOf(raw)) return true
+    // 演练产物写在默认数据目录的 demo 子目录里，仍然只认它的直接子目录
+    return isDirectChildDir(join(CONFIG_DIR, 'demo'), raw)
+  }
+
+  /** 给 /status、/recordings、/config 用的可读快照（实际生效值 + 回退原因） */
+  function storageSummary() {
+    const st = storageState()
+    return {
+      recordsRoot: st.effectiveRoot,
+      effectiveRoot: st.effectiveRoot,
+      defaultRoot: st.defaultRoot,
+      configured: st.configured,
+      custom: !!st.customRoot,
+      sameAsDefault: !!st.sameDefault,
+      fallback: st.fallback,
+      reason: st.fallbackReason,
+      message: st.fallbackMessage,
+      hint: st.fallbackHint,
+      exportDir: st.export.ok ? st.export.path : '',
+      exportConfigured: !!st.configuredExport,
+      exportFallback: st.exportFallback,
+      exportReason: st.exportFallback ? (st.export.reason || '') : '',
+      exportMessage: st.exportFallback ? (st.export.message || '') : '',
+      exportHint: st.exportFallback ? (st.export.hint || '') : '',
+      roots: recordsRoots(),
+      minFreeBytes: st.minFreeBytes,
+      checkedAt: st.checkedAt,
+    }
+  }
+
+  /** 合并两个根的历史会议（旧列表接口只扫默认根，换保存位置后旧会议会"消失"） */
+  function listRecordsMerged(limit = 60) {
+    const rows = []
+    const seen = new Set()
+    for (const r of recordsRoots()) {
+      for (const x of listRecords(r.path, limit)) {
+        const key = String(x.dir || '').toLowerCase()
+        if (!key || seen.has(key)) continue
+        seen.add(key)
+        rows.push({ ...x, root: r.kind })
+      }
+    }
+    const at = (x) => {
+      const t = Date.parse(String((x && (x.endedAt || x.startedAt)) || ''))
+      if (Number.isFinite(t) && t > 0) return t
+      const d = Date.parse(String((x && x.id) || '').slice(0, 10))
+      return Number.isFinite(d) ? d : 0
+    }
+    rows.sort((a, b) => (at(b) - at(a)) || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0))
+    return rows.slice(0, Math.max(1, Number(limit) || 60))
+  }
+
+  /**
+   * 纪要连续性要看的"历史会议"：默认根与配置根都要扫。
+   * minutes-history.js 只接受单根，所以这里在调用处合并（不改它的签名）。
+   * 一个根读失败不影响另一个根；全部失败且一条都没读到才抛出，让调用方按"无历史"降级并记日志。
+   */
+  function collectHistoryByRoots({ roots, now, days, limit, excludeDir } = {}) {
+    let merged = []
+    let lastError = null
+    for (const root of (roots || [])) {
+      try {
+        const h = collectHistory({ root, now, days, limit, excludeDir })
+        if (Array.isArray(h)) merged = merged.concat(h)
+      } catch (e) { lastError = e }
+    }
+    const seen = new Set()
+    merged = merged.filter((x) => {
+      const key = String((x && x.dir) || '').toLowerCase()
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+    merged.sort((a, b) => (Number(b && b.at) || 0) - (Number(a && a.at) || 0))
+    const out = merged.slice(0, Math.max(1, Number(limit) || 6))
+    // 保留 minutes-history 的窗口元信息（historyMeta 会读 days），但不进 JSON 形状
+    try { Object.defineProperty(out, 'days', { value: Number(days) || 0, enumerable: false }) } catch { /* ignore */ }
+    if (!out.length && lastError) throw lastError
+    return out
+  }
+
+  // 启动时算一次：让 session 立刻用上配置的保存位置（不可用就回退并记日志）
+  storageState({ refresh: true })
+
 
   // ── 是否"已开启会议功能" ─────────────────────────────────────────────
   // 关键：装了插件 ≠ 允许它动电脑。只有用户显式开启（面板开关 / meeting_agent_start）
@@ -3449,8 +3911,22 @@ export function apply(ctx, config, deps = {}) {
   async function openOnHost(path, { reveal = false } = {}) {
     const target = String(path || '')
     if (!target) return { ok: false, error: '没有路径' }
-    // 只允许打开插件自己数据目录里的东西：不能变成任意路径执行器
+    // 只允许打开插件自己数据目录里的东西：不能变成任意路径执行器。
+    // 会议可能写在「配置的会议保存位置」里、导出文件写在「导出位置」里，这两处同样只走宿主的
+    // openWorkspacePath（不拼 explorer 命令），所以单独放行；其它路径一律按下面的原文案拒绝。
+    const st = storageState()
+    const inCustomRoot = !!st.customRoot && isWithinDir(st.customRoot, target)
+    const inExportDir = st.export.ok && isWithinDir(st.export.path, target)
+    if (inCustomRoot || inExportDir) return openOnHostAllowed(target, reveal)
     if (!target.startsWith(CONFIG_DIR)) return { ok: false, error: '只允许打开会议数据目录内的文件' }
+    return openOnHostAllowed(target, reveal)
+  }
+
+  /**
+   * 真正打开文件/目录的宿主调用（仅由 openOnHost 的白名单分支进入）。
+   * @returns {Promise<{ok: boolean, error?: string}>}
+   */
+  async function openOnHostAllowed(target, reveal = false) {
     const sc = ctx.get('sessionController')
     if (!sc || typeof sc.openWorkspacePath !== 'function') {
       return { ok: false, error: '宿主不支持打开文件（请升级 DSH）' }
@@ -5750,15 +6226,24 @@ export function apply(ctx, config, deps = {}) {
     if (pendingRecoveryBusy) return pendingRecovery
     pendingRecoveryBusy = true
     try {
-      const root = CONFIG_DIR
-      pendingRecovery = scanPendingRecovery({
-        root,
-        now,
-        readdir: (p) => readdirSync(p),
-        exists: existsSync,
-        stat: (p) => { try { const s = statSync(p); return { size: s.size, mtimeMs: s.mtimeMs } } catch { return null } },
-        join,
-      })
+      // 未整理会议也分布在默认根与配置根：两个根都要扫，否则换保存位置后旧会议不会被提示恢复
+      const rows = []
+      for (const r of recordsRoots()) {
+        try {
+          const got = scanPendingRecovery({
+            root: r.path,
+            now,
+            readdir: (p) => readdirSync(p),
+            exists: existsSync,
+            stat: (p) => { try { const s = statSync(p); return { size: s.size, mtimeMs: s.mtimeMs } } catch { return null } },
+            join,
+          })
+          for (const x of got) rows.push({ ...x, root: r.kind })
+        } catch (e) {
+          logger?.warn?.('[soulmirror] 扫描未整理会议失败（' + r.path + '）：' + e.message)
+        }
+      }
+      pendingRecovery = rows
       pendingRecoveryAt = now
     } catch (e) {
       logger?.warn?.('[soulmirror] 扫描未整理会议失败：' + e.message)
@@ -6046,11 +6531,14 @@ export function apply(ctx, config, deps = {}) {
   }
 
   /**
-   * 会议数据根目录：会议目录写在 session.dataRoot()（默认配置下就是 CONFIG_DIR）。
-   * 这里不用 CONFIG_DIR 写死，是为了 dataDir 覆盖/多实例时也一致。
+   * 会议数据根目录 —— **唯一出口**。别处不要再手拼 join(CONFIG_DIR, ...) 当会议根。
+   *
+   * 语义：配置了 `storage.recordsRoot` 且校验通过 → 新会议写这里；否则沿用默认数据目录
+   * （`session.dataRoot()`，默认配置下就是 CONFIG_DIR）。配置不可用时回退到默认根，
+   * 但状态由 `storageSummary()` 明确带出 fallback/reason/message/hint，不退化成静默回退。
    */
   function recordsRoot() {
-    try { return session.dataRoot() || CONFIG_DIR } catch { return CONFIG_DIR }
+    return storageState().effectiveRoot
   }
 
   /** 这条记录是不是正在用（正在录音/正在整理）：这种目录不能删 */
@@ -6065,12 +6553,14 @@ export function apply(ctx, config, deps = {}) {
     return ''
   }
 
-  /** 只允许操作会议根下的**直接子目录**；拒绝目录、符号链接、非会议目录 */
+  /**
+   * 只允许操作会议根下的**直接子目录**；拒绝目录本身、符号链接、非会议目录。
+   * 白名单按"实际根"判断：默认根与配置根的直接子目录都接受，仍然只限直接子目录。
+   */
   function resolveRecordDir(input) {
     const raw = String(input || '').trim()
     if (!raw) return { ok:false, reason:'bad-path', message:'没有指定录音目录', hint:'从「之前的录音」列表里选一场' }
-    const root = recordsRoot()
-    if (!isDirectChildDir(root, raw)) {
+    if (!recordRootOf(raw)) {
       return { ok:false, reason:'bad-path', message:'只允许操作会议数据目录下的子目录', hint:'从「之前的录音」列表里选一场，而不是手填路径' }
     }
     const dir = resolvePath(raw)
@@ -6090,10 +6580,12 @@ export function apply(ctx, config, deps = {}) {
     if (!v.ok) return v
     const fmt = v.format || null
     const root = recordsRoot()
+    const st = storageState()
     const dir = nextImportDir(root)
     const nowIso = new Date().toISOString()
     let bytes = 0, seconds = 0
     try {
+      mkdirSync(root, { recursive: true })
       mkdirSync(dir, { recursive: true })
       if (v.ext === '.pcm') {
         const r = await writeWavFromPcm(v.path, join(dir, 'audio.wav'))
@@ -6140,7 +6632,11 @@ export function apply(ctx, config, deps = {}) {
     }
     logger?.info?.('[soulmirror] 导入录音：' + basename(v.path) + ' → ' + dir + '（' + seconds + ' 秒 / ' + bytes + ' 字节）')
     // queued 用真实值：enqueue 可能返回"已排队但前面还有"，界面要能看出差别
-    return { ok:true, dir, queued: q.queued !== false, queuedAhead: q.queuedAhead || null, seconds, bytes }
+    return {
+      ok:true, dir, root: recordRootOf(dir), queued: q.queued !== false, queuedAhead: q.queuedAhead || null, seconds, bytes,
+      // 配置的保存位置不可用时这里会写到默认根：把这件事实带回响应，界面不能装作写到了自定义位置
+      storageFallback: st.fallback, storageMessage: st.fallback ? (st.fallbackMessage || '') : '',
+    }
   }
 
   /** 用已有录音重新整理（列表里的「转写并出纪要」；不新建目录） */
@@ -6302,8 +6798,9 @@ export function apply(ctx, config, deps = {}) {
       let historyInfo = null
       let historyMissed = false
       try {
-        const hist = collectHistory({
-          root: CONFIG_DIR,
+        // 历史纪要可能分散在默认根与配置根：两个根都要看，否则换保存位置后"上次的待办"会断
+        const hist = collectHistoryByRoots({
+          roots: recordsRoots().map((r) => r.path),
           now: Date.now(),
           days: Number(cfg.knowledge && cfg.knowledge.historyDays) || 14,
           limit: Number(cfg.knowledge && cfg.knowledge.historyLimit) || 6,
@@ -7374,14 +7871,17 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
         const limit = Math.max(1, Math.min(20, Number(a.limit) || 5))
         if (!completer) return { ok: false, result: '没有可用的模型会话，无法回填' }
         try {
-          const root = CONFIG_DIR
           let dirs = []
-          try {
-            dirs = readdirSync(root)
-              .filter((d) => d !== 'persona' && d !== 'workspace')
-              .map((d) => join(root, d))
-              .filter((d) => existsSync(join(d, 'transcript.jsonl')))
-          } catch { dirs = [] }
+          // 账本可能分散在默认根与配置根：两个根都扫（只读 transcript.jsonl）
+          for (const r of recordsRoots()) {
+            try {
+              const got = readdirSync(r.path)
+                .filter((d) => d !== 'persona' && d !== 'workspace' && d !== 'voiceprint' && d !== 'demo')
+                .map((d) => join(r.path, d))
+                .filter((d) => existsSync(join(d, 'transcript.jsonl')))
+              dirs = dirs.concat(got)
+            } catch { /* 这个根还没建目录：跳过，不影响另一个根 */ }
+          }
 
           const picked = pickBackfillMeetings({
             dirs,

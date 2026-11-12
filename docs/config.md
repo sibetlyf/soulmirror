@@ -82,7 +82,26 @@ knowledge:
   mode: host              # host 直连宿主知识库 | agent 交给会话 | headless | off
 brain:
   gate: llm               # 每句都交给模型判断；rules 退回关键词
+storage:
+  recordsRoot: ""         # 会议保存位置（录音/纪要/转写）；空 = 默认数据目录
+  exportDir: ""           # 导出位置；空 = 导出仍由浏览器下载
 ```
+
+### 保存位置（`storage`）
+
+界面在「设置 → 会议助手 → 保存位置」和面板「设置」页里都能改，改之前**先校验**：
+
+| 键 | 含义 | 空值行为 |
+|---|---|---|
+| `storage.recordsRoot` | 新会议的录音 / 纪要 / 转写写到哪 | 沿用默认数据目录（`~/.dsh/soulmirror`） |
+| `storage.exportDir` | 导出的纪要 / 转写文件写到哪 | 仍然由浏览器下载（老行为） |
+
+- **换位置只影响以后**：不搬旧数据；列表会同时扫「默认位置 + 自定义位置」，旧会议仍然能看、能整理、能删。
+- **校验不通过就不保存**：相对路径、文件、不存在的目录、DSH/插件安装目录、写不进去、磁盘剩余不足 200MB 都会被拒绝，
+  并返回 `reason`（`bad-path` / `is-file` / `inside-app` / `not-writable` / `no-space`）+ 原因 + 下一步。
+- **可写性是真写一次**：写一个临时探针文件、回读、再删掉；不靠 `accessSync` 猜。
+- **不会静默回退**：配置的目录后来被删掉/没有权限时，运行时回退到默认位置，但 `/status` 的
+  `storage.fallback / reason / message / hint` 与界面都会写明"已回退"。
 
 ---
 
