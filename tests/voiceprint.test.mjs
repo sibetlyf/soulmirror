@@ -15,6 +15,7 @@ import {
 import { openLibrary, sampleMatchesSpace } from '../lib/voiceprint/store.js'
 import { createEmbedder, modelStatus } from '../lib/voiceprint/embed.js'
 import { readWavLayout, readWavSamples, keepMainCluster, enrollSample, identifyLabel } from '../lib/voiceprint/service.js'
+import { buildViewModel } from '../lib/view-model.js'
 
 /**
  * P2a：本地声纹（不依赖云端、不上传音频）。
@@ -89,7 +90,7 @@ test('空间：同一模型稳定，换模型/换前端都不可比', () => {
   const b = buildSpace({})
   assert.equal(a.spaceId, b.spaceId, '同一模型必须稳定（否则每次启动都变成新空间）')
   assert.equal(a.dimension, EMBEDDER_MODELS[DEFAULT_MODEL_ID].dim)
-  const c = buildSpace({ modelId: 'campplus-cn' })
+  const c = buildSpace({ modelId: 'campplus-zh' })
   assert.notEqual(a.spaceId, c.spaceId)
   assert.equal(a.comparableTo(b), true)
   assert.equal(a.comparableTo(c), false)
@@ -211,13 +212,13 @@ test('库：先落盘再生效，删人留墓碑，换空间后旧样本不参�
     assert.equal(lib.matcherPersons(space).length, 1)
 
     // 换模型 → 旧样本不可用，但要能看见"需要重新录入"
-    const other = buildSpace({ modelId: 'campplus-cn' })
+    const other = buildSpace({ modelId: 'campplus-zh' })
     assert.equal(lib.matcherPersons(other).length, 0)
     assert.equal(sampleMatchesSpace(lib.listSamples(p.personId)[0], other), false)
     // 旧模型空间的样本还在，换模型后要能被界面看到"这些样本用不了了"
     const stale = lib.stats(other).staleSpaces
     assert.equal(stale.length, 1)
-    assert.equal(stale[0].embedder_model_id, 'wespeaker-resnet34')
+    assert.equal(stale[0].embedder_model_id, 'wespeaker-resnet34-zh')
     assert.equal(stale[0].samples, 1)
 
     lib.renamePerson(p.personId, '老王')
@@ -336,5 +337,99 @@ test('接线：会后整理有 identify 步骤，且认人失败不影响纪要'
   assert.match(client, /function VoiceprintCard/)
   assert.match(client, /录一段注册/)
   assert.match(client, /音频只用来算向量，原始录音不保存/)
-  assert.match(client, /本机声纹（默认不出本机）/)
+  // UX P0：标题与隐私口径按评审改过，旧的"默认不出本机"说法不能回退
+  assert.match(client, /我认识的人 · 本机声纹/, '标题必须是"我认识的人 · 本机声纹"')
+  assert.match(client, /模型在本机运行；声纹不外传，音频不上传云端/, '必须说清：模型/声纹在本机，音频不外传')
+  assert.match(client, /我同意在本机保存这个人的声纹，仅用于会后认人/, '同意文案必须说明保存范围与用途')
+  assert.match(client, /这场会谁是谁/, '说话人名册卡标题必须存在')
+  // 两个 datalist 已经拆开：不能共用同一个 id（否则浏览器里两边补全会串）
+  assert.match(client, /'sm-people-vp'/, '声纹注册用独立 datalist id')
+  assert.match(client, /'sm-people-map'/, '会议名册用独立 datalist id')
+  // 未就绪时状态卡与录音按钮都必须说清原因，不能让人对着麦白录
+  assert.match(client, /声纹未就绪：/, '状态卡必须有 inline 的"声纹未就绪"提示')
+  assert.match(client, /先装模型才能录声纹/, '未就绪时录音按钮要说明先装模型')
+})
+
+test('view：voiceprint/identity 只来自宿主探测与落盘事实，客户端不自行推断', () => {
+  const runDir = '/tmp/sm-vp-view/meeting'
+  const view = buildViewModel({
+    journal: {
+      enabled: true,
+      lastSeq: 7,
+      runs: {
+        [runDir]: {
+          run: runDir, phase: 'done', updatedAt: '2026-11-11T00:00:00.000Z',
+          result: { sentences: 10, speakers: 2, minutesPath: '/tmp/m.md' }, steps: {},
+        },
+      },
+    },
+    runtime: {
+      // 宿主探测结果：模型校验过、运行库可用、总开关开着
+      voiceprint: { enabled: true, usable: true, ready: true, reason: '', hint: '', modelId: 'wespeaker-resnet34-zh' },
+      // 宿主合并 <dir>/speakers.json 后的认人结果
+      identities: { [runDir]: { assigned: 2, total: 5, pending: 3 } },
+    },
+  })
+  assert.deepEqual(view.voiceprint, {
+    enabled: true, usable: true, ready: true, reason: '', hint: '', modelId: 'wespeaker-resnet34-zh',
+  }, '声纹就绪状态必须由宿主原样下发（客户端不重算"大概能用"）')
+  assert.deepEqual(view.identity, { assigned: 2, total: 5, pending: 3 }, '认人结果必须来自已落盘的 speakers.json 投影')
+  assert.match(view.detail, /认出 2 位/, '完成后要能按落盘事实说"认出几位"')
+
+  // 宿主没给事实时必须保持 null：不许客户端假装"已就绪"或编出认人数
+  const empty = buildViewModel({})
+  assert.equal(empty.voiceprint, null, '没有宿主探测结果时不能自己推断声纹可用')
+  assert.equal(empty.identity, null, '没有认人结果时不能编出人数')
+
+  // ready 只认明确的 true（字符串/1 都不算）
+  const notReady = buildViewModel({ runtime: { voiceprint: { enabled: true, usable: true, ready: 'yes' } } })
+  assert.equal(notReady.voiceprint.usable, true)
+  assert.equal(notReady.voiceprint.ready, false, 'ready 必须是布尔事实，不能把任意真值当成就绪')
+})
+
+test('接线：声纹 UX 新契约（就绪字段/同意前置/speaker 来源/安装守卫同组）', () => {
+  const host = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const client = readFileSync(new URL('../lib/client.js', import.meta.url), 'utf8')
+
+  // 1) GET /voiceprint 必须返回就绪三件套：客户端据此禁用录音，不再自己猜
+  assert.match(host, /usable: readiness\.usable/, 'GET /voiceprint 必须返回 usable')
+  assert.match(host, /ready: readiness\.ready/, 'GET /voiceprint 必须返回 ready')
+  assert.match(host, /runtimeBytes: \(manifest\.runtime/, 'runtimeBytes 必须来自清单（不在前端硬编码 110MB）')
+
+  // 2) enroll 前置失败必须是 consent-required，且发生在解析音频之前
+  assert.match(host, /reason: 'consent-required'/, '未同意必须明确返回 consent-required')
+  assert.match(host, /const readiness = await voiceprintReadiness\(\{ fresh: true \}\)/, '注册前必须先判模型/运行库就绪')
+  const consentIdx = host.indexOf("reason: 'consent-required'")
+  const pcmIdx = host.indexOf('readPcm16Mono(buf)')
+  assert.ok(host.indexOf('if (!readiness.usable)') < consentIdx, '不可用时要在同意校验之前就拒绝（先给模型原因）')
+  assert.ok(consentIdx > 0 && pcmIdx > 0 && consentIdx < pcmIdx, '同意校验必须在解析音频之前：否则用户说满 12 秒才被拒绝')
+  // 客户端同样前置拦截：未同意不能打开麦克风，注册请求显式带同意
+  const vpBlock = client.slice(client.indexOf('function VoiceprintCard'), client.indexOf('function SpeakersCard'))
+  assert.match(vpBlock, /if \(!consented\) \{ setMsg\('请先勾选「我同意在本机保存这个人的声纹」再录'\); return \}/, 'startRecording 必须先查同意')
+  assert.match(vpBlock, /consent: \{ granted: true, noticeVersion: 'v1' \}/, '注册请求必须带用户显式同意（granted=true）')
+  assert.match(vpBlock, /'aria-label': '同意在本机保存声纹'/, '同意必须是一个可见的复选框')
+  const vpConsentIdx = vpBlock.indexOf('if (!consented)')
+  const vpMicIdx = vpBlock.indexOf('media.getUserMedia')
+  assert.ok(vpConsentIdx > 0 && vpMicIdx > 0 && vpConsentIdx < vpMicIdx, '未勾同意时不许调用 getUserMedia 打开麦克风')
+  assert.ok(vpBlock.indexOf('if (!usable)') < vpMicIdx, '模型/运行库不可用时同样不许打开麦克风（不能白录）')
+  // 按钮必须真的置灰，而不只是显示一句说明
+  assert.match(vpBlock, /var canRecord = usable && consented/, '录音按钮可用性 = 模型就绪 && 用户同意')
+  assert.match(vpBlock, /disabled: busy \|\| \(!recording && !canRecord\)/, '未就绪/未同意时录音按钮必须 disabled（置灰）')
+  assert.match(vpBlock, /'aria-disabled': canRecord \|\| recording \? 'false' : 'true'/, '无障碍状态也要反映"现在不能录"')
+
+  // 3) /speakers 每人都要带来源/是否有声纹/没认出的原因文字
+  assert.match(host, /\.\.\.s, name, source, hasPrint,/, 'speaker 项必须带 source 与 hasPrint')
+  assert.match(host, /reasonText: reason \? voiceprintReasonText\(reason, detail\) : ''/, '认不出时必须给 reasonText，界面才能解释为什么')
+  assert.match(host, /identity: autoTotal > 0/, '认人结果只来自 speakers.json（没有就 null，不猜）')
+
+  // 5) view 的两个字段必须由宿主喂：不许客户端自己推断
+  assert.match(host, /payload\.voiceprint = await voiceprintReadiness\(\)/, '宿主必须把就绪探测结果挂到 view payload')
+  assert.match(host, /payload\.identities = identities/, '认人结果必须由宿主从已落盘 speakers.json 汇总下发')
+
+  // 4) 路径守卫回归锁：安装/取消必须在同一组守卫条件里（漏一个就 404）
+  assert.match(
+    host,
+    /if \(sub === 'voiceprint' \|\| sub === 'voiceprint-enroll' \|\| sub === 'voiceprint-delete'\s*\|\| sub === 'voiceprint-install' \|\| sub === 'voiceprint-install-cancel'\) \{/,
+    '安装/取消必须与声纹路由在同一组守卫里；否则 POST /voiceprint-install 会落到 404（界面永远是灰按钮）',
+  )
 })

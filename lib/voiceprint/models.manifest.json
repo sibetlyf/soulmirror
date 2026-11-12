@@ -1,0 +1,86 @@
+{
+  "schema": 1,
+  "updatedAt": "2026-11-11",
+  "notes": [
+    "所有 sha256/sha512 都是本机真实下载后算出来的，并与来源方的官方校验值交叉核对过。",
+    "模型输入是 80 维 fbank（与 lib/voiceprint/fbank.js 的前端一致），不是原始波形。",
+    "两个模型的输入输出名与维度都用 onnxruntime-node 1.31.1 (CPU) 实测确认过。"
+  ],
+  "models": [
+    {
+      "id": "wespeaker-resnet34-zh",
+      "displayName": "WeSpeaker ResNet34（中文 · CNCeleb）",
+      "family": "wespeaker-resnet",
+      "version": "cnceleb-v1",
+      "dim": 256,
+      "file": "wespeaker_zh_cnceleb_resnet34.onnx",
+      "bytes": 26534363,
+      "sha256": "f86cd6c509f331f0e20b07bd48d1b2eb7de54202643401c4e84695ac861a0e5a",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_zh_cnceleb_resnet34.onnx"
+      ],
+      "inputName": "feats",
+      "outputName": "embs",
+      "inputShape": "[B, T, 80]",
+      "license": "Apache-2.0",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models",
+      "verified": "onnxruntime-node 1.31.1 CPU 实测：feats[B,T,80] → embs[B,256]；同一段音频余弦 1.000，约 190ms / 2 秒窗口",
+      "default": true
+    },
+    {
+      "id": "campplus-zh",
+      "displayName": "3D-Speaker CAM++（中文 · 3D-Speaker 通用）",
+      "family": "campplus",
+      "version": "3d-speaker-common-v1",
+      "dim": 192,
+      "file": "3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
+      "bytes": 28281138,
+      "sha256": "f682b514c05d947ee3fa91cd6ec6c5c7543479a128373fa29b1faedccd21fd11",
+      "urls": [
+        "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+      ],
+      "inputName": "x",
+      "outputName": "embedding",
+      "inputShape": "[N, T, 80]",
+      "license": "Apache-2.0",
+      "source": "https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models",
+      "verified": "onnxruntime-node 1.31.1 CPU 实测：x[N,T,80] → embedding[_,192]；同一段音频余弦 1.000，约 110ms / 2 秒窗口",
+      "default": false
+    }
+  ],
+  "runtime": {
+    "backend": "onnxruntime-node",
+    "version": "1.31.1",
+    "note": "不装进宿主 node_modules（那是 junction，禁止写入）；解到数据目录，按文件路径加载。",
+    "diskNote": "只取 win32-x64 的 CPU 组合，并删掉 DirectML/dxcompiler（35MB，用不上）。",
+    "packages": [
+      {
+        "name": "onnxruntime-node",
+        "tarball": "https://registry.npmjs.org/onnxruntime-node/-/onnxruntime-node-1.31.1.tgz",
+        "bytes": 115391311,
+        "sha512": "8a39d28216c31d559a4369c33e655c70f9421c8f241f5331d5a2786bfab344fd7a6c1715b3813712a6502990a48569dba8dd6db905b16a08a616d0e96cf61843",
+        "npmIntegrity": "sha512-ijnSghbDHVWaQ2nDPmVccPlCHI8kH1Mx1aJ4a/qzRP16bBcVs4E3EqZQKZCkhWnbqN1tuQWxagimFtDpbPYYQw==",
+        "extract": [
+          "package/package.json",
+          "package/dist",
+          "package/lib",
+          "package/bin/napi-v6/win32/x64/onnxruntime.dll",
+          "package/bin/napi-v6/win32/x64/onnxruntime_binding.node"
+        ],
+        "cleanup": [
+          "package/bin/napi-v6/win32/x64/DirectML.dll",
+          "package/bin/napi-v6/win32/x64/dxcompiler.dll"
+        ]
+      },
+      {
+        "name": "onnxruntime-common",
+        "tarball": "https://registry.npmjs.org/onnxruntime-common/-/onnxruntime-common-1.31.1.tgz",
+        "bytes": 72322,
+        "sha512": "17e9e760d890b66349f7957a47f8ac049aa2569740342aec30483539a17e0646e5dc602dcd62d1ecd835ecb77442d62d609ca8b4e1cf2733909f563a3cb663a6",
+        "npmIntegrity": "sha512-F+nnYNiQtmNJ95V6R/isBJqiVpdANCrsMEg1OaF+Bkbl3GAtzWLR7Ng17Ld0QtYtYJyotOHPJzOQn1Y6PLZjpg==",
+        "extract": ["package"],
+        "into": "package/node_modules"
+      }
+    ]
+  }
+}

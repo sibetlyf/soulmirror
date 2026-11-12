@@ -24,8 +24,15 @@ import { homedir } from 'node:os'
 import v8 from 'node:v8'
 import { join, dirname, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 
 const execFileAsync = promisify(execFile)
+/**
+ * 只为"宿主上是否已有 onnxruntime-node"做**存在性**探测（resolve，不加载）。
+ * 声纹运行库优先用数据目录自装的；宿主依赖里已有时，界面不该误报"运行库没装"。
+ */
+const pluginRequire = createRequire(import.meta.url)
+
 
 import { bridge, ensureBridge, listDevices, toolsDir, pluginDir, micUsage, defaultRenderDevice, meetingMicActive, bridgeExe } from './lib/bridge.js'
 import {
@@ -45,8 +52,12 @@ import { buildMinutesSystemPrompt, buildMinutesUserPrompt, minutesMeta, finalize
 import { loadSpeakerMap, saveSpeakerMap, loadPeople, rememberPeople, listSpeakers, applySpeakerMap, normalizeLabel, sanitizeName } from './lib/speaker-map.js'
 import { buildSpace, DEFAULT_MODEL_ID } from './lib/voiceprint/space.js'
 import { openLibrary } from './lib/voiceprint/store.js'
-import { createEmbedder, modelStatus } from './lib/voiceprint/embed.js'
+import { createEmbedder, modelStatus, runtimeStatus } from './lib/voiceprint/embed.js'
+import { loadManifest, findModel, defaultModelId, installModel, installRuntime, installedModels, modelDir, runtimeDir, installedModelPath } from './lib/voiceprint/installer.js'
+import { normalizeInstallState, mergeInstallState } from './lib/voiceprint/install-state.js'
 import { identifySpeakers, enrollSample, readWavSamples } from './lib/voiceprint/service.js'
+import { ACCEPT_SIMILARITY, MATCH_MARGIN } from './lib/voiceprint/match.js'
+import { MIN_READ_SECONDS, listPassages, pickPassage } from './lib/voiceprint/read-aloud.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
 import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
@@ -111,6 +122,46 @@ import { getController, createSession, promptSession } from './lib/dsh-session.j
 import { detectEnv, buildBridge, autoSetup, formatEnv } from './lib/setup.js'
 import { detectVirtualAudio, installPlan, installVirtualAudio, formatVirtualAudio } from './lib/vcard.js'
 
+/**
+ * 认人原因码 → 人话（**唯一一份**映射，界面只显示这一段文字，不再自己判断）。
+ * 数字全部来自 speakers.json 的 detail，不编。
+ * @param {string} reason
+ * @param {object} [detail]
+ */
+export function voiceprintReasonText(reason, detail = {}) {
+  const d = detail && typeof detail === 'object' ? detail : {}
+  const num = (v) => (Number.isFinite(Number(v)) ? String(Number(v)) : '')
+  switch (String(reason || '')) {
+    case 'not-enough-speech': {
+      const w = num(d.requiredWindows) || '5'
+      const s = num(d.requiredSeconds) || '3'
+      return '语音太少，不足以认人（至少需要 ' + w + ' 个窗口、约 ' + s + ' 秒有效语音）'
+    }
+    case 'mixed-voices':
+      return '这一段混了两个人的声音，先不认（免得认错人）'
+    case 'below-threshold':
+      return '与库里最像的「' + String(d.bestName || '某人') + '」相似度 ' + (num(d.bestScore) || '—')
+        + '，低于门槛 ' + (num(d.acceptThreshold) || '—')
+    case 'ambiguous':
+      return '与库里两人的分数太接近（' + (num(d.bestScore) || '—') + ' / ' + (num(d.runnerUpScore) || '—')
+        + '），暂不认，避免认错'
+    case 'library-empty':
+      return '本机声纹库还是空的：先录一个人的声纹，之后才会认人'
+    case 'no-match-in-library':
+      return '本机声纹库里没有匹配的人'
+    case 'no-evidence':
+      return '没有可用证据（这段音频的窗口都太短）'
+    case 'incomparable':
+      return '声纹库和当前模型不是同一空间（换过模型），旧样本不能用来认人'
+    case 'model-missing':
+      return '声纹模型不可用，无法认人' + (d.hint ? '（' + String(d.hint) + '）' : '')
+    case 'error':
+      return '认人时出错：' + String(d.message || '未知原因')
+    default:
+      return reason ? ('没有认出来（' + String(reason) + '）') : ''
+  }
+}
+
 export const name = 'soulmirror'
 
 export const inject = ['tools', 'webServer']
@@ -122,8 +173,8 @@ export const Config = z.object({
   voiceprint: z.object({
     enabled: z.boolean().default(false),
     /** 嵌入模型 id（见 lib/voiceprint/space.js 的 EMBEDDER_MODELS） */
-    modelId: z.string().default('wespeaker-resnet34'),
-    /** ONNX 模型文件路径；留空则用 <数据目录>/voiceprint/models/<modelId>.onnx */
+    modelId: z.string().default('wespeaker-resnet34-zh'),
+    /** ONNX 模型文件路径；留空则用 <数据目录>/voiceprint/models/<清单 file>（如 wespeaker_zh_cnceleb_resnet34.onnx） */
     modelPath: z.string().default(''),
     /** 认人门槛：默认照参考项目的校准值（0.60 + margin 0.15） */
     acceptSimilarity: z.number().min(0).max(1).default(0.60),
@@ -643,6 +694,8 @@ export function apply(ctx, config, deps = {}) {
       wakeWords: cfg.wakeWords || [],
       autoWatch: cfg.autoWatch === true,
       display: normalizeDisplay(cfg.display),
+      // 声纹总开关：界面要能读回**已落盘**的值（开启动作由 /config 写入）
+      voiceprint: { enabled: !!(cfg.voiceprint && cfg.voiceprint.enabled === true) },
       extra: cfg._extra || {},
     }
   }
@@ -739,6 +792,8 @@ export function apply(ctx, config, deps = {}) {
     const keep = {}
     for (const k of ['display', 'enabled', 'policy', 'apps', 'activeApp', 'meetingCode', 'meetingCodeManual', 'userName', 'wakeWords', 'autoWatch']) if (patch[k] !== undefined) keep[k] = patch[k]
     for (const k of Object.keys(EDITABLE)) if (patch[k] !== undefined) keep[k] = pick(patch[k], EDITABLE[k])
+    // 声纹只开放总开关：模型 id/路径不允许界面写（避免变成第二个状态源）
+    if (patch.voiceprint && patch.voiceprint.enabled !== undefined) keep.voiceprint = { enabled: patch.voiceprint.enabled === true }
     return keep
   }
 
@@ -812,7 +867,7 @@ export function apply(ctx, config, deps = {}) {
     const sub = url.pathname.replace(/^\/api\/soulmirror\/?/, '')
     // 任何写操作都会改变状态，先让状态探测缓存失效：
     // 否则"刚启用/刚切软件"之后会读到旧快照（表现为 armed=false、apps 里没有新软件）
-    if (req.method === 'POST') { probeCache.at = 0; probeCache.value = null; probeCache.slow = false }
+    if (req.method === 'POST') { probeCache.at = 0; probeCache.value = null; probeCache.slow = false; vpProbe.at = 0 }
     const json = (code, data) => {
       res.writeHead(code, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
       res.end(JSON.stringify(data))
@@ -854,6 +909,8 @@ export function apply(ctx, config, deps = {}) {
         const statusStartedAt = nowMs
         if (probeCache.slow && probeCache.at && nowMs - probeCache.at < 15000 && probeCache.value) {
           const value = {...probeCache.value,journal:journal.projection(),pipelineQueue:pipeline.status(),postMeeting}
+          // 声纹就绪/认人数也来自磁盘探测（缓存分支同样要带，否则界面会缺字段）
+          await attachVoiceprintStatus(value)
           value.view = buildViewModel({journal:value.journal,runtime:value,display:cfg.display})
           return json(200,value)
         }
@@ -1062,6 +1119,9 @@ export function apply(ctx, config, deps = {}) {
           if (audio && audio.exists) audio.seconds = Math.max(0, Math.round((audio.bytes - 44) / 32000))  // 16k/16bit/单声道
           return { dir, audio, minutes: pick('minutes.md'), transcript: pick('transcript-offline.jsonl') }
         })()
+        // 声纹：就绪状态（缺模型/缺运行库/没开启）+ 这一场会的认人结果（来自 speakers.json）
+        // 全部由宿主算好再由 view-model 传给界面——客户端不猜"大概认出了谁"。
+        await attachVoiceprintStatus(__payload)
         __payload.view = buildViewModel({journal:journal.projection(),runtime:__payload,display:cfg.display})
         // 只缓存"真实探测"的结果；light 请求不刷新缓存，否则缓存永远自己变新
         if (!useCachedProbe) {
@@ -1733,7 +1793,11 @@ export function apply(ctx, config, deps = {}) {
         } catch (e) { return json(200, { ok: false, error: e.message }) }
       }
       // ── 本地声纹（P2a）：人员库 / 注册 / 删除 / 模型状态 ──────────
-      if (sub === 'voiceprint' || sub === 'voiceprint-enroll' || sub === 'voiceprint-delete') {
+      // 安装/取消也在这一组：之前守卫里漏了这两个 sub，POST /voiceprint-install
+      // 会直接落到 404（界面永远只会显示一个灰按钮）。这里必须是同一套上下文
+      // （modelPath / runtimeDir / manifest 都按同一份清单算）。
+      if (sub === 'voiceprint' || sub === 'voiceprint-enroll' || sub === 'voiceprint-delete'
+        || sub === 'voiceprint-install' || sub === 'voiceprint-install-cancel') {
         const bodyOf = async () => {
           const chunks = []
           for await (const c of req) chunks.push(c)
@@ -1741,7 +1805,44 @@ export function apply(ctx, config, deps = {}) {
         }
         const space = buildSpace({ modelId: cfg.voiceprint?.modelId })
         const library = openLibrary(CONFIG_DIR)
-        const embedder = createEmbedder({ modelPath: voiceprintModelPath(), modelId: cfg.voiceprint?.modelId })
+        const manifestVp2 = loadManifest()
+        const modelVp2 = findModel(manifestVp2, String(cfg.voiceprint?.modelId || defaultModelId(manifestVp2)))
+        const embedder = createEmbedder({
+          modelPath: voiceprintModelPath(),
+          runtimeDir: runtimeDir(CONFIG_DIR),
+          modelId: cfg.voiceprint?.modelId,
+          inputName: modelVp2 && modelVp2.inputName,
+          outputName: modelVp2 && modelVp2.outputName,
+        })
+
+        if (sub === 'voiceprint-install' && req.method === 'POST') {
+          if (installState.running) return json(200, { ok: false, reason: 'busy', message: '正在安装，别重复点', install: installState })
+          const bodyI = await bodyOf()
+          // 读完请求体再查一次 running：双击时两个请求都会先过上面那一次检查，
+          // 这里才能真的挡住"开两份下载"（runVoiceprintInstall 会同步把 running 置 true）
+          if (installState.running) return json(200, { ok: false, reason: 'busy', message: '正在安装，别重复点', install: installState })
+          // **立刻返回**：135MB 下载 + 解压在后台继续跑，界面靠轮询 GET /voiceprint 读真实进度。
+          // 不能在这里 await 整个安装，否则几分钟里界面只有灰按钮（P0-7）。
+          try {
+            const task = runVoiceprintInstall({ modelId: bodyI.modelId, withRuntime: bodyI.withRuntime !== false })
+            // runVoiceprintInstall 首段是同步的，走到这里 running 已经是 true，
+            // 所以下面返回的 install 一定是"在装"，不会先返回后置状态。
+            Promise.resolve(task).catch((e) => {
+              saveInstallState({ phase: 'failed', running: false, error: e && e.message ? e.message : String(e), hint: '安装中断，可以重试' })
+            })
+            return json(200, { ok: true, started: true, install: installState, runtime: runtimeStatus(runtimeDir(CONFIG_DIR)) })
+          } catch (e) {
+            saveInstallState({ phase: 'failed', running: false, error: e.message, hint: '安装中断，可以重试' })
+            return json(200, { ok: false, error: e.message, install: installState })
+          }
+        }
+        if (sub === 'voiceprint-install-cancel' && req.method === 'POST') {
+          if (!installState.running) return json(200, { ok: false, reason: 'not-running', message: '现在没有在装' })
+          try { installAbort && installAbort.abort() } catch { /* ignore */ }
+          // 只置"正在取消"：终态（idle）由后台安装任务写，避免路由和任务抢着写同一个终态
+          saveInstallState({ canceling: true, message: '正在取消…（已下载的部分会被清理）' })
+          return json(200, { ok: true, canceling: true, install: installState })
+        }
 
         if (sub === 'voiceprint' && req.method === 'GET') {
           const people = library.people().map((p) => {
@@ -1754,14 +1855,58 @@ export function apply(ctx, config, deps = {}) {
             }
           })
           const stats = library.stats(space)
+          const manifest = loadManifest()
+          const models = await installedModels(modelDir(CONFIG_DIR), manifest)
+          // 运行库只有"标记在 + 文件都在"才算可用（usable），界面按它决定装不装
+          const rt = runtimeStatus(runtimeDir(CONFIG_DIR))
+          // "已装"必须是**哈希校验通过**（installedModels 的 verified），
+          // 不能只 existsSync：被截断/替换的 26MB 文件会让界面显示"已就绪"。
+          const activeModel = models.find((m) => m.id === space.embedder_model_id) || null
+          const configuredPath = String((cfg.voiceprint && cfg.voiceprint.modelPath) || '').trim()
+          const modelInstalled = activeModel ? activeModel.verified : (configuredPath ? embedder.ok : false)
+          const modelReason = modelInstalled ? '' : (activeModel && activeModel.exists
+            ? 'model-unverified'
+            : (embedder.reason || 'model-missing'))
+          const modelHint = modelInstalled ? '' : (activeModel && activeModel.exists
+            ? '文件校验不通过（可能被截断或被替换）：删掉后重新点「一键安装」'
+            : (embedder.hint || ''))
+          // 一份判定：能不能录、能不能认（与 /status、/voiceprint-enroll 同一套事实）
+          const readiness = await voiceprintReadiness()
           return json(200, {
             ok: true,
+            // 一键安装：清单、已装模型、运行库、进行中的状态（界面全部读这一份）
+            manifest: { models: (manifest.models || []).map((m) => ({ id: m.id, displayName: m.displayName, dim: m.dim, bytes: m.bytes, license: m.license, file: m.file })) },
+            models,
+            runtime: rt,
+            runtimeNeeded: !rt.usable && !readiness.runtime.hostOk,
+            // 运行库体积来自清单（不再由前端硬编码 110 MB）
+            runtimeBytes: (manifest.runtime && Array.isArray(manifest.runtime.packages)
+              ? manifest.runtime.packages.reduce((n, p) => n + (Number(p && p.bytes) || 0), 0)
+              : 0),
+            install: installState,
+            // 界面据此禁用录音（模型/运行库不可用时不许白录 12 秒）
+            enabled: readiness.enabled,
+            ready: readiness.ready,
+            usable: readiness.usable,
+            notReadyReason: readiness.reason,
+            notReadyHint: readiness.hint,
+            hostRuntime: { ok: !!readiness.runtime.hostOk },
             model: {
               modelId: space.embedder_model_id, spaceId: space.spaceId, dim: space.dimension,
-              installed: embedder.ok, reason: embedder.reason || '', hint: embedder.hint || '',
-              file: modelStatus(embedder.ok ? voiceprintModelPath() : voiceprintModelPath()),
+              installed: modelInstalled, verified: activeModel ? activeModel.verified : false,
+              reason: modelReason, hint: modelHint,
+              file: modelStatus(voiceprintModelPath(activeModel)),
             },
             people, stats,
+            // 录声纹时读的文本：文案只有服务端这一份（lib/voiceprint/read-aloud.js），
+            // 前端按这里的 passages 展示、点「换一段」只在返回的列表里换，不复制一份文案。
+            // minSeconds 与注册门槛同源（quality.js 的 10 秒），界面文案不写死数字。
+            readAloud: {
+              minSeconds: MIN_READ_SECONDS,
+              passages: listPassages(),
+              // 服务端挑的"当前这一段"：界面只在首次拿到数据时采用它，轮询刷新不会换掉
+              pick: pickPassage(),
+            },
             // 换过模型后旧样本用不了，必须明说
             staleSpaces: stats.staleSpaces.map((s) => ({ modelId: s.embedder_model_id, samples: s.samples })),
           })
@@ -1769,9 +1914,30 @@ export function apply(ctx, config, deps = {}) {
 
         if (sub === 'voiceprint-enroll' && req.method === 'POST') {
           const body = await bodyOf()
+          // P1-43：先判模型/运行库，**在解析音频之前**就给出结论。
+          // 以前是先解 base64/读 PCM 再判，用户对着麦说满 12 秒才收到"没注册成功"。
+          const readiness = await voiceprintReadiness({ fresh: true })
+          if (!readiness.usable) {
+            return json(200, {
+              ok: false,
+              reason: readiness.reason || 'model-missing',
+              message: '没有录入声纹：' + (readiness.hint || '声纹模型不可用'),
+              hint: readiness.hint || '先在「纪要与产物 → 我认识的人 · 本机声纹」点「一键安装」',
+              messageHuman: '模型/运行库不可用时不会再读麦克风录音',
+            })
+          }
           const personName = sanitizeName(body.name)
           const personId = String(body.personId || '')
           if (!personName && !personId) return json(200, { ok: false, reason: 'need-name', message: '请先填名字' })
+          // P0-24：同意必须是用户显式勾选的。后端不再替用户"造"这条同意记录。
+          if (!(body.consent && body.consent.granted === true)) {
+            return json(200, {
+              ok: false,
+              reason: 'consent-required',
+              message: '还没有勾选同意，不能录入声纹',
+              hint: '勾选「我同意在本机保存这个人的声纹，仅用于会后认人」后再录音',
+            })
+          }
           const dir = String(body.dir || '')
           if (dir && !dir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
           try {
@@ -1787,7 +1953,11 @@ export function apply(ctx, config, deps = {}) {
             if (!pcm || !pcm.length) return json(200, { ok: false, reason: 'no-audio', message: '没有收到音频' })
             const result = await enrollSample({
               library, space, embedder, personName, personId, pcm,
-              consent: { captureMethod: body.captureMethod || 'panel-recording', noticeVersion: 'v1', grantedAt: new Date().toISOString() },
+              consent: {
+                grantedAt: new Date().toISOString(),
+                noticeVersion: String((body.consent && body.consent.noticeVersion) || 'v1'),
+                captureMethod: body.captureMethod || 'panel-recording',
+              },
             })
             if (!result.ok) return json(200, result)
             rememberPeople(CONFIG_DIR, [result.personName])
@@ -1818,13 +1988,68 @@ export function apply(ctx, config, deps = {}) {
             try { return readLogText(readFileSync(join(spDir, 'transcript-offline.jsonl'), 'utf8')).lines } catch { return [] }
           })()
           const map = loadSpeakerMap(spDir)
-          const speakers = listSpeakers(lines).map((s) => ({ ...s, name: map.byLabel[s.label] || '' }))
+          // P0-28：把会后 identify 写下的 <dir>/speakers.json 合并进来——
+          // 以前只读转写+名册，认人结果（谁认出、谁没认出、为什么、分数）没有任何出口。
+          const autoResult = (() => {
+            try { return JSON.parse(readFileSync(join(spDir, 'speakers.json'), 'utf8')) } catch { return null }
+          })()
+          const autoByLabel = new Map()
+          for (const item of (autoResult && Array.isArray(autoResult.speakers) ? autoResult.speakers : [])) {
+            const label = normalizeLabel(item && item.label)
+            if (label) autoByLabel.set(label, item || {})
+          }
+          const prints = voiceprintPeopleSets()
+          const printNames = prints.names
+          const printIds = prints.ids
+          const speakers = listSpeakers(lines).map((s) => {
+            const auto = autoByLabel.get(s.label) || null
+            const mapName = map.byLabel[s.label] || ''
+            const autoName = String((auto && auto.name) || '')
+            // 人工优先：名册里的名字就是最终展示的名字；名册没有才用自动认出的
+            const name = mapName || autoName
+            const mapSource = (map.sources && map.sources[s.label]) || ''
+            let source = 'unknown'
+            if (name) {
+              if (mapName) source = mapSource === 'auto' ? 'auto' : 'manual'
+              else source = 'auto'
+              // 旧版 speaker-map 没有来源字段：名册名 == 自动认出的名字 → 这条是自动写进来的
+              if (mapName && !mapSource && autoName && mapName === autoName) source = 'auto'
+            }
+            const norm = sanitizeName(name).toLowerCase()
+            const hasPrint = !!(name && (printNames.has(norm) || (auto && auto.personId && printIds.has(String(auto.personId)))))
+            const reason = !name && auto ? String(auto.reason || '') : ''
+            const detail = (auto && auto.detail) || {}
+            return {
+              ...s, name, source, hasPrint,
+              autoName,
+              reason,
+              reasonText: reason ? voiceprintReasonText(reason, detail) : '',
+              score: Number.isFinite(Number(detail.score))
+                ? Number(detail.score)
+                : (Number.isFinite(Number(detail.bestScore)) ? Number(detail.bestScore) : null),
+            }
+          })
+          const autoTotal = autoResult ? (Number(autoResult.total) || autoByLabel.size) : 0
+          const autoAssigned = autoResult ? (Number(autoResult.assigned) || speakers.filter((s) => s.source === 'auto').length) : 0
           return json(200, {
             ok: true, dir: spDir, speakers,
             people: loadPeople(CONFIG_DIR),
             // 没有映射时界面要能说清"这些人还没有名字"
             mapped: Object.keys(map.byLabel).length,
             at: map.at,
+            // 读声纹库失败时不能说"这些人没有声纹"（那是编的）
+            printsError: prints.error || '',
+            // 认人结果（只来自 speakers.json；没有这一份就 null，界面不会猜）
+            identity: autoTotal > 0
+              ? {
+                assigned: autoAssigned,
+                total: autoTotal,
+                pending: Math.max(0, autoTotal - autoAssigned),
+                modelInstalled: !!(autoResult.model && autoResult.model.installed),
+                modelReason: String((autoResult.model && autoResult.model.reason) || ''),
+              }
+              : null,
+            autoAt: autoResult ? String(autoResult.at || '') : '',
           })
         }
         const bufS = []
@@ -2034,7 +2259,90 @@ export function apply(ctx, config, deps = {}) {
         if (!r.ok) env.asrError = r.error || ''
       } catch (e) { env.asrReachable = false; env.asrError = e.message }
     }
+    // 声纹：只读文件与配置的事实（**不加载 ONNX 模型**）
+    // 放在最后：前面的采集链路检查不能因为声纹探测慢/出错而受影响。
+    try {
+      env.voiceprint = await collectVoiceprintEnv()
+    } catch (e) {
+      // 不静默忽略：把原因带进体检项，界面能看到"声纹探测失败"而不是假装没这项
+      env.voiceprint = { enabled: !!(cfg.voiceprint && cfg.voiceprint.enabled === true), error: '声纹探测失败：' + (e && e.message ? e.message : String(e)) }
+    }
     return env
+  }
+
+  /**
+   * 体检用的声纹事实：**只读文件与配置，绝不加载 ONNX 模型**。
+   *
+   * 为什么强调不加载：加载 onnxruntime 会锁住 onnxruntime.dll / .node（Windows 文件锁），
+   * 之后用户点「一键安装」换运行库就会被拒绝（真实踩过："旧文件删不掉，重启 DSH 后再装"）。
+   * 体检是要能随时点的，所以这里只做三件只读的事：
+   *   ① 看模型文件在不在、按清单的 bytes + sha256 校验（复用 installer.js 的 installedModels，
+   *      不在这里另写一套哈希逻辑；结果有 size+mtime 缓存，不会每次重算 25MB）
+   *   ② 看运行库标记与实际文件（runtimeFilesOk 包含 package/dist/index.js 是否可用）
+   *   ③ 读声纹库文件数人/样本（只读 JSON，不碰模型）
+   * 这三件都不足以证明"模型能推理"，但足够回答"能不能认人、缺哪一步、怎么修"。
+   */
+  async function collectVoiceprintEnv() {
+    const vpCfg = (cfg.voiceprint && typeof cfg.voiceprint === 'object') ? cfg.voiceprint : {}
+    const acceptRaw = Number(vpCfg.acceptSimilarity)
+    const marginRaw = Number(vpCfg.matchMargin)
+    const out = {
+      enabled: vpCfg.enabled === true,
+      acceptSimilarity: Number.isFinite(acceptRaw) ? acceptRaw : ACCEPT_SIMILARITY,
+      matchMargin: Number.isFinite(marginRaw) ? marginRaw : MATCH_MARGIN,
+      modelId: '', modelFile: '', modelPath: '', modelExists: false, modelVerified: false,
+      // 用户显式配了 modelPath：没有清单哈希可比，不能假装"校验过"
+      manualPath: !!(String(vpCfg.modelPath || '').trim()),
+      runtimeInstalled: false, runtimeFilesOk: false, runtimeHostOk: false,
+      people: 0, samples: 0, libraryCorrupted: false,
+      error: '',
+    }
+    const configuredPath = String(vpCfg.modelPath || '').trim()
+    try {
+      const manifest = loadManifest()
+      const model = findModel(manifest, String(vpCfg.modelId || defaultModelId(manifest)))
+      out.modelId = model ? String(model.id) : ''
+      out.modelFile = model ? String(model.file || '') : ''
+      if (configuredPath) {
+        // 手动路径：只按"文件在不在"判定（大小/哈希都对不上清单里的正式文件）
+        out.modelPath = configuredPath
+        const st = modelStatus(configuredPath)
+        out.modelExists = !!st.installed
+        out.modelVerified = false
+      } else if (model) {
+        out.modelPath = voiceprintModelPath(model)
+        const models = await installedModels(modelDir(CONFIG_DIR), manifest)
+        const active = models.find((m) => m.id === model.id) || null
+        out.modelExists = !!(active && active.exists)
+        out.modelVerified = !!(active && active.verified)
+      }
+    } catch (e) {
+      out.error = '读模型清单失败：' + (e && e.message ? e.message : String(e)) + '｜插件可能没装全，重装/升级后再试'
+    }
+    // 运行库：标记 + 磁盘文件（runtimeFilesOk 已包含 package/dist/index.js 的空/缺检查）
+    try {
+      const rt = runtimeStatus(runtimeDir(CONFIG_DIR))
+      out.runtimeInstalled = !!rt.installed
+      out.runtimeFilesOk = !!rt.filesOk
+    } catch (e) {
+      out.error = (out.error ? out.error + '｜' : '') + '读运行库标记失败：' + (e && e.message ? e.message : String(e))
+    }
+    try { out.runtimeHostOk = hostOnnxRuntimeAvailable() } catch { out.runtimeHostOk = false }
+    // 库里的人/样本：只读 JSON（不加载模型），损坏时不报 0 人冒充"没人录过"
+    try {
+      const library = openLibrary(CONFIG_DIR)
+      if (typeof library.isCorrupted === 'function' && library.isCorrupted()) {
+        out.libraryCorrupted = true
+      } else {
+        const space = buildSpace({ modelId: vpCfg.modelId })
+        const stats = library.stats(space)
+        out.people = Number(stats.people) || 0
+        out.samples = Number(stats.samples) || 0
+      }
+    } catch (e) {
+      out.error = (out.error ? out.error + '｜' : '') + '读声纹库失败：' + (e && e.message ? e.message : String(e))
+    }
+    return out
   }
 
   const isArmed = () => armed === true && cfg.enabled === true
@@ -5640,7 +5948,15 @@ export function apply(ctx, config, deps = {}) {
       const wavFile = join(task.dir,'audio.wav')
       if (!existsSync(wavFile)) return {status:'skip',reason:'没有录音文件，无法做声纹'}
 
-      const embedder = createEmbedder({ modelPath: voiceprintModelPath() ,modelId: cfg.voiceprint?.modelId })
+      const manifestVp = loadManifest()
+      const modelVp = findModel(manifestVp, String(cfg.voiceprint?.modelId || defaultModelId(manifestVp)))
+      const embedder = createEmbedder({
+        modelPath: voiceprintModelPath(),
+        runtimeDir: runtimeDir(CONFIG_DIR),
+        modelId: cfg.voiceprint?.modelId,
+        inputName: modelVp && modelVp.inputName,
+        outputName: modelVp && modelVp.outputName,
+      })
       const space = buildSpace({ modelId: cfg.voiceprint?.modelId })
       const library = openLibrary(CONFIG_DIR)
       const results = await identifySpeakers({ library, space, embedder, wavFile, lines, logger })
@@ -5649,14 +5965,19 @@ export function apply(ctx, config, deps = {}) {
       // 认出来的名字并进名册（人工填的不覆盖：人工优先）
       const map = loadSpeakerMap(task.dir)
       const auto = {}
+      const autoSources = {}
       for (const r of results) {
+        // 只补"名册里还没有名字"的标签：人工优先，自动结果绝不覆盖
         if (r.name && !map.byLabel[r.label]) auto[r.label] = r.name
       }
-      if (Object.keys(auto).length) saveSpeakerMap(task.dir, { ...auto, ...map.byLabel })
+      // 来源标记（名册据此显示"自动认出"/"我填的"；不猜）
+      for (const label of Object.keys(auto)) autoSources[label] = 'auto'
+      if (Object.keys(auto).length) saveSpeakerMap(task.dir, { ...auto, ...map.byLabel }, { sources: autoSources })
 
       const assigned = results.filter(r=>r.name).length
       const payload = {
         ok: true,
+        at: new Date().toISOString(),
         model: { modelId: space.embedder_model_id, spaceId: space.spaceId, installed: embedder.ok, reason: embedder.reason || '' },
         speakers: results,
         assigned, total: results.length,
@@ -5923,14 +6244,371 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
   const probeCache = { at: 0, value: null, slow: false }
 
   /**
-   * 本地声纹模型路径：优先配置里指定的，否则按约定放数据目录。
-   * 找不到就明确报 model-missing（绝不在没模型时假装认过人）。
+   * 一键安装的状态机（阶段名与界面文案表一一对应）：
+   * idle → resolving → download-model → verify-model → install-model →
+   * download-runtime → verify-runtime → extract-runtime → done / failed
+   * **先落盘后展示**：每次状态变化都写 install.json，界面只读它，不猜。
+   * 归一化/迁移规则在 lib/voiceprint/install-state.js（唯一一份实现）。
    */
-  function voiceprintModelPath() {
+  let installState = (() => {
+    const file = join(CONFIG_DIR, 'voiceprint', 'install.json')
+    let raw = null
+    try { raw = JSON.parse(readFileSync(file, 'utf8')) } catch { /* 没有就从头开始 */ }
+    return normalizeInstallState(raw)
+  })()
+  let installAbort = null
+
+  function saveInstallState(patch) {
+    installState = mergeInstallState(installState, patch)
+    // 安装状态一变（含 done/failed/取消）就让就绪探测重算：界面不能显示过期状态
+    vpProbe.at = 0
+    try {
+      mkdirSync(join(CONFIG_DIR, 'voiceprint'), { recursive: true })
+      writeFileSync(join(CONFIG_DIR, 'voiceprint', 'install.json'), JSON.stringify(installState, null, 2), 'utf8')
+    } catch (e) { logger?.warn?.('[soulmirror] 安装状态落盘失败：' + e.message) }
+    return installState
+  }
+
+  /**
+   * 装模型 + 装运行库，中间任何一步失败都如实停下。
+   *
+   * · running 只在这里被置 true，且**所有**退出路径（成功/失败/取消/异常）
+   *   都把 running 置回 false —— 界面永远不能卡在"正在安装…"。
+   * · 进度按**真实字节加权**：模型 25MB + 运行库 115MB 共用一个 0-100%，
+   *   不会出现"到 100 又归零"；step/stepsTotal/stepLabel 说明现在在第几步。
+   * · 每个 await 之后都查 signal.aborted：取消后不再写 done/failed、不再写 marker、不再自检。
+   */
+  async function runVoiceprintInstall({ modelId, withRuntime = true } = {}) {
+    // 同步占位：并发点击的第二个请求到这里时 running 已经是 true，不会再开一份下载
+    if (installState.running) return installState
+    const manifest = loadManifest()
+    const id = String(modelId || cfg.voiceprint?.modelId || defaultModelId(manifest))
+    const model = findModel(manifest, id)
+    if (!model) {
+      // 与其它终态保持一致：in/out 两个标志都要显式写，不能指望调用方或重启归一化兜底
+      saveInstallState({ phase: 'failed', running: false, canceling: false, error: '清单里没有这个模型：' + id, hint: '换一个模型 id，或更新插件版本' })
+      return installState
+    }
+    // 总字节数全部来自清单（不估）：模型 bytes + 运行库各包 bytes 之和
+    const rtPackages = (withRuntime && manifest.runtime && Array.isArray(manifest.runtime.packages)) ? manifest.runtime.packages : []
+    const runtimeBytes = rtPackages.reduce((sum, p) => sum + (Number(p && p.bytes) || 0), 0)
+    const totalBytes = (Number(model.bytes) || 0) + runtimeBytes
+    const stepsTotal = withRuntime ? 2 : 1
+    const mb = (n) => String(Math.round((Number(n) || 0) / 1048576 * 10) / 10)
+    const ac = new AbortController()
+    installAbort = ac
+    saveInstallState({
+      phase: 'resolving', running: true, canceling: false, error: '', hint: '',
+      message: '开始安装：' + model.displayName + '（模型 ' + mb(model.bytes) + ' MB'
+        + (withRuntime ? ' + 运行库 ' + mb(runtimeBytes) + ' MB' : '') + '）',
+      modelId: id, percent: 0, received: 0, total: totalBytes, step: 1, stepsTotal, stepLabel: '模型',
+    })
+    // 取消后的统一出口：状态由**本任务**写（取消路由只置"正在取消"标记，避免两边打架）
+    const canceled = () => saveInstallState({ phase: 'idle', running: false, message: '已取消', canceling: false, percent: 0, received: 0, total: totalBytes, error: '', hint: '临时文件已清理；模型/运行库没装完的部分已删除，重新点「一键安装」即可' })
+
+    try {
+      const r = await installModel({
+        manifest, modelId: id, modelsDir: modelDir(CONFIG_DIR), signal: ac.signal,
+        onProgress: (p) => {
+          if (ac.signal.aborted) return
+          if (p.phase === 'download-model') {
+            // 本步百分比（用来写文案），并单独算整条流水线的百分比
+            const percent = p.total ? Math.floor((p.received / p.total) * 100) : 0
+            const overall = totalBytes ? Math.min(100, Math.floor((p.received / totalBytes) * 100)) : 0
+            saveInstallState({
+              phase: 'download-model', received: p.received, total: totalBytes, percent: overall,
+              step: 1, stepsTotal, stepLabel: '模型',
+              message: '正在下载模型 ' + percent + '%（' + mb(p.received) + ' / ' + mb(model.bytes) + ' MB）',
+            })
+          } else if (p.phase === 'verify-model') {
+            saveInstallState({ phase: 'verify-model', message: p.failed ? ('校验没通过：' + p.message) : '正在校验模型文件完整性（sha256）' })
+          }
+        },
+      })
+      if (ac.signal.aborted) return canceled()
+      if (!r.ok) {
+        saveInstallState({
+          phase: 'failed', running: false, canceling: false,
+          error: (r.reason === 'canceled' ? '' : (r.message || r.reason)),
+          hint: '模型没装上：先检查网络后重试，或手动把文件放到模型目录',
+          percent: 0,
+        })
+        return installState
+      }
+      // 安装路径必须就是之后 embedder 查找的路径（两边都从清单 file 取；不一致就是 bug）
+      const expectPath = voiceprintModelPath(model)
+      if (r.path !== expectPath) {
+        saveInstallState({
+          phase: 'failed', running: false, canceling: false,
+          error: '安装路径与查找路径不一致：装到 ' + r.path + '，但会去找 ' + expectPath,
+          hint: '这是插件的路径 bug；请把这两个路径一起反馈，先别反复重装',
+        })
+        return installState
+      }
+      saveInstallState({
+        phase: 'install-model', running: true, message: '模型已校验并落盘', step: 1, stepsTotal, stepLabel: '模型',
+        percent: totalBytes ? Math.min(100, Math.floor(((Number(model.bytes) || 0) / totalBytes) * 100)) : 100,
+        received: Number(model.bytes) || 0, total: totalBytes,
+      })
+
+      if (withRuntime) {
+        const rt = await installRuntime({
+          manifest, runtimeDir: runtimeDir(CONFIG_DIR), signal: ac.signal,
+          onProgress: (p) => {
+            if (ac.signal.aborted) return
+            if (p.phase === 'download-runtime') {
+              const percent = p.total ? Math.floor((p.received / p.total) * 100) : 0
+              const doneBytes = Number(model.bytes) + Number(p.received)
+              const overall = totalBytes ? Math.min(100, Math.floor((doneBytes / totalBytes) * 100)) : 0
+              saveInstallState({
+                phase: 'download-runtime', received: Number(p.received), total: totalBytes, percent: overall,
+                step: 2, stepsTotal, stepLabel: '运行库',
+                message: '正在下载运行库（' + (p.package || '') + '）' + percent + '%（' + mb(p.received) + ' / ' + mb(p.total) + ' MB）',
+              })
+            } else if (p.phase === 'verify-runtime') {
+              saveInstallState({ phase: 'verify-runtime', step: 2, stepsTotal, stepLabel: '运行库', message: '正在校验运行库（' + (p.package || '') + '）sha512' })
+            } else if (p.phase === 'extract-runtime') {
+              saveInstallState({ phase: 'extract-runtime', step: 2, stepsTotal, stepLabel: '运行库', message: '正在解压运行库（' + (p.package || '') + '）' })
+            }
+          },
+        })
+        if (ac.signal.aborted) return canceled()
+        if (!rt.ok) {
+          saveInstallState({
+            phase: 'failed', running: false, canceling: false,
+            error: (rt.reason === 'canceled' ? '' : (rt.message || rt.reason)),
+            hint: '模型已装好，只差运行库：重试安装，或按文档手动安装 onnxruntime-node',
+          })
+          return installState
+        }
+      }
+
+      if (ac.signal.aborted) return canceled()
+      // 最后**真的跑一次**：文件存在不等于能用，能出一条 256 维向量才算"完成"
+      const probe = await voiceprintSelfTest({ model, modelId: id })
+      if (ac.signal.aborted) return canceled()
+      const done = saveInstallState({
+        phase: probe.ok ? 'done' : 'failed', running: false, canceling: false, percent: 100,
+        error: probe.ok ? '' : ((probe.reason || '') + (probe.hint ? '｜' + probe.hint : '')),
+        hint: probe.ok ? '可以开始录声纹了' : '看错误原因；运行库或模型版本可能不匹配，重装一次再试',
+        message: probe.ok ? ('安装完成，自检通过（' + probe.dim + ' 维向量，可以直接录声纹）') : '安装流程走完但自检失败',
+        step: stepsTotal, stepsTotal, stepLabel: probe.ok ? '完成' : '失败',
+      })
+      return done
+    } catch (e) {
+      if (ac.signal.aborted) return canceled()
+      saveInstallState({ phase: 'failed', running: false, canceling: false, error: e && e.message ? e.message : String(e), hint: '安装中断，可以重试' })
+      return installState
+    } finally {
+      if (installAbort === ac) installAbort = null
+      // 兜底：任何路径漏掉 running=false 都在这里补上，界面不会卡住
+      if (installState.running) saveInstallState({ running: false, canceling: false })
+    }
+  }
+
+  /**
+   * 安装后的自检：加载运行库 + 建 session + 真算一条向量。
+   * 用 2 秒 180Hz 正弦（不是人声，只验证链路）——失败要说清楚卡在哪一层。
+   */
+  async function voiceprintSelfTest({ model, modelId }) {
+    try {
+      const embedder = createEmbedder({
+        modelPath: voiceprintModelPath(model), runtimeDir: runtimeDir(CONFIG_DIR), modelId,
+        inputName: model.inputName, outputName: model.outputName,
+      })
+      if (!embedder.ok) return { ok: false, reason: '装好了但加载不起来：' + (embedder.reason || ''), hint: embedder.hint || '' }
+      const tone = new Float32Array(16000 * 2)
+      for (let i = 0; i < tone.length; i++) tone[i] = Math.sin(2 * Math.PI * 180 * i / 16000) * 0.3
+      const v = await embedder.embed(tone)
+      if (!v || v.length !== embedder.dim) {
+        return { ok: false, reason: '模型输出 ' + (v ? v.length : 0) + ' 维，与登记的 ' + embedder.dim + ' 维不一致', hint: '换一个模型，或升级插件（清单与 space.js 可能不同步）' }
+      }
+      return { ok: true, dim: v.length }
+    } catch (e) {
+      return {
+        ok: false,
+        reason: '装好了但跑不起来：' + (e && e.message ? e.message : String(e)),
+        hint: e && e.code ? ('错误码 ' + e.code + '；检查运行库是否解压完整') : '检查运行库是否解压完整，必要时重装',
+      }
+    }
+  }
+
+  /**
+   * 本地声纹模型路径：优先配置里指定的，否则按**清单里的文件**放数据目录。
+   * 注意：清单的 id 是 `wespeaker-resnet34-zh`，文件是 `wespeaker_zh_cnceleb_resnet34.onnx`，
+   * 所以路径必须从 manifest.file 取；用 id + '.onnx' 会指向一个永远不存在的文件
+   * （装完了界面还说"模型未安装"的根因就在这里）。
+   */
+  function voiceprintModelPath(model) {
     const configured = String((cfg.voiceprint && cfg.voiceprint.modelPath) || '').trim()
     if (configured) return configured
-    const modelId = String((cfg.voiceprint && cfg.voiceprint.modelId) || DEFAULT_MODEL_ID)
-    return join(CONFIG_DIR, 'voiceprint', 'models', modelId + '.onnx')
+    const m = model || findModel(loadManifest(), String((cfg.voiceprint && cfg.voiceprint.modelId) || DEFAULT_MODEL_ID))
+    const file = (m && m.file) || (String((cfg.voiceprint && cfg.voiceprint.modelId) || DEFAULT_MODEL_ID) + '.onnx')
+    return join(CONFIG_DIR, 'voiceprint', 'models', file)
+  }
+
+  /**
+   * 声纹"能不能用"的唯一判定（/status、/voiceprint、/voiceprint-enroll 都用它）。
+   *
+   * 事实全部来自磁盘：模型是否**校验通过**、运行库是否可用（数据目录自装的，
+   * 或宿主依赖里本来就有的）。不猜、不按时间估算。
+   * 结果缓存 10 秒（/status 每秒轮询）：首次会算一次 sha256，之后命中 verified 缓存；
+   * 安装状态一变化（saveInstallState）就把缓存打掉，界面不会延迟显示。
+   *
+   * @returns {Promise<{enabled:boolean, usable:boolean, ready:boolean, reason:string,
+   *   hint:string, modelId:string, modelInstalled:boolean,
+   *   runtime:{usable:boolean, hostOk:boolean, dir:string}}>}
+   */
+  const vpProbe = { at: 0, value: null }
+  let hostRuntimeProbe = { at: 0, ok: null }
+  function hostOnnxRuntimeAvailable() {
+    const now = Date.now()
+    if (hostRuntimeProbe.ok !== null && now - hostRuntimeProbe.at < 60000) return hostRuntimeProbe.ok
+    let ok = false
+    try { pluginRequire.resolve('onnxruntime-node'); ok = true } catch { ok = false }
+    hostRuntimeProbe = { at: now, ok }
+    return ok
+  }
+  async function voiceprintReadiness({ fresh = false } = {}) {
+    const now = Date.now()
+    if (!fresh && vpProbe.value && now - vpProbe.at < 10000) return vpProbe.value
+    const enabled = !!(cfg.voiceprint && cfg.voiceprint.enabled === true)
+    const rt = runtimeStatus(runtimeDir(CONFIG_DIR))
+    const hostOk = rt.usable ? false : hostOnnxRuntimeAvailable()
+    let modelInstalled = false
+    let modelId = ''
+    let modelReason = 'model-missing'
+    try {
+      const manifest = loadManifest()
+      const model = findModel(manifest, String(cfg.voiceprint?.modelId || defaultModelId(manifest)))
+      modelId = model ? model.id : ''
+      const models = await installedModels(modelDir(CONFIG_DIR), manifest)
+      const active = model ? models.find((m) => m.id === model.id) || null : null
+      modelInstalled = !!(active && active.verified)
+      if (active && active.exists && !active.verified) modelReason = 'model-unverified'
+      else if (!active || !active.exists) modelReason = 'model-missing'
+      else modelReason = ''
+      // 显式配置的模型路径也算（与 /voiceprint 的判定一致，不能把手动路径用户误判成没装）
+      const configuredPath = String((cfg.voiceprint && cfg.voiceprint.modelPath) || '').trim()
+      if (!modelInstalled && configuredPath) {
+        const st = modelStatus(configuredPath)
+        if (st.installed) { modelInstalled = true; modelReason = '' }
+      }
+    } catch (e) {
+      modelReason = 'manifest-missing'
+      logger?.warn?.('[soulmirror] 声纹就绪探测失败：' + (e && e.message ? e.message : String(e)))
+    }
+    const runtimeOk = rt.usable || hostOk
+    const usable = modelInstalled && runtimeOk
+    let reason = ''
+    let hint = ''
+    if (!enabled) {
+      reason = 'disabled'
+      hint = usable
+        ? '本机声纹没开启，会后不会自动认人。在「纪要与产物 → 我认识的人 · 本机声纹」里点「开启本机声纹」。'
+        : '本机声纹没开启，模型/运行库也还没装：会后不会自动认人。在「纪要与产物 → 我认识的人 · 本机声纹」里先开启、再点「一键安装」。'
+    } else if (!modelInstalled) {
+      reason = modelReason || 'model-missing'
+      hint = modelReason === 'manifest-missing'
+        ? '插件文件不全，读不到模型清单。重装/升级插件后再点「一键安装」。'
+        : modelReason === 'model-unverified'
+          ? '模型文件校验不通过（可能被截断或被替换）：在「纪要与产物 → 我认识的人 · 本机声纹」点「一键安装」重装一次模型。'
+          : '还没装声纹模型，会后不会自动认人。在「纪要与产物 → 我认识的人 · 本机声纹」点「一键安装」，装好后自动生效。'
+    } else if (!runtimeOk) {
+      reason = 'runtime-missing'
+      hint = '模型已装好，但运行库不可用，会后不会自动认人。在声纹卡点「一键安装」补齐运行库。'
+    }
+    const value = {
+      enabled, usable, ready: enabled && usable, reason, hint, modelId, modelInstalled,
+      runtime: { usable: rt.usable, hostOk, dir: rt.dir },
+    }
+    vpProbe.at = now
+    vpProbe.value = value
+    return value
+  }
+
+  /**
+   * 这一场会的认人结果（只读 `<会议目录>/speakers.json`，没有就 null，不推测）。
+   * @returns {{dir:string, assigned:number, total:number, pending:number, auto:boolean}|null}
+   */
+  const identityCache = new Map()
+  function identityOf(dir) {
+    const key = String(dir || '')
+    if (!key) return null
+    let st = null
+    try { st = statSync(join(key, 'speakers.json')) } catch { return null }
+    const ck = key + '|' + st.size + '|' + st.mtimeMs
+    if (identityCache.has(ck)) return identityCache.get(ck)
+    let value = null
+    try {
+      const raw = JSON.parse(readFileSync(join(key, 'speakers.json'), 'utf8'))
+      const speakers = Array.isArray(raw && raw.speakers) ? raw.speakers : []
+      const total = Number(raw && raw.total) || speakers.length
+      const assigned = Number(raw && raw.assigned) || speakers.filter((s) => s && s.name).length
+      if (total > 0) {
+        value = {
+          dir: key, assigned, total, pending: Math.max(0, total - assigned),
+          auto: true,
+          modelInstalled: !!(raw && raw.model && raw.model.installed),
+          reason: (raw && raw.model && raw.model.reason) || '',
+        }
+      }
+    } catch { value = null }
+    if (value) {
+      if (identityCache.size > 12) identityCache.clear()
+      identityCache.set(ck, value)
+    }
+    return value
+  }
+
+  /**
+   * 本机声纹库里"有哪些人"（名册的「已有声纹」标记用）。
+   * 名册在整理期间每秒都可能重取，这里缓存 3 秒，避免反复解析整个库文件。
+   * @returns {{names:Set<string>, ids:Set<string>, error:string}}
+   */
+  let vpPeopleCache = { at: 0, names: new Set(), ids: new Set(), error: '' }
+  function voiceprintPeopleSets() {
+    const now = Date.now()
+    if (now - vpPeopleCache.at < 3000) return vpPeopleCache
+    let names = new Set()
+    let ids = new Set()
+    let error = ''
+    try {
+      const library = openLibrary(CONFIG_DIR)
+      if (library.isCorrupted && library.isCorrupted()) error = '声纹库文件损坏，读不到已入库的人'
+      for (const p of library.people()) {
+        const n = sanitizeName(p.displayName).toLowerCase()
+        if (n) names.add(n)
+        if (p.personId) ids.add(String(p.personId))
+      }
+    } catch (e) {
+      error = '读不到声纹库：' + (e && e.message ? e.message : String(e))
+    }
+    vpPeopleCache = { at: now, names, ids, error }
+    return vpPeopleCache
+  }
+
+  /** /status 带上声纹就绪与认人结果（一次探测，两个分支共用） */
+  async function attachVoiceprintStatus(payload) {
+    try { payload.voiceprint = await voiceprintReadiness() } catch (e) {
+      payload.voiceprint = {
+        enabled: !!(cfg.voiceprint && cfg.voiceprint.enabled === true), usable: false, ready: false,
+        reason: 'probe-failed', hint: '声纹状态探测失败：' + (e && e.message ? e.message : String(e)),
+      }
+    }
+    const dirs = []
+    const artDir = payload.artifacts && payload.artifacts.dir
+    if (artDir) dirs.push(artDir)
+    const runs = Object.values(payload.journal && payload.journal.runs || {})
+      .sort((a, b) => (Number(b.lastSeq) || 0) - (Number(a.lastSeq) || 0))
+    if (runs[0] && runs[0].run && !dirs.includes(runs[0].run)) dirs.push(runs[0].run)
+    const identities = {}
+    for (const d of dirs) {
+      const id = identityOf(d)
+      if (id) identities[d] = { assigned: id.assigned, total: id.total, pending: id.pending, auto: true }
+    }
+    payload.identities = identities
+    return payload
   }
 
 

@@ -54,7 +54,88 @@ npm test
 - 自动检测/录音不是自动入会许可，禁止自动入会；对外动作遵守 DSH 审批与当前用户授权。
 - 日志/诊断包不得含 Key、Token、密码。
 
-## 6. 发布证据清单
+## 6. 声纹模型与运行库安装
+装一次就够；**绝不随插件分发几十 MB 权重**。清单在 `lib/voiceprint/models.manifest.json`，
+里面每个文件的 `bytes/sha256/sha512` 都是实测的，改版本必须重新实测，不能只看文件大小。
+
+**命令（与面板「一键安装」同一套代码）**
+```bash
+node scripts/fetch-voiceprint-model.mjs --list                 # 看清单与已装状态
+node scripts/fetch-voiceprint-model.mjs --dir %TEMP%\sm-e2e    # 装默认模型 + 运行库 + 自检
+node scripts/fetch-voiceprint-model.mjs --model campplus-zh    # 换模型（192 维）
+node scripts/fetch-voiceprint-model.mjs --model-only           # 只装模型（不做自检）
+```
+自检会真的加载运行库、建 session、算一条向量，最后打印
+`自检通过：256 维，… ms / 2 秒音频`；只打印"文件已存在"不算通过。
+
+**校验与原子性**：先下到 `.part`，算 size → sha256（运行库是 sha512）→ 全对才 `rename` 成正式文件；
+不符就删掉 `.part` 并以 `ok:false + 原因` 返回。取消（AbortSignal）也删 `.part`。
+已装且校验通过时幂等跳过，不会重复下载 115 MB。
+
+**数据目录（插件自己管的，别写宿主依赖目录）**
+- `<数据目录>/voiceprint/models/<清单 file>`（如 `wespeaker_zh_cnceleb_resnet34.onnx`；
+  注意文件名来自清单 `file`，不是模型 id）
+- `<数据目录>/voiceprint/runtime/package/`（onnxruntime-node 的 `dist`/`lib`/dll/binding）
+- `<数据目录>/voiceprint/runtime/package/node_modules/onnxruntime-common/`（嵌套依赖，目录名必须是 npm 包名）
+- `<数据目录>/voiceprint/runtime/installed.json`（装了什么，`files` 记录必须都还在才算可用）
+- `<数据目录>/voiceprint/install.json`（一键安装状态机，界面只读它）
+
+**为什么不写宿主 `node_modules`**：本机 `node_modules` 是宿主依赖 junction，开发规则禁止写；
+而且运行时替换 DLL 会被宿主占用（Windows 锁文件）。所以运行库解到数据目录，按文件路径 `import`。
+
+**失败怎么排查**（`install.json` 的 `phase` + `error` + `hint` 就是入口）
+| 现象 | 原因 / 动作 |
+|---|---|
+| `download-model` 停在 0% | 网络/代理挡住 GitHub release；换镜像或手动下载后按 sha256 核对 |
+| `verify-model` 报 sha256/大小不符 | 下载被截断或被替换；`.part` 已删，重跑一次 |
+| `extract-runtime` 报解压失败 | 需要系统 `tar`（Win10+ 自带）；检查磁盘空间 |
+| `done` 后仍 `model-missing` | 模型路径与清单 `file` 不一致（路径 bug）或用户配了自定义 `modelPath` |
+| `Load failed`/`onnx-runtime-load-failed` | 运行库解压不全（常见是 `onnxruntime-common` 没落到 `package/node_modules/`），重装运行库 |
+| 重装运行库报"旧文件删不掉" | DLL 正被 DSH 加载；退出/重启 DSH 后再装 |
+| 重启后状态停在中间阶段 | `install.json` 会被归一化成 `failed` + "上次安装未完成"，重新点一次 |
+
+**取消**：`POST /api/soulmirror/voiceprint-install-cancel` 只置"正在取消"，终态由后台任务写；
+取消后不写 `installed.json`、不跑自检、`.part` 与 `.tmp-*` 都清掉，界面落 `idle` 而不是红色失败。
+
+### 6.1 录声纹时的朗读文本
+注册要 10 秒有效语音，对着麦数数往往读不满。文案在 `lib/voiceprint/read-aloud.js`（10 段小故事/冷知识），
+硬约束全是导出常量，改文案时按常量验一遍，别只改注释：
+
+| 常量 | 含义 |
+|---|---|
+| `MIN_READ_SECONDS` | 与 `quality.js` 的 `MIN_SAMPLE_SPEECH_SECONDS` 同源（不重复定义 10） |
+| `MIN_CHARS` / `MAX_CHARS` | 每段汉字数的下限 / 上限（`hanCount` 只数汉字，标点不算） |
+| `MAX_ESTIMATE_SECONDS` | `estimateSeconds()` 的保守估算上限（4 字/秒，宁可多报一秒） |
+
+- 选文要求：连贯完整的小段、有画面；**不要绕口令、生僻字、长数字串、英文单词**——读错卡壳会污染向量。
+- `pickPassage(rand)` 随机挑一段，排除上一次的 id（连续两次不重复）；`rand` 可注入，测试不用碰真随机。
+- 文案**只有服务端这一份**：`GET /api/soulmirror/voiceprint` 的 `readAloud: { minSeconds, passages, pick }`
+  由 `listPassages()` 生成，客户端只挑"当前哪一段"，不复制文本。
+- 界面（`VoiceprintCard`）：录音按钮上方显示当前段与"这段约 N 秒 · 说满 N 秒才能注册"，「换一段」在未录音时可用；
+  录音中整块高亮并显示**真实已录秒数**（不编百分比）；不足门槛就在前端提示重录，不送到后端等一次报错。
+
+### 6.2 体检里的声纹项
+`collectPreflightEnv`（`index.js`）收集事实 → `buildPreflight`（`lib/preflight.js`）出判定，检查项 `id/key` 都是 `voiceprint`。
+
+**只读文件与配置，绝不加载 ONNX 模型**：加载会锁住 `onnxruntime.dll` / `.node`，
+之后「一键安装」换运行库会被 Windows 拒绝（"旧文件删不掉"）。所以这一项只回答
+"配置/文件/库齐不齐、能不能认人、缺哪一步"，不承诺"模型这一次能推理"——真推理在安装末尾自检与会后认人时发生。
+`npm test` 与运行库测试不受影响。
+
+| 状态 | level | 结论 / 修法 |
+|---|---|---|
+| 未启用 | info | 本机声纹未启用（会后只按匿名说话人整理纪要） → 在「纪要与产物」页开启 |
+| 模型缺失 | warn | 声纹模型未安装 → 点「一键安装」下载并校验 |
+| 模型在但哈希/大小不符 | warn | 模型文件校验不通过（可能被截断或被替换） → 删掉后重新安装 |
+| 运行库缺失 / `package/dist/index.js` 不在 | warn | 运行库未安装或文件不全 → 点「一键安装」补齐 |
+| 库文件损坏 | warn | 读不出已入库的人，不能按 0 人处理 → 备份后删 `library.json` 再重录 |
+| 都就绪但 0 人 | info | 声纹就绪，但还没有录过人 → 在「本机声纹」里录一段（≥10 秒） |
+| 都就绪且有样本 | ok | 声纹就绪：N 人 / M 个样本（阈值 0.60 + margin 0.15） |
+
+非致命项：声纹不参与"能不能转录"，只影响"会后能不能认出人"，所以 `fatal: false`；
+一句话结论会用它自己的 `verdict`（如"声纹模型未安装"），不再只显示文件名。
+
+## 7. 发布证据清单
 - [ ] 原失败用例修后通过；scope 零问题；相关及全量回归命令、通过/失败数。
 - [ ] 无真实音频/网络/Key 副作用；临时目录清理；测试自然退出。
 - [ ] manifest/打包清单正确；实际部署文件与源码 SHA-256/版本一致。
