@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "SoulMirror 会议助手：实时转写、会议识别、会后纪要入库；人格管线（用户卡+认知架构+五层画像+四层记忆）越用越像本人；内置演练模式",
   "type": "module",
   "main": "index.js",

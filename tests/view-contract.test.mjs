@@ -395,3 +395,19 @@ test('client 契约：工作台复用 IssueBanner，且 issues → role=alert �
   assert.ok(alertAt > issuesAt, 'issue 外层要有 role=alert')
   assert.ok(stepsAt > alertAt, '问题必须在管线步骤之前')
 })
+
+test('完成态仍有手动「开始录音」次级入口（用户反馈过它一度消失）', () => {
+  const done = build('done')
+  assert.equal(done.primary.action, 'minutes')
+  const sec = done.secondary || []
+  assert.ok(sec.some((b) => b.action === 'record'), '非采集状态必须保留「开始录音/再录一场」入口')
+  assert.equal(sec.find((b) => b.action === 'record').label, '再录一场')
+
+  const idle = build('idle')
+  assert.equal(idle.primary.action, 'record')
+  assert.equal((idle.secondary || []).length, 0, '主按钮本身就是开始录音时不要重复')
+
+  const cap = build('capturing')
+  assert.equal((cap.secondary || []).length, 0, '采集中不出现「开始录音」')
+  assert.deepEqual(Object.keys(cap.secondary || {}).length, 0)
+})
