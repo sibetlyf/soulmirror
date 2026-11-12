@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.2.4",
+  "version": "1.3.0",
   "files": [
     {
       "path": "index.js",
-      "sha256": "8c060371a4a6d5acbfa9446c63d9429d4ffad7d94b69cdfb25fa97358f6366a0",
-      "bytes": 401780
+      "sha256": "0f17f00c2ae4e1299391b8d12666b3d1cf5a889ee13f0ed5471962249cd64ce7",
+      "bytes": 412475
     },
     {
       "path": "lib/action-items.js",
@@ -99,8 +99,8 @@
     },
     {
       "path": "lib/client.js",
-      "sha256": "0bb0a2d5c9922b43e49ecfd414316dbcbd852ca4b0044a26c177439847baefe4",
-      "bytes": 187132
+      "sha256": "25ed7c4fa19eecc6f602f33f6ae4720563b1bdb2f3852ed80bd65fd7e99583ae",
+      "bytes": 216057
     },
     {
       "path": "lib/context-snapshot.js",
@@ -139,8 +139,8 @@
     },
     {
       "path": "lib/demo.js",
-      "sha256": "c6415f051682c6bccb0dca64149c3fdfa7e5579e2152a0f29061fc1ee95ceda9",
-      "bytes": 7307
+      "sha256": "9b6ad60979a316d83d7864af4d55b0b5548e100751dd74eceff33b4ba7d74313",
+      "bytes": 9485
     },
     {
       "path": "lib/deps-optional.js",
@@ -204,8 +204,8 @@
     },
     {
       "path": "lib/lifecycle.js",
-      "sha256": "f821b4240933f2f8f3ccb33f8b07a944dc3d87f458978bd01b6cac3ef179743e",
-      "bytes": 4820
+      "sha256": "ad0abdd54067713de6f2306c07a698c87a9a156e9b62e544d01d5880477aff90",
+      "bytes": 19928
     },
     {
       "path": "lib/living.js",
@@ -249,8 +249,13 @@
     },
     {
       "path": "lib/minutes-format.js",
-      "sha256": "27dd71de487db53190eee589a610440f09cfd93e5fb68cf7691050c73bdb3e54",
-      "bytes": 8279
+      "sha256": "957554ccce292a711a8de235a506ada33432d28081046f290a7e0e5fa6817e63",
+      "bytes": 10662
+    },
+    {
+      "path": "lib/minutes-history.js",
+      "sha256": "9a1b283744bb68ee9242d2658c6ef4f8bfa18d9cc011970ed3510fef26bd6661",
+      "bytes": 16055
     },
     {
       "path": "lib/minutes-task.js",
@@ -469,18 +474,23 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "ca5798afbd4ba1fc48fc606f5e975ec34f2299224dad4251c6253740ba6dd6bc",
+      "sha256": "9874ae9565ac89fa41cf3999ce277d9f62187870ca19554a487342bd690d4a2a",
       "bytes": 3947
     },
     {
       "path": "lib/view-model.js",
-      "sha256": "c8b14041df79f530e8d32a9ade46986f46e563bca556a2d954aa5adc7d40c32e",
-      "bytes": 9723
+      "sha256": "73ac9786630ca53235f902c11a07a1c92434f6daffb76614ff4cf9a2004033d3",
+      "bytes": 13401
     },
     {
       "path": "lib/voiceprint/embed.js",
       "sha256": "1918f1a50e920edbc3352d474e5afcdfe5d7876c5b26afd8a7b5ac4428b08a96",
       "bytes": 9204
+    },
+    {
+      "path": "lib/voiceprint/enroll-from-meeting.js",
+      "sha256": "57f186ec4aa5931a0c89b0e77af4541f14bba8bfd83b92ed60a5f20123d8497a",
+      "bytes": 23756
     },
     {
       "path": "lib/voiceprint/fbank.js",
@@ -544,12 +554,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "2baf3f33fa9603d6841fb825e09c34fdc763712cd2fea6c433a4ffc7bd754cc4",
-      "bytes": 17614
+      "sha256": "d89a1c1b7c58fcef2a372dca257fe4f73e571a4a70a0bbe7540d457d47477343",
+      "bytes": 17948
     },
     {
       "path": "package.json",
-      "sha256": "d36a27ecdd17aef33ec775a9b7270c1ce526992000a094bdbc7cc16f9856e50c",
+      "sha256": "add19f4415966233b4113329cbc9838b3dd24a4ff2e65da49302dd5084ba45d0",
       "bytes": 2240
     },
     {

@@ -54,6 +54,12 @@ npm test
 - 自动检测/录音不是自动入会许可，禁止自动入会；对外动作遵守 DSH 审批与当前用户授权。
 - 日志/诊断包不得含 Key、Token、密码。
 
+**会议结束自动停止（`autoStop*`）**：会散了却不停采集，是"转录停不下来"的直接原因，所以判定必须可解释：
+- `autoStop`（默认 `true`）：会议结束后自动停采集并进入会后整理；关掉后只能手动停。
+- `autoStopSilenceSec`（默认 `120`）：客户端退出会议后常仍占着麦克风句柄，要连续静音这么久才算结束。
+- `autoStopGraceSec`（默认 `60`）：采集开始 60 秒内不许自动停（刚入会窗口/麦克风都还没稳定）。
+- 规则本身是纯函数 `lib/lifecycle.js#shouldAutoStop`（会中窗口/短暂切换/麦克风+音频能量都不停）；停止原因写进 `lifecycle.snapshot().stopReason` 与日志。
+
 ## 6. 声纹模型与运行库安装
 装一次就够；**绝不随插件分发几十 MB 权重**。清单在 `lib/voiceprint/models.manifest.json`，
 里面每个文件的 `bytes/sha256/sha512` 都是实测的，改版本必须重新实测，不能只看文件大小。

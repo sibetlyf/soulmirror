@@ -49,6 +49,7 @@ import { MeetingBrain, createCompleter, makeCorrector } from './lib/brain.js'
 import { SpeechDeduper, TranscriptDeduper, normalizeText } from './lib/dedupe.js'
 import { saveMinutes as persistMinutesFile } from './lib/minutes-file.js'
 import { buildMinutesSystemPrompt, buildMinutesUserPrompt, minutesMeta, finalizeMinutes, localStamp } from './lib/minutes-format.js'
+import { collectHistory, buildHistoryBlock, historyMeta } from './lib/minutes-history.js'
 import { loadSpeakerMap, saveSpeakerMap, loadPeople, rememberPeople, listSpeakers, applySpeakerMap, normalizeLabel, sanitizeName } from './lib/speaker-map.js'
 import { buildSpace, DEFAULT_MODEL_ID } from './lib/voiceprint/space.js'
 import { openLibrary } from './lib/voiceprint/store.js'
@@ -56,6 +57,7 @@ import { createEmbedder, modelStatus, runtimeStatus } from './lib/voiceprint/emb
 import { loadManifest, findModel, defaultModelId, installModel, installRuntime, installedModels, modelDir, runtimeDir, installedModelPath } from './lib/voiceprint/installer.js'
 import { normalizeInstallState, mergeInstallState } from './lib/voiceprint/install-state.js'
 import { identifySpeakers, enrollSample, readWavSamples } from './lib/voiceprint/service.js'
+import { enrollFromMeeting } from './lib/voiceprint/enroll-from-meeting.js'
 import { ACCEPT_SIMILARITY, MATCH_MARGIN } from './lib/voiceprint/match.js'
 import { MIN_READ_SECONDS, listPassages, pickPassage } from './lib/voiceprint/read-aloud.js'
 import { extractMeetingCode } from './lib/meeting-code.js'
@@ -109,7 +111,7 @@ import { resolveAsrModel, withSyncedModel } from './lib/asr-model.js'
 import { pickWorkspaceCwd, detectKnowledgeCwd } from './lib/workspace.js'
 import { ensureConfigFile, installChecklist, formatChecklist } from './lib/bootstrap.js'
 import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
-import { MeetingLifecycle } from './lib/lifecycle.js'
+import { MeetingLifecycle, shouldAutoStop } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
 import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES, loadProfile, saveProfile, fullPersonaBlock } from './lib/persona.js'
 import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi } from './lib/knowledge.js'
@@ -307,6 +309,12 @@ export const Config = z.object({
   })),
   /** 自动监听：检测到会议开始就自动采集+托管，结束后自动出纪要。 */
   autoWatch: z.boolean().default(true),
+  /** 会议结束后自动停止采集并进入会后整理（关掉后只能手动停）。 */
+  autoStop: z.boolean().default(true),
+  /** 没有会议窗口、也没有新转写时，静音多少秒算"会已经结束"（客户端可能还占着麦克风句柄）。 */
+  autoStopSilenceSec: z.number().default(120),
+  /** 采集开始多少秒内不许自动停（刚入会时窗口/麦克风都还没稳定）。 */
+  autoStopGraceSec: z.number().default(60),
   /** 入会按钮相对窗口的坐标（0~1）。Qt 自绘界面点不到控件名时用它兜底。 */
   joinClickRatio: z.object({
     x: z.number().default(0.18),
@@ -504,6 +512,10 @@ export function apply(ctx, config, deps = {}) {
     mode: config.mode === 'agent' ? 'agent' : 'transcribe',
     policy: config.policy || 'auto',
     autoWatch: config.autoWatch !== false,
+    // 会议结束自动停止：60 秒内不自动停；客户端还占着麦克风时要静音够 120 秒才停
+    autoStop: config.autoStop !== false,
+    autoStopSilenceSec: Number(config.autoStopSilenceSec) || 120,
+    autoStopGraceSec: Number.isFinite(Number(config.autoStopGraceSec)) ? Number(config.autoStopGraceSec) : 60,
     joinClickRatio: { x: 0, y: 0, ...(config.joinClickRatio || {}) },
     keys: { apiKey: '', ...(config.keys || {}) },
   upgrade: { repo: String(config.upgrade?.repo || ''), branch: String(config.upgrade?.branch || '') },
@@ -698,6 +710,10 @@ export function apply(ctx, config, deps = {}) {
       userName: cfg.userName || '',
       wakeWords: cfg.wakeWords || [],
       autoWatch: cfg.autoWatch === true,
+      // 会议结束自动停止：界面要能读回已保存的值（规则见 lib/lifecycle.js shouldAutoStop）
+      autoStop: cfg.autoStop !== false,
+      autoStopSilenceSec: cfg.autoStopSilenceSec,
+      autoStopGraceSec: cfg.autoStopGraceSec,
       display: normalizeDisplay(cfg.display),
       // 声纹总开关：界面要能读回**已落盘**的值（开启动作由 /config 写入）
       voiceprint: { enabled: !!(cfg.voiceprint && cfg.voiceprint.enabled === true) },
@@ -795,7 +811,7 @@ export function apply(ctx, config, deps = {}) {
   }
   function patchToStore(patch) {
     const keep = {}
-    for (const k of ['display', 'enabled', 'policy', 'apps', 'activeApp', 'meetingCode', 'meetingCodeManual', 'userName', 'wakeWords', 'autoWatch']) if (patch[k] !== undefined) keep[k] = patch[k]
+    for (const k of ['display', 'enabled', 'policy', 'apps', 'activeApp', 'meetingCode', 'meetingCodeManual', 'userName', 'wakeWords', 'autoWatch', 'autoStop', 'autoStopSilenceSec', 'autoStopGraceSec']) if (patch[k] !== undefined) keep[k] = patch[k]
     for (const k of Object.keys(EDITABLE)) if (patch[k] !== undefined) keep[k] = pick(patch[k], EDITABLE[k])
     // 声纹只开放总开关：模型 id/路径不允许界面写（避免变成第二个状态源）
     if (patch.voiceprint && patch.voiceprint.enabled !== undefined) keep.voiceprint = { enabled: patch.voiceprint.enabled === true }
@@ -1385,7 +1401,9 @@ export function apply(ctx, config, deps = {}) {
           })
         }
         const root = recordsRoot()
-        if (!isDirectChildDir(root, dir) && dir !== session.dir) {
+        const demoRoot = join(CONFIG_DIR, 'demo')
+        const inDemo = isDirectChildDir(demoRoot, dir)
+        if (!isDirectChildDir(root, dir) && !inDemo && dir !== session.dir) {
           return json(400, {
             ok: false, reason: 'bad-path', error: '不是已知会议目录',
             message: '只允许整理会议数据目录下的记录', hint: '从「之前的录音」列表里选一场，而不是手填路径',
@@ -2011,6 +2029,34 @@ export function apply(ctx, config, deps = {}) {
           }
           const dir = String(body.dir || '')
           if (dir && !dir.startsWith(CONFIG_DIR)) return json(400, { ok: false, error: '目录不合法' })
+          // 入口 A/B：从会议录音里把云端分出的某个说话人存成声纹。
+          // 两个界面入口（「这场会谁是谁」每一行 / 声纹卡「从会议录音添加」）都走这一条：
+          // 切窗、纯化、质量门槛、落盘顺序全在 lib/voiceprint/enroll-from-meeting.js（只有一份实现）。
+          if (String(body.speaker || '').trim()) {
+            try {
+              const result = await enrollFromMeeting({
+                library, space, embedder, dir,
+                speaker: body.speaker,
+                name: personName,
+                personId,
+                consent: {
+                  grantedAt: new Date().toISOString(),
+                  noticeVersion: String((body.consent && body.consent.noticeVersion) || 'v1'),
+                  captureMethod: body.captureMethod || 'meeting-recording',
+                },
+                logger,
+              })
+              if (result.ok) rememberPeople(CONFIG_DIR, [result.personName])
+              return json(200, result)
+            } catch (e) {
+              logger?.warn?.('[soulmirror] 会议录音补声纹失败：' + (e && e.message ? e.message : String(e)))
+              return json(200, {
+                ok: false, reason: 'error',
+                message: '从会议录音入库失败：' + (e && e.message ? e.message : String(e)),
+                hint: '看宿主日志这一段；如果一直失败，回到声纹卡用「录一段注册」现场录一次',
+              })
+            }
+          }
           try {
             // 两种来源：①面板录的一段（WAV base64）②从会议录音里挑一段
             let pcm = null
@@ -6250,9 +6296,29 @@ export function apply(ctx, config, deps = {}) {
       // 与会人员：配置里的用户名 + 用户在这一场会里填过的人名（没有就不编）
       const mapped = Object.values(speakerMap.byLabel).map(sanitizeName).filter(Boolean)
       known.attendees = Array.from(new Set([...(known.attendees || []), ...mapped]))
+      // 结合最近几天的会议纪要：让"上次的待办有没有推进/口径有没有变"写进本次纪要。
+      // 读不到就不带历史（不阻塞），失败只记元数据，不把纪要正文写进日志。
+      let historyBlock = ''
+      let historyInfo = null
+      let historyMissed = false
+      try {
+        const hist = collectHistory({
+          root: CONFIG_DIR,
+          now: Date.now(),
+          days: Number(cfg.knowledge && cfg.knowledge.historyDays) || 14,
+          limit: Number(cfg.knowledge && cfg.knowledge.historyLimit) || 6,
+          excludeDir: task.dir,
+        })
+        historyBlock = buildHistoryBlock(hist)
+        historyInfo = { ...historyMeta(hist), count: hist.length }
+        logger?.info?.('[soulmirror] 纪要连续性：' + (historyInfo && historyInfo.count || 0) + ' 场历史 · ' + (historyInfo && historyInfo.usedChars || 0) + ' 字符' + (historyInfo && historyInfo.truncated ? '（已截断）' : ''))
+      } catch (e) {
+        historyMissed = true
+        logger?.warn?.('[soulmirror] 历史纪要读取失败，本次按无历史生成：' + e.message)
+      }
       const raw = await minutesCompleter([
-        { role: 'system', content: buildMinutesSystemPrompt() },
-        { role: 'user', content: buildMinutesUserPrompt({ transcript, meta: known }) },
+        { role: 'system', content: buildMinutesSystemPrompt({ history: historyBlock }) },
+        { role: 'user', content: buildMinutesUserPrompt({ transcript, meta: known, historyBlock }) },
       ], { dir: task.dir })
       task.assertActive()
       if (!raw || !String(raw).trim()) throw new Error('DSH 会话模型返回空纪要')
@@ -6310,9 +6376,128 @@ export function apply(ctx, config, deps = {}) {
     } catch { return '' }
   }
 
+  // ── 会议结束自动停止：证据 → 纯函数决策 → 停止并整理 ─────────────
+  // 判定规则不在这里：见 lib/lifecycle.js 的 shouldAutoStop（规则表 + 单测）。
+  // 本段只做三件事：采集证据（窗口/麦克风/音频/静音/时长）、调纯函数、
+  // 走现有链路 setPostMeeting(stopping) → stopAndOrganize。
+  // 互斥：窗口消失（onExit）与看门狗（watchdog）可能同时想停，两个信号只能整理一次。
+  let autoStopBusy = false
+  let autoStopLogReason = ''
+  let autoStopLogAt = 0
+  const AUTO_STOP_CONFIRM_TICKS = 2   // 15s × 2 = 30s：窗口短暂切换不算会议结束
+
+  /**
+   * 采集一次"该不该自动停"的证据。
+   * 读不到的值给 null，**不能**当成 0/静音：桥接失败时把"读不到"当"没声音"会误停。
+   */
+  async function collectAutoStopEvidence(detected, missTicks) {
+    const detecting = detected || lifecycle.lastDetect || { inMeeting: false, reason: 'not-checked' }
+    const meetingSeen = !!detecting.inMeeting
+    const startedAt = Date.parse(session.startedAt || '') || 0
+    const capturing = !!(session.capturing || session.running)
+    const base = {
+      capturing,
+      meetingSeen,
+      windowReason: detecting.reason || '',
+      micHeld: false,
+      micLabel: '',
+      peak: null,
+      silentSec: null,
+      lastLineAgeSec: null,
+      capturingSec: startedAt ? Math.round((Date.now() - startedAt) / 1000) : 0,
+      missTicks,
+      skippedProbe: '',
+    }
+    // 会中窗口还在 = 一定不停（规则 3）：不必再花两次桥接调用去测音频/麦
+    if (meetingSeen || !capturing) {
+      base.skippedProbe = meetingSeen ? 'in-meeting-window' : 'not-capturing'
+      return base
+    }
+    let peak = null
+    try {
+      const v = await metersMax()
+      peak = Number.isFinite(v) ? v : null
+    } catch { peak = null }
+    let mic = ''
+    try {
+      mic = (await lifecycle.deps?.micHeldByApp?.()) || ''
+    } catch { mic = '' }
+    const lines = Array.isArray(session.transcript) ? session.transcript : []
+    const lastT = lines.length ? Date.parse((lines[lines.length - 1] || {}).t || '') || 0 : 0
+    return {
+      ...base,
+      micHeld: !!mic,
+      micLabel: typeof mic === 'string' ? mic : '',
+      peak,
+      silentSec: Number.isFinite(session.silentSec) ? session.silentSec : null,
+      lastLineAgeSec: lastT ? Math.round((Date.now() - lastT) / 1000) : null,
+    }
+  }
+
+  /** 证据 → shouldAutoStop 的入参（配置默认值在这里补，规则本身不读配置）。 */
+  function autoStopDecision(ev) {
+    return shouldAutoStop({
+      capturing: ev.capturing,
+      meetingSeen: ev.meetingSeen,
+      micHeld: ev.micHeld,
+      peak: ev.peak,
+      silentSec: ev.silentSec,
+      lastLineAgeSec: ev.lastLineAgeSec,
+      capturingSec: ev.capturingSec,
+      missTicks: ev.missTicks,
+      confirmTicks: AUTO_STOP_CONFIRM_TICKS,
+      graceSec: cfg.autoStopGraceSec,
+      silenceSec: cfg.autoStopSilenceSec,
+    })
+  }
+
+  /** 采证据 + 决策 + 写进 lifecycle 快照（/status 的 lifecycle.stopReason 读它）。 */
+  async function autoStopVerdict(detected, missTicks) {
+    const evidence = await collectAutoStopEvidence(detected, missTicks)
+    const v = autoStopDecision(evidence)
+    lifecycle.noteAutoStop(v, evidence)
+    if (cfg.autoStop === false) {
+      v.stop = false
+      v.reason = 'auto-stop-disabled:' + v.reason
+    }
+    if (!v.stop) {
+      // 同一个原因不重复刷日志（每 15s 一拍）；换原因或隔了 5 分钟才再记一次
+      const now = Date.now()
+      if (v.reason !== autoStopLogReason || now - autoStopLogAt > 300000) {
+        autoStopLogReason = v.reason
+        autoStopLogAt = now
+        logger?.info?.('[soulmirror] 会议可能已结束，但先不停：' + v.reason + '（' + JSON.stringify(v.evidence) + '）')
+      }
+    }
+    return v
+  }
+
+  /** 看门狗用的收尾：失败必须留可见原因，重复触发被 autoStopBusy 挡住。 */
+  async function autoStopMeeting(v) {
+    if (autoStopBusy) return { ok: false, skipped: true, reason: v.reason }
+    autoStopBusy = true
+    try {
+      setPostMeeting({ phase: 'stopping', error: '', dir: session.dir || '', progressText: '会议已结束，正在收尾' })
+      lifecycle.markStopped({ reason: v.reason, evidence: v.evidence })
+      const o = await stopAndOrganize('会议已结束（' + v.reason + '）', { wasCapturing: true })
+      logger?.info?.('[soulmirror] 会议已结束（' + v.reason + '）→ 已停采集并开始整理：' + JSON.stringify(o).slice(0, 200))
+      return { ok: true, ...o }
+    } catch (e) {
+      const msg = '会议已结束，但停止/整理失败：' + e.message
+      logger?.warn?.('[soulmirror] ' + msg)
+      try { setPostMeeting({ phase: 'error', error: msg }) } catch { /* 状态写不进去也要留日志 */ }
+      try { journal.append('capture.error', { error: msg }) } catch { /* 全局日志已写 */ }
+      return { ok: false, error: msg, reason: v.reason }
+    } finally {
+      autoStopBusy = false
+    }
+  }
+
   const lifecycle = new MeetingLifecycle(
-    { apps: activeApps() },
+    { apps: activeApps(), autoStop: cfg.autoStop, autoStopGraceSec: cfg.autoStopGraceSec, autoStopSilenceSec: cfg.autoStopSilenceSec },
     {
+      // apps 会变（自动跟随/用户改配置），detect 时再取，避免用启动那一刻的快照
+      getApps: () => activeApps(),
       listWindows,
       meters: metersMax,
       micHeldByApp: async () => {
@@ -6335,27 +6520,39 @@ export function apply(ctx, config, deps = {}) {
         logger?.info?.('[soulmirror] 已开启：开始采集转写并建会话（' + reason + '）')
       },
       onExit: async () => {
-        journal.append('meeting.exit',{})
+        const ended = lifecycle.lastExit || {}
+        journal.append('meeting.exit', { reason: ended.reason || 'no-window-no-mic', hadAudio: !!ended.hadAudio })
         // 不能只看 session.capturing：采集进程可能还在跑、标志却已为 false
         // （重连间隙、异常退出后残留）。所以这里一律先真停采集。
-        const wasCapturing = !!session.capturing
-        const wasRunning = !!session.running
+        const wasCapturing = !!(session.capturing || session.running)
+        if (!wasCapturing) return
+        // 证据也认为该停才停（窗口消失 ≠ 散会：托盘/切窗/还在说话）
+        const v = await autoStopVerdict({ inMeeting: false, reason: ended.reason || 'no-window' }, lifecycle.confirmTicks)
+        if (!v.stop) return lifecycle.markStillInMeeting(v.reason)
         agent.running = false
-        if (!wasCapturing && !wasRunning) return
+        if (autoStopBusy) return
+        autoStopBusy = true
         try {
-          // 纪要写本地；知识库回写与发言属于"对外动作"，未开启时不做
-          const o = await stopAndOrganize('离开会议', { wasCapturing })
-          logger?.info?.('[soulmirror] 会议结束：' + JSON.stringify(o.result || o).slice(0, 200))
+          const o = await stopAndOrganize('会议已结束（' + v.reason + '）', { wasCapturing })
+          lifecycle.markStopped({ reason: v.reason, evidence: v.evidence })
+          logger?.info?.('[soulmirror] 会议结束（' + v.reason + '）：' + JSON.stringify(o).slice(0, 200))
         } catch (e) {
-          logger?.warn?.('[soulmirror] 会议收尾失败: ' + e.message)
+          const msg = '会议已结束，但停止/整理失败：' + e.message
+          logger?.warn?.('[soulmirror] ' + msg)
+          try { setPostMeeting({ phase: 'error', error: msg }) } catch { /* 状态写不进去也要留日志 */ }
+          try { journal.append('capture.error', { error: msg }) } catch { /* 全局日志已写 */ }
+        } finally {
+          autoStopBusy = false
         }
       },
     },
   )
 
-// ── 会议结束自愈：检测不到会议窗口就停采集并整理 ─────────────
-// 为什么需要：生命周期依赖窗口形态，客户端崩溃/最小化到托盘/直接结束会议时
-// 可能判不出来，于是采集一直跑、"转录停不下来"。这条是兜底，代价很低。
+// ── 会议结束自愈：采集证据 → 纯函数决策 → 停止并整理 ─────────────
+// 为什么需要：生命周期依赖窗口形态，客户端崩溃/最小化到托盘/退出会议但客户端没关时
+// 都可能判不出来，于是采集一直跑、"转录停不下来"（本机实测有 220s / 140s 空转尾巴）。
+// 本段职责只有三件：采证据、交给 lib/lifecycle.js 的 shouldAutoStop 决策、
+// 走现有链路 setPostMeeting(stopping) → stopAndOrganize。规则不在这个文件里改。
 let noMeetingTicks = 0
 const meetingWatchdog = setInterval(async () => {
   try {
@@ -6381,17 +6578,19 @@ const meetingWatchdog = setInterval(async () => {
     }
     if (!session.capturing && !session.running) { noMeetingTicks = 0; return }
     const wins = await listWindows()
+    // 会议窗口还在 = 在会中，直接清零（窗口是"还在开"的最强证据，长时间静音也不算结束）
     const detected = lifecycle.detect(wins || [])
-    const alive = detected.inMeeting || !!(await lifecycle.deps.micHeldByApp?.())
-    if (alive) { noMeetingTicks = 0; return }
-    noMeetingTicks += 1
-    if (noMeetingTicks >= 2) {
-      noMeetingTicks = 0
-      logger?.info?.("[soulmirror] 连续 " + 2 + " 次没检测到会议窗口，自动停止采集并整理")
-      setPostMeeting({ phase: "stopping", error: "", dir: session.dir || "", progressText: "会议已结束，正在收尾" })
-      await stopAndOrganize("会议已结束（窗口消失）", { wasCapturing: true })
-    }
-  } catch { /* 检测失败不算结束 */ }
+    noMeetingTicks = detected.inMeeting ? 0 : noMeetingTicks + 1
+    // 窗口没了也不立刻停：证据（麦克风/音频能量/静音时长/采集时长）交给纯函数判
+    const v = await autoStopVerdict(detected, noMeetingTicks)
+    if (!v.stop) return
+    noMeetingTicks = 0
+    const o = await autoStopMeeting(v)
+    if (!o.ok && !o.skipped) logger?.warn?.('[soulmirror] 自动停止没有完成：' + (o.error || '未知原因'))
+  } catch (e) {
+    // 检测失败不算结束，但要留可见原因（以前是空 catch，出问题只能靠猜）
+    logger?.warn?.('[soulmirror] 会议结束检测失败（本轮跳过）：' + e.message)
+  }
 }, 15000)
 meetingWatchdog.unref?.()
 ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting watchdog")
