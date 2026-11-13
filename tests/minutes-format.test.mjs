@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import {
   buildMinutesSystemPrompt, buildMinutesUserPrompt, normalizeMinutes,
-  finalizeMinutes, minutesMeta, localStamp, CONTENT_SECTIONS,
+  finalizeMinutes, minutesMeta, localStamp, CONTENT_SECTIONS, SUMMARY_MAX_CHARS,
 } from '../lib/minutes-format.js'
 
 /**
@@ -112,4 +112,34 @@ test('三条生成路径都指向同一份格式（不再各写一套提示词�
   for (const src of [index, task, offline]) {
     assert.doesNotMatch(src, /## 决议 \/ ## 待办/, '旧的自由结构还留在提示词里')
   }
+})
+
+test('开头必须有 ≤300 字摘要，且模型没给时用正文句子抽（不编造）', () => {
+  const src = '# 会议纪要\n\n## 一、会议基本信息\n- 时间：2026-11-13 09:25\n\n## 三、会议内容\n### 1、围绕主题说了什么，问题是什么\n- 决定把生图改成效果优先；张三周五前给对比数据\n- 李四负责补一版日志\n'
+  const out = finalizeMinutes(src, { author: '李亚峰', at: '2026-11-13 09:40' })
+  assert.match(out, /## 摘要/, '缺摘要时必须补')
+  const brief = (/## 摘要\n([\s\S]*?)\n## /.exec(out) || [, ''])[1].trim()
+  assert.ok(brief.length > 0, '摘要不能为空')
+  assert.ok(brief.length <= SUMMARY_MAX_CHARS, '摘要必须 ≤300 字，实际 ' + brief.length)
+  assert.ok(out.indexOf('## 摘要') < out.indexOf('## 一、'), '摘要必须排在基本信息之前')
+})
+
+test('混进正文的思考/英文推理段会被剥掉（真实事故回归）', () => {
+  const dirty = [
+    'This is a second (continuation) meeting transcript, quite garbled. Need to produce Chinese Markdown minutes with decisions.',
+    'Let me parse carefully.',
+    '',
+    '# 会议纪要',
+    '',
+    '## 一、会议基本信息',
+    '- 时间：2026-11-13 09:25',
+    '',
+    '## 三、会议内容',
+    '### 1、围绕主题说了什么，问题是什么',
+    '- 决定把生图改成效果优先',
+  ].join('\n')
+  const out = finalizeMinutes(dirty, { author: '李亚峰', at: '2026-11-13 09:40' })
+  assert.equal(/garbled|Let me parse/i.test(out), false, '英文推理段必须被剥掉')
+  assert.match(out, /决定把生图改成效果优先/, '正文不能被误删')
+  assert.match(out, /## 摘要/, '剥完后仍要有摘要')
 })

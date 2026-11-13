@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "files": [
     {
       "path": "index.js",
@@ -254,8 +254,8 @@
     },
     {
       "path": "lib/minutes-format.js",
-      "sha256": "957554ccce292a711a8de235a506ada33432d28081046f290a7e0e5fa6817e63",
-      "bytes": 10662
+      "sha256": "2e94a38d0464097498c2721c16e1ac4db1a218b1d56a4ea019c74998de65c1c8",
+      "bytes": 14404
     },
     {
       "path": "lib/minutes-history.js",
@@ -479,7 +479,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "f96322d869910d3621496ccf523475881c58fc66bc5e83a7142999392cc627ed",
+      "sha256": "0954ef456d68ad5870f21b9ac3c038b3af5ef36a8f84f436c241010f38013956",
       "bytes": 3947
     },
     {
@@ -559,12 +559,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "5c06567285c2d268066a54759f114658cde0f250c5f518f0433580e8ee85cc32",
+      "sha256": "b82da2d76fe98092c33071371ea8b2817fe75abfe665062734760cd842d5dffc",
       "bytes": 18100
     },
     {
       "path": "package.json",
-      "sha256": "ae6fcee7ca327ab0fce7e416a085b39ef30f6f50ce3c3685fd52f9f3a22b05ca",
+      "sha256": "404680bfc37c408435183fefee7c4e959c9269d0e0b20a11c650551e2ab0ef42",
       "bytes": 2240
     },
     {
