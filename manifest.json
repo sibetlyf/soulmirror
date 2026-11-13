@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.4.2",
+  "version": "1.4.3",
   "files": [
     {
       "path": "index.js",
@@ -474,7 +474,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "22bb67c1da9122cbd773e81be9bacc47cb522075df4f7b92ec6cd4eb2eff0dd1",
+      "sha256": "968f29bf2b80339229eeb46e7338f4eb4ad7aa1c564660e6bfbdae01d6055015",
       "bytes": 3947
     },
     {
@@ -554,12 +554,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "67b61ecb9f07def32490c0f5f1cd71ef06079197819218e112dfaea604ff5097",
+      "sha256": "b34c3df9ad4eb8d58d16ee333db347aadd0020d714f0910a17f34f9b5514761b",
       "bytes": 17948
     },
     {
       "path": "package.json",
-      "sha256": "198aedc7f525682d5f2cf4c2d81c5d7ba628d3182020d07b97c9c3b32be62b38",
+      "sha256": "51dfcb0041a1bd5794a9e1596ea9bbd0776c53cd63eb5e92bcf207888c23aeb1",
       "bytes": 2240
     },
     {
