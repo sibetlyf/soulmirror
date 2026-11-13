@@ -129,7 +129,7 @@ git clone https://github.com/sibetlyf/soulmirror.git ~/.dsh/plugins/soulmirror
 dsh plugin --profile web add link:~/.dsh/plugins/soulmirror
 ```
 
-装不上先看 [安装排错](docs/install-troubleshooting.md)（`add` 装的是整个 profile，任一依赖 404 就会整体失败）。然后填一次百炼 Key → 点「测模型」→ 开会。
+装不上先看 [安装排错](docs/install-troubleshooting.md)。`add` 走 pnpm，profile 里任一依赖 404 都会整体失败；不想动其它插件就用 **不经过 pnpm** 的装法：`node scripts\install-without-pnpm.mjs --profile web`。然后填一次百炼 Key → 点「测模型」→ 开会。
 
 **升级不用卸载重装**：`soul_setup { action: "upgrade" }` 只替换 sha256 变了的文件、配置与会议记录不动；三种安装方式见 [docs/upgrade.md](docs/upgrade.md)。
 

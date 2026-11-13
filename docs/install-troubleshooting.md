@@ -163,3 +163,71 @@ dsh plugin --profile web add github:sibetlyf/soulmirror
 # 在 profile 目录里跑一次"只解析不安装"，有坏依赖会立刻报出包名
 pnpm -C "$env:USERPROFILE\.dsh\profiles\web" install --frozen-lockfile --ignore-scripts
 ```
+
+---
+
+## 9. 不经过 pnpm 安装（绕开 registry 与"整库解析"）
+
+> 结论先说：**可以**。已实测（隔离 DSH_HOME + `--dump-config` 验证，见下）。
+
+### 为什么可行
+
+DSH 的 profile 启动时只做两件事：
+1. 用 profile 目录做 Node 解析锚点，解析 `dsh.profile.bundles` 里的每个包名；
+2. 按顺序应用每个 bundle 的 `dsh.bundle.patch`。
+
+也就是说：**只要 profile 的 `node_modules` 里能解析到这个包名，并且在 bundles 列表里有它**，
+就会被加载——不需要 pnpm、不需要 registry、更不会去解析 profile 里其它任何依赖。
+
+pnpm 在这件事里只负责"把包放成 node_modules 里的链接"。我们直接手工建同样的链接即可。
+
+### 一步安装（本仓库自带脚本）
+
+```powershell
+# 把本仓库装进 web profile（不联网、不执行 pnpm）
+node scripts\install-without-pnpm.mjs --profile web
+
+# 指定其它源目录 / 其它 profile
+node scripts\install-without-pnpm.mjs --profile headless --source G:\soulmirror
+
+# 卸载（只删 bundles 里那一个名字 + 删链接）
+node scripts\install-without-pnpm.mjs --profile web --uninstall
+```
+
+脚本做的事（每一步都有输出，失败会停下并说原因）：
+
+1. 校验源目录确实是本插件（`package.json.name === soulmirror` 且有 `dsh.bundle.patch`）；
+2. 建 `profiles/<p>/node_modules/soulmirror` → 源目录的链接（Windows junction / 其它平台 symlink）；
+3. 在 `profiles/<p>/package.json` 的 `dsh.profile.bundles` 里**追加一个名字**
+   （改之前先备份 `package.json.bak-<时间戳>`；其它内容一字不动）；
+4. 立刻验证：跑 `dsh --profile <p> --dump-config`，确认组合结果里出现 `- id: soulmirror`。
+
+### 实测证据（隔离环境，不碰用户 profile）
+
+临时 `DSH_HOME=G:\dsh-test\_profprobe`，新建空 profile，bundles 只有 `@deepseek-ai/dsh-base` + `@deepseek-ai/dsh-web-app`：
+
+| 步骤 | 结果 |
+|---|---|
+| 手工建 junction + 往 bundles 加一个名字 | `dsh --profile zp --dump-config` **exit=0** |
+| 组合结果 | 出现 `# == soulmirror` / `- id: soulmirror` / `name: soulmirror`，并带出我们的配置项（`enabled: true`、`windowTitle: 腾讯会议`） |
+| 脚本第一次运行 | `✓ 已链接` → `✓ 已加入 dsh.profile.bundles` → `✓ 已验证` |
+| 脚本第二次运行（幂等） | `✓ 已指向…（不动它）` → `✓ 已在 bundles 里（位置 3/3）` |
+| 卸载 | `✓ 已移除` → `✓ 已删除链接` → 再 `--dump-config` **组合结果里没有 soulmirror** |
+| 再装回 | 通过 |
+
+**整个过程没有联网、没有执行 pnpm、没有解析 `@cmjt/dsh-personal-memory` 这类坏依赖。**
+
+### 什么时候用哪种
+
+| 场景 | 推荐 |
+|---|---|
+| profile 健康（没有解析不了的依赖） | `dsh plugin --profile web add github:sibetlyf/soulmirror`（pnpm 自动管理，升级方便） |
+| profile 里有一条下载不到的依赖、又不想动其它插件 | **用第 9 节脚本**（只加一个链接和一个名字） |
+| 想改代码即时生效 | 第 9 节脚本 + 每次改完复制文件（本仓库 `soulmirror` 的日常开发就是这样） |
+
+### 注意
+
+- 这条路径**不会被 `dsh plugin` 的版本管理跟踪**：`dsh plugin list/remove` 看不到它，
+  升级要重新指向新目录（脚本可重复执行，幂等）。
+- 脚本只改两处：`node_modules` 链接、`package.json` 的 `bundles` 数组；其它插件、配置、数据一律不碰。
+- Host 代码变更仍需**重启 DSH**（Client 改完重载页面即可）。
