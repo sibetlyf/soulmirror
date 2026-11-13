@@ -4055,7 +4055,7 @@ export function apply(ctx, config, deps = {}) {
     // 能在事前判断的就别进 UI：格式错的会议号会一路走到探测里，白等几十秒
     const codeCheck = validateMeetingCode(a.code)
     if (!codeCheck.ok) return { ok: false, result: codeCheck.error, invalidCode: true }
-    a.code = codeCheck.code
+    const joinCode = codeCheck.code
     // 总超时：每个关键步骤之间查一次
     const joinDeadline = Date.now() + Math.max(5000, Number(cfg.joinTimeoutMs) || 20000)
     const ensureTime = () => {
@@ -4095,7 +4095,7 @@ export function apply(ctx, config, deps = {}) {
         }
         await new Promise((r) => setTimeout(r, 700))
         try {
-          await setText(app.title, 'lineEditLeft', a.code, opts)
+          await setText(app.title, 'lineEditLeft', joinCode, opts)
           steps.push('已填会议号')
         } catch (e) {
           steps.push('未找到会议号输入框: ' + e.message)
