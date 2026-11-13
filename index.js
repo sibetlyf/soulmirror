@@ -244,6 +244,13 @@ export const Config = z.object({
     micRestore: z.string().default(''),
     /** 进入会议时腾讯会议是否为静音状态（用于发言前自动开麦的判断）。 */
     micInitiallyMuted: z.boolean().default(true),
+    /**
+     * 同时录我的麦克风：会议客户端不会把自己的麦克风声音再输出到扬声器（否则参会的人会听到自己的回声），
+     * 所以只采环回时转写里没有用户自己的发言。默认 true，把麦克风那一路和环回混成一路再识别。
+     */
+    mixMic: z.boolean().default(true),
+    /** 麦克风设备（采集端点）；空 = 系统默认采集设备。填设备名即可，mbridge 按名字/id 匹配。 */
+    micDevice: z.string().default(''),
   }),
   /** 文本转语音。 */
   tts: z.object({
@@ -498,7 +505,7 @@ export function apply(ctx, config, deps = {}) {
       candidates: config.reply?.candidates || 1,
       cooldownMs: config.reply?.cooldownMs || 20000,
     },
-    devices: { switchMic: true, capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', ...(config.devices || { }) },
+    devices: { switchMic: true, capture: '', captureMode: 'loopback', forceCaptureDevice: '', captureAuto: false, speak: 'CABLE Input', micName: '', micRestore: '', micInitiallyMuted: true, mixMic: true, micDevice: '', ...(config.devices || { }) },
     tts: {
       provider: 'dashscope', voice: 'longxiaochun_v2', rate: 0,
       baseUrl: '', model: 'cosyvoice-v2', apiKeyEnv: 'DASHSCOPE_API_KEY', apiKey: '', speed: 1, sampleRate: 16000,
@@ -841,7 +848,7 @@ export function apply(ctx, config, deps = {}) {
     asr: ['provider', 'model', 'dashscopeModel', 'baseUrl', 'apiKeyEnv', 'apiKey', 'chunkSeconds', 'lang'],
     tts: ['provider', 'model', 'voice', 'sampleRate', 'apiKeyEnv', 'apiKey', 'speed', 'workspaceId', 'cloneBaseUrl', 'clonePrefix', 'cloneVoiceId'],
     brain: ['baseUrl', 'provider', 'model', 'apiKeyEnv', 'apiKey', 'profile', 'minGapMs'],
-    devices: ['capture', 'captureMode', 'speak', 'micName', 'micRestore', 'micInitiallyMuted'],
+    devices: ['capture', 'captureMode', 'speak', 'micName', 'micRestore', 'micInitiallyMuted', 'mixMic', 'micDevice'],
   }
   function pick(obj, keys) {
     const out = {}
@@ -1168,7 +1175,25 @@ export function apply(ctx, config, deps = {}) {
             inMeeting: testMode ? false : (useCachedProbe ? !!desktopProbe.value.inMeeting : await meetingActive(liveApp, statusWins)),
           },
           models: { asr: cfg.asr.provider + ' / ' + resolveAsrModel(cfg.asr), tts: cfg.tts.provider + ' / ' + cfg.tts.model + ' / ' + cfg.tts.voice },
-          devices: { capture: cfg.devices.capture || '默认渲染设备', speak: cfg.devices.speak },
+          // 采集到底采了什么，必须一眼能看出来：只采环回 = 没有用户自己的发言（这是原始缺陷）
+          devices: (() => {
+            const snap = session.snapshot()
+            const mode = cfg.devices.captureMode || 'loopback'
+            let label
+            if (mode === 'device') label = '采集=麦克风（' + (cfg.devices.capture || '系统默认采集设备') + '）'
+            else if (snap.mixMic) label = '采集=环回+麦克风（' + (snap.micRunning ? snap.micDeviceLabel : '麦克风路未在跑') + '）'
+            else label = '采集=环回（不含你自己的发言，可在「设置 → 采集」打开「同时录我的麦克风」）'
+            return {
+              capture: cfg.devices.capture || '默认渲染设备',
+              speak: cfg.devices.speak,
+              mode,
+              mixMic: !!snap.mixMic,
+              micRunning: !!snap.micRunning,
+              micDevice: cfg.devices.micDevice || '',
+              micDeviceLabel: snap.micDeviceLabel || '',
+              label,
+            }
+          })(),
           brain: brain.stats,
           agent,
           mic: mic.state,
@@ -1272,6 +1297,13 @@ export function apply(ctx, config, deps = {}) {
         if (cfg.enabled && session.capturing && (asr.failed)) problems.push('语音识别重连失败次数用尽')
         if (lastAgeMs !== null && lastAgeMs > 120000 && session.capturing) problems.push('超过 2 分钟没有新转写')
         if ((asr.droppedMs || 0) > 5000) problems.push('断线累计丢失 ' + Math.round(asr.droppedMs / 1000) + ' 秒音频')
+        // 双路：麦克风那一路断了，用户自己的发言就不在转写里，必须是可见的问题
+        if (cfg.enabled && session.capturing && snap.mixMic && !snap.micRunning) {
+          problems.push('麦克风那一路没在跑：当前只有环回，你自己的发言不会进转写')
+        }
+        if ((snap.mixStats && snap.mixStats.dropped) > 0 && session.capturing) {
+          problems.push('混音丢弃了 ' + Math.round((snap.mixStats.dropped || 0) / 32000 * 10) / 10 + ' 秒音频（有一路过慢/中断）')
+        }
         if (budget.overBudget()) problems.push('已超出本次会议识别预算 ' + budget.limitMinutes + ' 分钟')
         return json(200, {
           ok: problems.length === 0,
@@ -1286,6 +1318,10 @@ export function apply(ctx, config, deps = {}) {
             device: snap.captureDevice || "",
             bytes: snap.bytes || 0,
       lastByteAgeMs: snap.lastByteAt ? (Date.now() - snap.lastByteAt) : null,
+            mixMic: !!snap.mixMic,
+            micRunning: !!snap.micRunning,
+            micDeviceLabel: snap.micDeviceLabel || '',
+            mixStats: snap.mixStats || null,
           },
           asr: {
             phase: asr.phase || 'idle',
@@ -3817,11 +3853,18 @@ export function apply(ctx, config, deps = {}) {
       lines.push(`客户端：${resolveAppPath(app.path) || '未找到 ' + app.proc + '.exe'}`)
       lines.push(`会议窗口：${meeting.length} 个${inMeeting ? '（检测到进行中的会议）' : ''}`)
       for (const w of meeting.slice(0, 5)) lines.push(`  · [${w.cls}] ${w.title}`)
-      lines.push(`采集：${cfg.devices.capture || '系统默认渲染设备'}（${cfg.devices.captureMode}）`)
+      const s = session.snapshot()
+      const capMode = cfg.devices.captureMode || 'loopback'
+      // 只采环回时用户自己的发言进不来，状态里必须写明当前是"环回"还是"环回+麦克风"
+      const capText = capMode === 'device'
+        ? '采麦克风（' + (cfg.devices.capture || '系统默认采集设备') + '）'
+        : (s.mixMic
+          ? '环回 + 麦克风（' + (s.micRunning ? s.micDeviceLabel : '麦克风那一路没在跑') + '）'
+          : '只采环回（不含你自己的发言）')
+      lines.push(`采集：${cfg.devices.capture || '系统默认渲染设备'}（${capText}）`)
       lines.push(`发言设备：${cfg.devices.speak || '未配置（TTS 只会播给扬声器，进不了会议）'}`)
       lines.push(`TTS：${cfg.tts.provider} / ${cfg.tts.voice}`)
       lines.push(`ASR：${cfg.asr.provider === 'none' ? '未配置' : cfg.asr.provider === 'local' ? '本地 whisper.cpp（离线）' : cfg.asr.provider + ' / ' + cfg.asr.baseUrl + ' / ' + cfg.asr.model}`)
-      const s = session.snapshot()
       lines.push(`转写：${s.capturing ? '采集中' : '未开始'}，已 ${s.chunks} 片 / ${s.lines} 行${s.lastError ? '，最后错误：' + s.lastError : ''}`)
       return {
         ok: true,
