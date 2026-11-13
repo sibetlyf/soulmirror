@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.4.4",
+  "version": "1.4.5",
   "files": [
     {
       "path": "index.js",
@@ -394,8 +394,8 @@
     },
     {
       "path": "lib/session.js",
-      "sha256": "43b1cce59c94d69a8f058da36404e37f3c95fb9a66985b49161eb96badd91b2d",
-      "bytes": 38597
+      "sha256": "5dab674f72770197173c02bd9c796c5e9c8a7cd914f44957207eecf2ce34128b",
+      "bytes": 41027
     },
     {
       "path": "lib/setup-rows.js",
@@ -474,13 +474,13 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "8817502f1b5a5cd2180515c0af1e534c0e85926f8ed9dfa347cac88bec27f949",
+      "sha256": "7839463e70466cc4df21729ff2a7b5ea8481039e68944f421355b8d56cde2724",
       "bytes": 3947
     },
     {
       "path": "lib/view-model.js",
-      "sha256": "294c78141ba47997da889176cda0b8981974ebb8723e7a6c0e5d1d3457a828fa",
-      "bytes": 13923
+      "sha256": "bbd757e97ed35d49f103693529f0f3d343aac5d7654602550f633b1d27c90d8d",
+      "bytes": 13938
     },
     {
       "path": "lib/voiceprint/embed.js",
@@ -554,12 +554,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "2d7f9601ed7f5c0252f94cd932aaf7fee4ca482841f54dee41b76f147472dd81",
+      "sha256": "559ea8a27b0ec03a7128944af1fc0653ca24ca6ea4935691fb800411fdf35495",
       "bytes": 17948
     },
     {
       "path": "package.json",
-      "sha256": "e17301d8ef9eb1e1d611deae800451f8d1eb647504468a4f79088195e822f85a",
+      "sha256": "97c3cbcd8ece6f8c1d36b5a8cabd9c5e3467ad95ce376127e603489b9c158c64",
       "bytes": 2240
     },
     {

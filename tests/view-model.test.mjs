@@ -19,8 +19,9 @@ test('pipeline error has stage, retry and actionable detail', () => {
 })
 test('clock estimated percentage is never presented as measured progress', () => {
   const v = buildViewModel({ journal: { runs: { x: { run: 'x', phase: 'running', step: 'offline', percent: 79, steps: { offline: { state: 'running' } } } } } })
-  assert.equal(v.steps[0].progress, null)
-  assert.equal(v.primary.disabled, true)
+  assert.equal(v.steps[0].progress, null, '估算百分比不能当成实测进度')
+  assert.equal(v.primary.action, 'record', '整理中主按钮是可点的开始录音（后台任务不挡下一场）')
+  assert.equal(!!v.primary.disabled, false, '主按钮不能是死按钮')
 })
 test('active queue run selected before historical currentRun', () => {
   const v = buildViewModel({ journal: { currentRun: 'old', runs: { old: { run: 'old', phase: 'done' }, new: { run: 'new', phase: 'running', step: 'minutes' } } }, runtime: { pipelineQueue: { current: { dir: 'new' }, queue: [{ dir: 'other' }] } } })

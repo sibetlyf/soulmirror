@@ -73,12 +73,14 @@ test('primary：run.phase=queued → offline「开始整理」（restart:false�
   assert.equal(v.primary.restart, false)
 })
 
-test('primary：整理中 → 无 action 的 disabled「后台整理中」', () => {
-  const p = build('working').primary
-  assert.equal(p.id, 'working')
-  assert.equal(p.label, '后台整理中')
-  assert.equal(p.disabled, true)
-  assert.equal(p.action, undefined)
+test('primary：整理中 → 可点的「开始录音」（整理在后台，不能变成死按钮）', () => {
+  const v = build('working')
+  assert.equal(v.working, true, '整理中状态本身要在 view 上可见（进度由步骤条展示）')
+  assert.equal(v.primary.id, 'record')
+  assert.equal(v.primary.label, '开始录音')
+  assert.equal(v.primary.action, 'record')
+  assert.equal(v.primary.disabled, false, '主按钮永远可点：整理是后台任务，不该挡住下一场录音')
+  assert.equal((v.secondary || []).length, 0, '主按钮已经是开始录音时不要再重复')
 })
 
 test('primary：未配置 → settings「去配置」（三条证据任一条都算）', () => {
@@ -117,12 +119,14 @@ test('primary：旧缓存 config.keys.asr=false 不算"未配置"（否则会把
   assert.equal(v.primary.label, '立即开始录音')
 })
 
-test('primary：只有 idle+configured 才是 record（完成态/排队/出错/未配置都不给）', () => {
+test('primary：record 只出现在「空闲且已配置」与「后台整理中」（其余状态各有明确下一步）', () => {
   const names = Object.keys(STATE_INPUTS)
   const recordStates = names.filter((n) => build(n).primary.action === 'record')
-  assert.deepEqual(recordStates, ['idle'], '除空闲且已配置外出现 record 就是状态机回退')
+  assert.deepEqual(recordStates.sort(), ['idle', 'working'].sort(),
+    'record 只该在空闲(已配置)和后台整理中出现：完成态给看纪要、排队给开始整理、出错给重试、未配置给去配置')
   for (const name of names) {
     const p = build(name).primary
+    assert.equal(!!p.disabled, false, name + ' 的主按钮不能是不可点的死按钮')
     if (p.action !== 'record') assert.notEqual(p.label, '立即开始录音', name + ' 不该再出现「立即开始录音」')
   }
 })
