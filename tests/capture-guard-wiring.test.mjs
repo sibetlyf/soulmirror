@@ -28,7 +28,7 @@ test('采集启动时做实测校验：当场测谁在出声，与采集设备�
 test('自动纠正是可选的，且 listDevices 用扁平数组形状', () => {
   const at = sess.indexOf('实测校验：当场测')
   const seg = sess.slice(at, at + 1600)
-  assert.match(seg, /captureAuto !== false/, '自动跟随要受配置约束')
+  assert.match(seg, /autoHealCapture !== false/, '静音自愈要受 autoHealCapture 控制（与 captureAuto 解耦）')
   assert.match(seg, /flow === 'RENDER'/, 'listDevices 返回扁平数组，要按 flow 过滤')
   assert.equal(/d\.render \|\| \[\]/.test(seg), false, '不该再用 {render,capture} 形状')
 })

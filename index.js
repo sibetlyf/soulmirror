@@ -65,6 +65,7 @@ import { parseMeters, resolveCaptureTarget } from './lib/audio-pick.js'
 import { formatAudioDiag } from './lib/audio-diag.js'
 import { readWavPcm, readWavHeader, transcribeOffline, buildOfflineMinutes, getLastMinutesError } from './lib/offline-asr.js'
 import { transcribeFileWithSpeakers, renderSentences } from './lib/dashscope-file.js'
+import { transcribeInChunks } from './lib/offline-chunked.js'
 import { savePreparation, loadPreparation, saveMeta, loadMeta, listRecords, loadRecord } from './lib/meeting-record.js'
 import {
   classifyNoAudio, inspectRecord, listRecordings,
@@ -6453,9 +6454,11 @@ export function apply(ctx, config, deps = {}) {
         // 超大录音跳过云端文件识别：它要整份上传，几十分钟的会议代价高、也更容易失败。
         // 超过 300MB（约 2.5 小时 16k 单声道）直接走本地重放，内存有界。
         const wavBytes = (() => { try { return statSync(wav).size } catch { return 0 } })()
-        if (wavBytes > 300 * 1024 * 1024) {
-          logger?.warn?.('[soulmirror] 录音 ' + Math.round(wavBytes / 1048576) + 'MB 过大，跳过云端文件识别，改用本地重放')
-          throw new Error("录音过大（" + Math.round(wavBytes / 1048576) + "MB），跳过文件识别")
+        const CHUNK_LIMIT = 80 * 1024 * 1024   // 单段上限 80MB ≈ 40 分钟 16k 单声道
+        const needsChunking = wavBytes > CHUNK_LIMIT
+        if (needsChunking) {
+          // 超长会议不再直接失败：分段上传、逐段分人识别、按时间偏移合并（见下方 chunk 循环）
+          logger?.info?.('[soulmirror] 录音 ' + Math.round(wavBytes / 1048576) + 'MB 超过单次上传上限，改成分段识别（每段 ≤' + Math.round(CHUNK_LIMIT / 1048576) + 'MB）')
         }
 
         // 先看有没有人声：整段静音上传只会换来 SUCCESS_WITH_NO_VALID_FRAGMENT（白花流量）
@@ -6494,15 +6497,31 @@ export function apply(ctx, config, deps = {}) {
         recTimer.unref?.()
         let r
         try {
-          r = await transcribeFileWithSpeakers({
-          apiKey: key,
-          // 用 openAsBlob 从磁盘流式上传：readFileSync 会额外占一整份音频，再被 Blob 复制一次，
-          // 长会议（几十分钟）峰值就是几百 MB，实测曾把 4GB 堆撑爆。
-          // 优先传裁好的有声区间（省流量、也更容易识别成功）
-          file: await openAsBlob(uploadWav, { type: 'audio/wav' }),
-          fileName: 'meeting.wav',
-          languageHints: ['zh', 'en'],
-        })
+          // 超长录音不再直接失败：交给 lib/offline-chunked.js 分段识别并按时间合并
+          if (needsChunking) {
+            const cr = await transcribeInChunks({
+              wav: uploadWav, dir, key, chunkBytes: CHUNK_LIMIT, logger,
+              onProgress: ({ detail, fraction }) => {
+                offProgress.stage('upload', { detail, fraction })
+                reportOffline()
+              },
+            })
+            if (cr.failed > 0) logger?.warn?.('[soulmirror] 分段识别有 ' + cr.failed + ' 段失败，已在转写里标记断点')
+            lines = cr.lines
+          } else {
+            try {
+              r = await transcribeFileWithSpeakers({
+                apiKey: key,
+                // 用 openAsBlob 从磁盘流式上传：readFileSync 会额外占一整份音频，再被 Blob 复制一次
+                file: await openAsBlob(uploadWav, { type: 'audio/wav' }),
+                fileName: 'meeting.wav',
+                languageHints: ['zh', 'en'],
+              })
+              lines = (r.sentences || []).filter((x) => x.text)
+            } catch (e) {
+              throw new Error('非流式文件识别失败：' + explainOfflineError(e.message))
+            }
+          }
         lines = (r.sentences || []).filter((x) => x.text)
       } catch (e) {
         throw new Error('非流式文件识别失败：' + explainOfflineError(e.message))

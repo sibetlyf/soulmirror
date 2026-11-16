@@ -43,9 +43,13 @@ test('算时长只读文件头，不读整份 PCM', () => {
   assert.equal(/const \{ seconds \} = readWavPcm\(wav\)/.test(seg), false, '不该为算时长读整份')
 })
 
-test('超大录音跳过云端文件识别', () => {
-  assert.match(src, /wavBytes > 300 \* 1024 \* 1024/, '缺少大文件门限')
-  assert.match(src, /跳过云端文件识别/, '缺少跳过说明')
+test('超大录音改为分段识别（不再整场失败）', () => {
+  // 旧行为：>300MB 直接 throw → 整场会后整理失败（用户遇到 412MB 报"跳过文件识别"）
+  assert.doesNotMatch(src, /throw new Error\("录音过大/, '不能再因为录音大就直接抛错')
+  assert.match(src, /CHUNK_LIMIT/, '必须有分段上限常量')
+  assert.match(src, /needsChunking/, '必须区分是否需要分段')
+  assert.match(src, /transcribeInChunks/, '超限时必须走分段识别')
+  assert.match(src, /import { transcribeInChunks } from '\.\/lib\/offline-chunked\.js'/, '分段实现必须来自独立模块')
 })
 
 test('离线重转写总超时由持久化管线管理，取消传到底层且不回退实时稿', () => {

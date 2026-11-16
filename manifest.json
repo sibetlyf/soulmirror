@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.5.2",
+  "version": "1.5.3",
   "files": [
     {
       "path": "index.js",
-      "sha256": "5d8559cbc03e1a9bf3606515485a8a7e09348237079b8a93e9846c36f597e213",
-      "bytes": 441911
+      "sha256": "15d818aa1fa9f0cc9f018b2dac1485bd132c17c5e199406ecb838406f8dde01e",
+      "bytes": 442897
     },
     {
       "path": "lib/action-items.js",
@@ -293,6 +293,11 @@
       "bytes": 8239
     },
     {
+      "path": "lib/offline-chunked.js",
+      "sha256": "9f4a87de001a5c20ba175af760a92766d64096557a0ce077b623c80bf544bcf6",
+      "bytes": 4082
+    },
+    {
       "path": "lib/persona-backfill.js",
       "sha256": "12d763cd3e1d458e27a13611befd62fd16a3ee6801e42050895eb0232d4b119d",
       "bytes": 5822
@@ -399,8 +404,8 @@
     },
     {
       "path": "lib/session.js",
-      "sha256": "65d99393d089b5d573e797002bb2893e7fc6745bb004c4c8dafea406a3bf05ff",
-      "bytes": 56669
+      "sha256": "3778c6eea132b78e50f015677911cb856c3e1d0606ced0f5ebbd0f7c747205a3",
+      "bytes": 56677
     },
     {
       "path": "lib/setup-rows.js",
@@ -479,7 +484,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "0954ef456d68ad5870f21b9ac3c038b3af5ef36a8f84f436c241010f38013956",
+      "sha256": "cdd9f9432b331a1d7ee08772947638e91e5a893d519ca062fc74260430371fd3",
       "bytes": 3947
     },
     {
@@ -559,12 +564,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "b82da2d76fe98092c33071371ea8b2817fe75abfe665062734760cd842d5dffc",
+      "sha256": "a505bb5f1c7e8baf875d802f2d833516fc44c3f4c94f961b1088f7451ca476d5",
       "bytes": 18100
     },
     {
       "path": "package.json",
-      "sha256": "404680bfc37c408435183fefee7c4e959c9269d0e0b20a11c650551e2ab0ef42",
+      "sha256": "d9451e657350cddd8e0f2b0270fa355454369d9ece0c1ab817cb8f32a55ef180",
       "bytes": 2240
     },
     {
