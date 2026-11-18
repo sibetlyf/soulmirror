@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "files": [
     {
       "path": "index.js",
@@ -159,8 +159,8 @@
     },
     {
       "path": "lib/dsh-llm.js",
-      "sha256": "d87b6de7b729718f58b1c7c69f471bad702f043ea48daf09897b5acf8e5b08fa",
-      "bytes": 3211
+      "sha256": "43e0c73015ca220b782ca28ef855cc775d7d867d4191fb1526f41f996198be93",
+      "bytes": 4623
     },
     {
       "path": "lib/dsh-session.js",
@@ -484,7 +484,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "cdd9f9432b331a1d7ee08772947638e91e5a893d519ca062fc74260430371fd3",
+      "sha256": "550ed8466fd44d38e6a9fd1811f370a399870c2d327d00e6597fd447b3d157d2",
       "bytes": 3947
     },
     {
@@ -564,12 +564,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "a505bb5f1c7e8baf875d802f2d833516fc44c3f4c94f961b1088f7451ca476d5",
-      "bytes": 18100
+      "sha256": "2b5fb2e7c8b9dc5496604da4cc6c3d734de418245af3525abd7871bdf92e1958",
+      "bytes": 18257
     },
     {
       "path": "package.json",
-      "sha256": "d9451e657350cddd8e0f2b0270fa355454369d9ece0c1ab817cb8f32a55ef180",
+      "sha256": "943dfd7e79179fad2622c64402d5cc63e5241f72e27822cd76a68ebef6739ed7",
       "bytes": 2240
     },
     {
