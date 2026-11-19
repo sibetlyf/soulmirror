@@ -119,7 +119,7 @@ import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, w
 import { MemoryStore } from './lib/memory.js'
 import { LivingWorld } from './lib/living.js'
 import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
-import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio } from './lib/uimap.js'
+import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio, calibrationUsable } from './lib/uimap.js'
 import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib/join-url.js'
 import { resolveApiKey, resolveDashScopeKey, keyInfo } from './lib/env.js'
 import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
@@ -353,8 +353,12 @@ export const Config = z.object({
     /** 同一个会议多久内不重复自动入（毫秒）。 */
     cooldownMs: z.number().default(300000),
   }),
-  /** 自动标定：首次安装 / 入会连续失败时，交给 computer-use 去试出按钮位置。 */
-  autoCalibrate: z.boolean().default(true),
+  /**
+   * 自动标定：默认**关闭**。
+   * 它会把「试出按钮位置」这件事交给 computer-use 自己点，用户看到的就是鼠标在界面上乱点；
+   * 而每台机器的窗口位置不同，靠试并不靠谱。需要标定时由人显式调 meeting_calibrate。
+   */
+  autoCalibrate: z.boolean().default(false),
   /** 连续失败几次就重新标定。 */
   recalibrateThreshold: z.number().default(2),
   /** 自动跟随：哪个会议软件在开会就用哪个（activeApp 为空时生效）。 */
@@ -4176,29 +4180,35 @@ export function apply(ctx, config, deps = {}) {
         steps.push('跑一次 meeting_calibrate 截图，看完图用 meeting_set_ui_map 存下「加入会议」位置即可')
         return { ok: false, result: joinFailureResult(steps.join('\n')) }
       }
-      // 点一次 → 验证 → 失败就在附近小范围重试
-      for (const off of probeOffsets(0.02, 2)) {
-        const rx = saved.x + off.dx
-        const ry = saved.y + off.dy
-        if (!validRatio(rx, ry)) continue
-        try {
-          const hit = await clickRatio(app.title, rx, ry, opts)
-          await new Promise((r) => setTimeout(r, 900))
-          if (await dialogOpen()) {
-            opened = true
-            if (off.dx || off.dy) {
-              // 记住修正后的位置，下次一步到位
-              uiMap.set(app.name, 'join', { x: rx, y: ry }, { via: 'probe' })
-              steps.push('标定位置有偏移，已修正到 ' + rx.toFixed(3) + ', ' + ry.toFixed(3))
-            }
-            uiMap.markSuccess(app.name, 'join')
-            steps.push('已按标定坐标打开入会对话框（' + rx.toFixed(3) + ', ' + ry.toFixed(3) + ' → ' + hit.x + ',' + hit.y + '）')
-            break
-          }
-        } catch (e) {
-          steps.push('点击失败: ' + e.message)
-          break
+      // 失败次数达到阈值 → 这条标定已过期，点了也是乱点，直接拒绝（纯函数，可单测）
+      const usable = calibrationUsable(uiMap.meta(app.name, 'join'), cfg.recalibrateThreshold)
+      if (!usable.ok) {
+        steps.push('标定坐标已失败 ' + usable.failures + ' 次（阈值 ' + usable.limit + '），判定过期，不再点它')
+        steps.push('请重新标定（meeting_calibrate → 看图 → meeting_set_ui_map），或用入会链接 / computer-use')
+        return { ok: false, result: joinFailureResult(steps.join('\n')) }
+      }
+      // 用户明确要求：不要盲点。标定坐标只点一次；点不开就停下来说清楚。
+      // 原来这里用 probeOffsets 在附近连点最多 9 次——那正是"鼠标满屏乱点"的来源，
+      // 而且每台机器窗口位置不同，写死/瞎试都不可靠，所以不再做任何试探性点击。
+      try {
+        const hit = await clickRatio(app.title, saved.x, saved.y, opts)
+        await new Promise((r) => setTimeout(r, 900))
+        if (await dialogOpen()) {
+          opened = true
+          uiMap.markSuccess(app.name, 'join')
+          steps.push('已按标定坐标打开入会对话框（' + saved.x.toFixed(3) + ', ' + saved.y.toFixed(3) + ' → ' + hit.x + ',' + hit.y + '）')
+        } else {
+          steps.push('按标定坐标点了一次，但入会对话框没出现（标定可能已过期：窗口尺寸或版本变了）')
         }
+      } catch (e) {
+        steps.push('点击失败: ' + e.message)
+      }
+      if (!opened) {
+        steps.push('不再盲试坐标。请改用下面任一方式：')
+        steps.push('  · 给入会链接：meeting_join { url } —— 不需要任何点击')
+        steps.push('  · 或用 computer-use 看着屏幕点一次（每台机器界面位置不同，不能写死）')
+        steps.push('  · 或重新标定：meeting_calibrate → 看图 → meeting_set_ui_map')
+        return { ok: false, result: joinFailureResult(steps.join('\n')) }
       }
     }
 

@@ -1,4 +1,5 @@
 import { test } from 'node:test'
+import { calibrationUsable } from '../lib/uimap.js'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -73,4 +74,17 @@ test('UiMap：不同软件各存各的', () => {
 
 test('动作清单包含入会等常用项', () => {
   for (const a of ['join', 'quick', 'schedule', 'share', 'leave']) assert.ok(ACTIONS.includes(a))
+})
+
+test('标定失败次数达到阈值即判定过期（真实事故：11-05 的错坐标导致乱点）', () => {
+  // 0/1 次失败仍可用；达到阈值 2 就不再使用
+  assert.equal(calibrationUsable({ failures: 0 }, 2).ok, true)
+  assert.equal(calibrationUsable({ failures: 1 }, 2).ok, true)
+  const over = calibrationUsable({ failures: 2 }, 2)
+  assert.equal(over.ok, false)
+  assert.equal(over.why, 'too-many-failures')
+  // 阈值下限 1，非法值不许把守卫关掉
+  assert.equal(calibrationUsable({ failures: 1 }, 1).ok, false, '阈值 1 → 1 次失败即过期')
+  assert.equal(calibrationUsable({ failures: 1 }, 0).ok, true, '阈值非法(0)退回默认 2，1 次失败仍可用')
+  assert.equal(calibrationUsable(undefined, 2).ok, true, '没有 meta 时不拦（未标定另走"去标定"分支）')
 })
