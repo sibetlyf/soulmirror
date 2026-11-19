@@ -4027,7 +4027,9 @@ export function apply(ctx, config, deps = {}) {
     parameters: {
       app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
     },
-    output: OUT(),
+    // launched 必须声明：OUT() 是 additionalProperties:false，少了它会直接报
+    // `tool "meeting_open" returned invalid output`（实测踩到）。
+    output: OUT({ launched: { type: 'boolean' } }),
     execute: wrap('meeting_open', async (a) => openMeetingClient(a.app)),
   }))
 

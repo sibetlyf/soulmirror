@@ -101,3 +101,10 @@ test('打开入会链接优先走 Explorer（避免沙箱受限令牌传给会�
   assert.match(seg, /cmd.*start/, 'explorer 打不开要回退 cmd /c start')
   assert.match(seg, /if \(lastErr\) throw lastErr/, '两种都失败必须抛出，不许静默')
 })
+test('meeting_open 的 output 必须声明 launched（否则调用即报 invalid output）', () => {
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const at = src.indexOf("name: 'meeting_open'")
+  assert.ok(at > 0)
+  const seg = src.slice(at, at + 500)
+  assert.match(seg, /output: OUT\(\{ launched:/, 'launched 必须在 output schema 里声明')
+})
