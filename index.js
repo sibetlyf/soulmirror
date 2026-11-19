@@ -123,6 +123,7 @@ import { UiMap, pixelToRatio, ratioToPixel, probeOffsets, validRatio, calibratio
 import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib/join-url.js'
 import { resolveApiKey, resolveDashScopeKey, keyInfo } from './lib/env.js'
 import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
+import { buildVisualJoinPrompt, visualJoined, visualVerdict } from './lib/visual-join.js'
 import { findMeeting, findMeetingInEvent, AutoJoinGate, isUserAuthoredEvent } from './lib/auto-join.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
@@ -358,6 +359,10 @@ export const Config = z.object({
    * 它会把「试出按钮位置」这件事交给 computer-use 自己点，用户看到的就是鼠标在界面上乱点；
    * 而每台机器的窗口位置不同，靠试并不靠谱。需要标定时由人显式调 meeting_calibrate。
    */
+  /** 程序路径入会失败后，自动派 computer-use 子会话看屏幕点入会（默认开） */
+  autoComputerUseJoin: z.boolean().default(true),
+  /** 派 computer-use 入会的等待上限（毫秒） */
+  computerUseJoinTimeoutMs: z.number().default(120000),
   autoCalibrate: z.boolean().default(false),
   /** 连续失败几次就重新标定。 */
   recalibrateThreshold: z.number().default(2),
@@ -4037,6 +4042,47 @@ export function apply(ctx, config, deps = {}) {
     execute: wrap('meeting_open', async (a) => openMeetingClient(a.app)),
   }))
 
+
+    /**
+     * 程序路径失败后自动转 computer-use：派子会话看屏幕把会入进去。
+     * 返回 null 表示"没接过这个任务"（开关关闭/未启用），调用方按原样返回失败；
+     * 返回对象则表示已尝试过，直接作为工具结果。
+     */
+    async function tryComputerUseJoin(app, joinCode, steps) {
+      if (!cfg.autoComputerUseJoin) return null
+      if (!isArmed()) return null
+      const waitMs = Math.max(30000, Number(cfg.computerUseJoinTimeoutMs) || 120000)
+      steps.push('正在派 computer-use 看屏幕入会（最多等 ' + Math.round(waitMs / 1000) + ' 秒）…')
+      let prompt = ''
+      try {
+        prompt = buildVisualJoinPrompt({ app: app.name, code: joinCode, winHint: app.title || '' })
+      } catch (e) {
+        steps.push('组装 computer-use 提示词失败：' + e.message)
+        return null
+      }
+      const r = await runComputerUseSession(prompt, { timeoutMs: waitMs, title: 'SoulMirror · 看屏入会' })
+      const text = String((r && r.text) || '')
+      const verdict = visualVerdict(text)
+      let joined = !!(r && r.ok) && visualJoined(text)
+      if (!joined) {
+        // 子会话说没成，再自己看一眼窗口，避免它漏报
+        try {
+          const wins = await listWindows()
+          joined = await meetingActive(app, wins)
+        } catch { /* ignore */ }
+      }
+      if (joined) {
+        uiMap.markSuccess(app.name, 'join')
+        steps.push('已由 computer-use 入会成功')
+        return { ok: true, result: steps.join('\n') + '\n已进入会议（computer-use）\n' + verdict }
+      }
+      steps.push('computer-use 也没入会：' + (verdict || (r && r.error) || '没有返回结论'))
+      return {
+        ok: false, needsComputerUse: true, attemptCount: 2,
+        result: joinFailureResult(steps.join('\n')) + '\n（程序试过 1 次 + computer-use 试过 1 次都没成功）',
+      }
+    }
+
   const joinTool = defineTool({
     name: 'meeting_join',
     description:
@@ -4180,7 +4226,10 @@ export function apply(ctx, config, deps = {}) {
       if (!saved) {
         steps.push('首页按钮没有可点的控件名，也还没有标定过坐标')
         steps.push('跑一次 meeting_calibrate 截图，看完图用 meeting_set_ui_map 存下「加入会议」位置即可')
-        steps.push('程序路径已试过 1 次：接下来请用 computer-use 看着屏幕点一次')
+        steps.push('程序路径已试过 1 次')
+        const viaCU1 = await tryComputerUseJoin(app, joinCode, steps)
+        if (viaCU1) return viaCU1
+        steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
         return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
       // 失败次数达到阈值 → 这条标定已过期，点了也是乱点，直接拒绝（纯函数，可单测）
@@ -4188,7 +4237,10 @@ export function apply(ctx, config, deps = {}) {
       if (!usable.ok) {
         steps.push('标定坐标已失败 ' + usable.failures + ' 次（阈值 ' + usable.limit + '），判定过期，不再点它')
         steps.push('请重新标定（meeting_calibrate → 看图 → meeting_set_ui_map），或用入会链接 / computer-use')
-        steps.push('程序路径已试过 1 次：接下来请用 computer-use 看着屏幕点一次')
+        steps.push('程序路径已试过 1 次')
+        const viaCU2 = await tryComputerUseJoin(app, joinCode, steps)
+        if (viaCU2) return viaCU2
+        steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
         return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
       // 用户明确要求：不要盲点。标定坐标只点一次；点不开就停下来说清楚。
@@ -4212,7 +4264,10 @@ export function apply(ctx, config, deps = {}) {
         steps.push('  · 给入会链接：meeting_join { url } —— 不需要任何点击')
         steps.push('  · 或用 computer-use 看着屏幕点一次（每台机器界面位置不同，不能写死）')
         steps.push('  · 或重新标定：meeting_calibrate → 看图 → meeting_set_ui_map')
-        steps.push('程序路径已试过 1 次且没打开对话框：接下来请用 computer-use 看着屏幕点一次')
+        steps.push('程序路径已试过 1 次且没打开对话框')
+        const viaCU3 = await tryComputerUseJoin(app, joinCode, steps)
+        if (viaCU3) return viaCU3
+        steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
         return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
     }
@@ -4221,11 +4276,12 @@ export function apply(ctx, config, deps = {}) {
       ensureTime()
       const names = await listClickableNames(app)
       uiMap.markFailure(app.name, 'join', '打不开入会对话框')
-      const calib = maybeCalibrate(app, 'join', '打不开入会对话框')
-      steps.push(calib.started ? '已在后台用 computer-use 重新标定按钮位置，稍后重试' : '（标定未触发：' + (calib.skipped || calib.why || '') + '）')
       steps.push('没能打开入会对话框。首页可见控件：' + (names.slice(0, 10).join(' / ') || '（读不到）'))
-      steps.push('排查：确认会议客户端停在首页（不是已入会状态），或调 config.joinClickRatio')
-      return { ok: false, result: joinFailureResult(steps.join('\n')) }
+      steps.push('排查：确认会议客户端停在首页（不是已入会状态）')
+      // 不再走"自动标定"（它会派 computer-use 反复试坐标 = 乱点）：直接让它看屏幕入会
+      const viaCU5 = await tryComputerUseJoin(app, joinCode, steps)
+      if (viaCU5) return viaCU5
+      return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
     }
 
     // 对话框里：会议号 → 昵称 → 自动连音频 → 加入
@@ -4269,10 +4325,13 @@ export function apply(ctx, config, deps = {}) {
       try { await pressKey(JOIN_DIALOG, 'escape', opts); steps.push('已按 Esc 关闭对话框') } catch { /* ignore */ }
     }
     if (!joined) {
-      // 入会没成功：把这次算作一次坐标失败，并在需要时让 computer-use 重新学一遍
+      // 入会没成功：记一次坐标失败，然后自动转 computer-use 看屏幕再试一次
       try { uiMap.markFailure(app.name, 'join', errLine ? '客户端提示：' + errLine.slice(0, 40) : '点了加入但没进会') } catch { /* ignore */ }
-      const calib = maybeCalibrate(app, 'join', errLine || '点了加入但没进会')
-      steps.push('程序路径已经试过 1 次但没有进会：请改用 computer-use 看着屏幕点一次入会')
+      steps.push('程序路径已经试过 1 次但没有进会')
+      const viaCU4 = await tryComputerUseJoin(app, joinCode, steps)
+      if (viaCU4 && viaCU4.ok) return { ok: true, result: viaCU4.result }
+      if (viaCU4) steps.push('computer-use 也未能入会（已如实记录）')
+      else steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
     }
     return { ok: joined, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议' + (errLine ? '\n客户端提示：' + errLine.split('\t').slice(1, 3).join(' ') : '；可用 meeting_status 复查')) }
     }),
@@ -4785,17 +4844,21 @@ export function apply(ctx, config, deps = {}) {
 
   // ── 界面标定：需要时开一个会话，让 computer-use 亲手试出按钮位置 ──────
   let calibSessionId = ""
-  async function runCalibrationSession(prompt) {
+  /**
+   * 派一个 computer-use 子会话去做一件事，并等它给结论。
+   * 「标定按钮位置」与「看屏幕把会入进去」共用这条通道。
+   */
+  async function runComputerUseSession(prompt, { timeoutMs = 180000, title = "SoulMirror · 界面标定" } = {}) {
     const controller = getController(ctx)
     if (!controller) return { ok: false, error: "宿主没有会话服务" }
     try {
       if (!calibSessionId) {
         calibSessionId = await createSession(ctx, {
           cwd: join(CONFIG_DIR, "workspace", "calibrate"),
-          title: "SoulMirror · 界面标定",
+          title,
         })
       }
-      const r = await promptSession(ctx, calibSessionId, prompt, { timeoutMs: 180000 })
+      const r = await promptSession(ctx, calibSessionId, prompt, { timeoutMs })
       return { ok: r.ok, text: r.text, error: r.error, sessionId: calibSessionId }
     } catch (e) {
       calibSessionId = ""
@@ -4959,7 +5022,7 @@ export function apply(ctx, config, deps = {}) {
   }
 
   const calibrator = new CalibrationRunner({
-    run: (prompt) => runCalibrationSession(prompt),
+    run: (prompt) => runComputerUseSession(prompt),
     logger,
   })
 
