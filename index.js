@@ -4049,7 +4049,9 @@ export function apply(ctx, config, deps = {}) {
       app: { type: 'string', description: '会议软件名（可选，如 移动会议）；默认取 activeApp。' },
       confirm: { type: 'boolean', description: '确认执行，必须为 true。' },
     },
-    output: OUT(),
+    // needsComputerUse 是给上层 agent 的明确信号：程序路径已经试过一次且失败，
+    // 接下来应当改用 computer-use 看屏幕入会，而不是再让它盲试坐标。
+    output: OUT({ needsComputerUse: { type: 'boolean' }, attemptCount: { type: 'number' } }),
     execute: wrap('meeting_join', async (a) => {
       if (!cfg.enabled) return { ok: false, result: '插件已禁用' }
       if (a.confirm !== true) return { ok: false, result: '拒绝：meeting_join 会操作真实客户端，请传 confirm=true 再执行。' }
@@ -4062,14 +4064,14 @@ export function apply(ctx, config, deps = {}) {
       try {
         await openExternal(rawUrl)
       } catch (e) {
-        return { ok: false, result: '打不开链接：' + e.message }
+        return { ok: false, needsComputerUse: true, attemptCount: 1, result: '打不开链接：' + e.message + '\n程序路径已试过 1 次：接下来请用 computer-use 打开客户端点入会' }
       }
       for (let i = 0; i < 15; i++) {
         await new Promise((r) => setTimeout(r, 1000))
         const wins0 = await listWindows().catch(() => [])
         if (joinedAfterOpening(wins0, urlApp)) return { ok: true, result: '已通过链接入会：' + rawUrl }
       }
-      return { ok: false, result: '已打开链接但没检测到入会：' + rawUrl + '\n（可能需要在客户端里确认一下，或链接已过期）' }
+      return { ok: false, needsComputerUse: true, attemptCount: 1, result: '已打开链接但没检测到入会：' + rawUrl + '\n（可能需要在客户端里确认一下，或链接已过期）\n程序路径已试过 1 次：接下来请用 computer-use 看屏幕点一次' }
     }
     if (!a.code) return { ok: false, result: '缺少会议号（也可以直接给入会链接 url）' }
     // 能在事前判断的就别进 UI：格式错的会议号会一路走到探测里，白等几十秒
@@ -4139,7 +4141,7 @@ export function apply(ctx, config, deps = {}) {
         const joined = wins.some((w) => w.proc === app.proc && /ParticipantWnd|VideoCellWnd/.test(w.cls))
         if (err) {
           await click(app.title, 'Close', opts).catch(() => undefined)
-          return { ok: false, result: steps.join('\n') + '\n移动会议返回：' + err }
+          return { ok: false, needsComputerUse: true, attemptCount: 1, result: steps.join('\n') + '\n移动会议返回：' + err + '\n程序路径已试过 1 次：接下来请用 computer-use 看屏幕点一次' }
         }
         return { ok: true, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
       }
@@ -4178,14 +4180,16 @@ export function apply(ctx, config, deps = {}) {
       if (!saved) {
         steps.push('首页按钮没有可点的控件名，也还没有标定过坐标')
         steps.push('跑一次 meeting_calibrate 截图，看完图用 meeting_set_ui_map 存下「加入会议」位置即可')
-        return { ok: false, result: joinFailureResult(steps.join('\n')) }
+        steps.push('程序路径已试过 1 次：接下来请用 computer-use 看着屏幕点一次')
+        return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
       // 失败次数达到阈值 → 这条标定已过期，点了也是乱点，直接拒绝（纯函数，可单测）
       const usable = calibrationUsable(uiMap.meta(app.name, 'join'), cfg.recalibrateThreshold)
       if (!usable.ok) {
         steps.push('标定坐标已失败 ' + usable.failures + ' 次（阈值 ' + usable.limit + '），判定过期，不再点它')
         steps.push('请重新标定（meeting_calibrate → 看图 → meeting_set_ui_map），或用入会链接 / computer-use')
-        return { ok: false, result: joinFailureResult(steps.join('\n')) }
+        steps.push('程序路径已试过 1 次：接下来请用 computer-use 看着屏幕点一次')
+        return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
       // 用户明确要求：不要盲点。标定坐标只点一次；点不开就停下来说清楚。
       // 原来这里用 probeOffsets 在附近连点最多 9 次——那正是"鼠标满屏乱点"的来源，
@@ -4208,7 +4212,8 @@ export function apply(ctx, config, deps = {}) {
         steps.push('  · 给入会链接：meeting_join { url } —— 不需要任何点击')
         steps.push('  · 或用 computer-use 看着屏幕点一次（每台机器界面位置不同，不能写死）')
         steps.push('  · 或重新标定：meeting_calibrate → 看图 → meeting_set_ui_map')
-        return { ok: false, result: joinFailureResult(steps.join('\n')) }
+        steps.push('程序路径已试过 1 次且没打开对话框：接下来请用 computer-use 看着屏幕点一次')
+        return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
     }
 
@@ -4267,9 +4272,7 @@ export function apply(ctx, config, deps = {}) {
       // 入会没成功：把这次算作一次坐标失败，并在需要时让 computer-use 重新学一遍
       try { uiMap.markFailure(app.name, 'join', errLine ? '客户端提示：' + errLine.slice(0, 40) : '点了加入但没进会') } catch { /* ignore */ }
       const calib = maybeCalibrate(app, 'join', errLine || '点了加入但没进会')
-      steps.push(calib.started
-        ? '已在后台启动 computer-use 标定；稍后再说一次「加入会议」即可重试'
-        : '（标定未触发：' + (calib.skipped || calib.why || '') + '；可以直接说「用 computer-use 帮我点」）')
+      steps.push('程序路径已经试过 1 次但没有进会：请改用 computer-use 看着屏幕点一次入会')
     }
     return { ok: joined, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议' + (errLine ? '\n客户端提示：' + errLine.split('\t').slice(1, 3).join(' ') : '；可用 meeting_status 复查')) }
     }),
