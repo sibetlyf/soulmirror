@@ -554,6 +554,10 @@ export function apply(ctx, config, deps = {}) {
     keys: { apiKey: '', ...(config.keys || {}) },
   upgrade: { repo: String(config.upgrade?.repo || ''), branch: String(config.upgrade?.branch || '') },
   autoJoin: { enabled: false, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
+    // 程序路径失败后自动派 computer-use 看屏入会：schema 默认 true，这里必须显式映射，
+    // 否则 cfg.autoComputerUseJoin 是 undefined，join 里会直接 return null（实测踩到）
+    autoComputerUseJoin: config.autoComputerUseJoin !== false,
+    computerUseJoinTimeoutMs: Number(config.computerUseJoinTimeoutMs || 120000),
     autoCalibrate: config.autoCalibrate !== false,
     recalibrateThreshold: Number(config.recalibrateThreshold || 2),
     autoAppSelect: config.autoAppSelect !== false,
@@ -4049,8 +4053,8 @@ export function apply(ctx, config, deps = {}) {
      * 返回对象则表示已尝试过，直接作为工具结果。
      */
     async function tryComputerUseJoin(app, joinCode, steps) {
-      if (!cfg.autoComputerUseJoin) return null
-      if (!isArmed()) return null
+      if (!cfg.autoComputerUseJoin) return 'disabled'
+      if (!isArmed()) return 'not-armed'
       const waitMs = Math.max(30000, Number(cfg.computerUseJoinTimeoutMs) || 120000)
       steps.push('正在派 computer-use 看屏幕入会（最多等 ' + Math.round(waitMs / 1000) + ' 秒）…')
       let prompt = ''
@@ -4058,7 +4062,7 @@ export function apply(ctx, config, deps = {}) {
         prompt = buildVisualJoinPrompt({ app: app.name, code: joinCode, winHint: app.title || '' })
       } catch (e) {
         steps.push('组装 computer-use 提示词失败：' + e.message)
-        return null
+        return 'prompt-failed'
       }
       const r = await runComputerUseSession(prompt, { timeoutMs: waitMs, title: 'SoulMirror · 看屏入会' })
       const text = String((r && r.text) || '')
@@ -4229,7 +4233,7 @@ export function apply(ctx, config, deps = {}) {
         steps.push('程序路径已试过 1 次')
         const viaCU1 = await tryComputerUseJoin(app, joinCode, steps)
         if (viaCU1) return viaCU1
-        steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
+        steps.push('自动 computer-use 没能接手（' + (viaCU1 || 'unknown') + '）：请人工用 computer-use 看着屏幕点一次')
         return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
       // 失败次数达到阈值 → 这条标定已过期，点了也是乱点，直接拒绝（纯函数，可单测）
@@ -4240,7 +4244,7 @@ export function apply(ctx, config, deps = {}) {
         steps.push('程序路径已试过 1 次')
         const viaCU2 = await tryComputerUseJoin(app, joinCode, steps)
         if (viaCU2) return viaCU2
-        steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
+        steps.push('自动 computer-use 没能接手（' + (viaCU2 || 'unknown') + '）：请人工用 computer-use 看着屏幕点一次')
         return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
       // 用户明确要求：不要盲点。标定坐标只点一次；点不开就停下来说清楚。
@@ -4267,7 +4271,7 @@ export function apply(ctx, config, deps = {}) {
         steps.push('程序路径已试过 1 次且没打开对话框')
         const viaCU3 = await tryComputerUseJoin(app, joinCode, steps)
         if (viaCU3) return viaCU3
-        steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
+        steps.push('自动 computer-use 没能接手（' + (viaCU3 || 'unknown') + '）：请人工用 computer-use 看着屏幕点一次')
         return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
       }
     }
@@ -4280,7 +4284,8 @@ export function apply(ctx, config, deps = {}) {
       steps.push('排查：确认会议客户端停在首页（不是已入会状态）')
       // 不再走"自动标定"（它会派 computer-use 反复试坐标 = 乱点）：直接让它看屏幕入会
       const viaCU5 = await tryComputerUseJoin(app, joinCode, steps)
-      if (viaCU5) return viaCU5
+      if (viaCU5 && typeof viaCU5 !== 'string') return viaCU5
+      steps.push('自动 computer-use 没能接手（' + (viaCU5 || 'unknown') + '）')
       return { ok: false, needsComputerUse: true, attemptCount: 1, result: joinFailureResult(steps.join('\n')) }
     }
 
@@ -4329,9 +4334,9 @@ export function apply(ctx, config, deps = {}) {
       try { uiMap.markFailure(app.name, 'join', errLine ? '客户端提示：' + errLine.slice(0, 40) : '点了加入但没进会') } catch { /* ignore */ }
       steps.push('程序路径已经试过 1 次但没有进会')
       const viaCU4 = await tryComputerUseJoin(app, joinCode, steps)
-      if (viaCU4 && viaCU4.ok) return { ok: true, result: viaCU4.result }
-      if (viaCU4) steps.push('computer-use 也未能入会（已如实记录）')
-      else steps.push('自动 computer-use 未启用/不可用：请人工用 computer-use 看着屏幕点一次')
+      if (viaCU4 && typeof viaCU4 !== 'string' && viaCU4.ok) return { ok: true, result: viaCU4.result }
+      if (viaCU4 && typeof viaCU4 !== 'string') steps.push('computer-use 也未能入会（已如实记录）')
+      else steps.push('自动 computer-use 没能接手（' + (viaCU4 || 'unknown') + '）：请人工用 computer-use 看着屏幕点一次')
     }
     return { ok: joined, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议' + (errLine ? '\n客户端提示：' + errLine.split('\t').slice(1, 3).join(' ') : '；可用 meeting_status 复查')) }
     }),

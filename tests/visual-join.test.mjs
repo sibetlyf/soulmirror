@@ -5,6 +5,7 @@
  * 以及子会话输出如何判定成功/抽取结论。不碰真实桌面、不联网、不录音。
  */
 import { test } from 'node:test'
+import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 import { buildVisualJoinPrompt, visualJoined, visualVerdict } from '../lib/visual-join.js'
 
@@ -38,4 +39,13 @@ test('结论抽取：优先 DETAIL/EVIDENCE，缺失时截断原文', () => {
   assert.match(v, /点「加入」后进入/)
   assert.match(v, /界面：亚峰-init 会议/)
   assert.equal(visualVerdict(''), '（子会话没有返回内容）')
+})
+
+test('wiring：cfg 必须映射 autoComputerUseJoin（否则 join 里恒为 undefined → 直接跳过回退）', () => {
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.match(src, /autoComputerUseJoin: config\.autoComputerUseJoin !== false/, 'cfg 映射缺失会让回退永远不触发')
+  assert.match(src, /computerUseJoinTimeoutMs: Number\(config\.computerUseJoinTimeoutMs/, '超时也要映射')
+  // 回退函数必须能区分"没接手"与"试过但失败"
+  assert.match(src, /return 'disabled'/, '开关关闭要返回可读原因，而不是 null')
+  assert.match(src, /return 'not-armed'/, '未启用要返回可读原因')
 })
