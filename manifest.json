@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.5.10",
+  "version": "1.5.11",
   "files": [
     {
       "path": "index.js",
-      "sha256": "1e66eba826cd30c501caa8d6eaf5e939a87e34a99e00a28b423c0b5a8c15e676",
-      "bytes": 449775
+      "sha256": "56879c49a9c8361448b08fc0167e29a14bb713123974bdfa5d83434c0a72b0e0",
+      "bytes": 451634
     },
     {
       "path": "lib/action-items.js",
@@ -191,6 +191,11 @@
       "path": "lib/join-guard.js",
       "sha256": "133974ede872b2f5e53df852cb2012d3bf6c0a697369b6ff768c0c7e7e3b897d",
       "bytes": 3435
+    },
+    {
+      "path": "lib/join-playbook.js",
+      "sha256": "bac4aa6ec79d1779cdda8de9609764f17240dc2281c932f6931e4e179d4f49c3",
+      "bytes": 5828
     },
     {
       "path": "lib/join-url.js",
@@ -484,7 +489,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "d23118dcc304f9c5467959d6f2ad487adf828cc6b258e474549ce6badee1c801",
+      "sha256": "f3db1b225e5b26134d122dd5a5fc0fbe6fcbcacef480190e37470e81783f5335",
       "bytes": 3948
     },
     {
@@ -494,8 +499,8 @@
     },
     {
       "path": "lib/visual-join.js",
-      "sha256": "1986c8a73b205be739bd7e5d989c8320e161d0286a55fd071129942aa4ff5a14",
-      "bytes": 3633
+      "sha256": "c2443fbb5aac9722c71772a0846ed599be6ded8f9170d7edec1dcfe746520fd7",
+      "bytes": 4156
     },
     {
       "path": "lib/voiceprint/embed.js",
@@ -569,12 +574,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "d2b5fe9bb3b55226fe7811cc427dd93251b7556d77235415b929db7124c349a5",
-      "bytes": 18410
+      "sha256": "a59b5e1ddf76d495b511cb7f15b229dd7cd7ebaa005e606074bf8b8969d76f17",
+      "bytes": 18411
     },
     {
       "path": "package.json",
-      "sha256": "28e0a9db8c5db631af042acc485857e9aae2223dddc5277fc882c96c07ca56ac",
+      "sha256": "8f39056a798905da2cc7e5578317d5f471a92cdef369048595a2a185606554e8",
       "bytes": 2241
     },
     {

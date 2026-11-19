@@ -124,6 +124,7 @@ import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib
 import { resolveApiKey, resolveDashScopeKey, keyInfo } from './lib/env.js'
 import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
 import { buildVisualJoinPrompt, visualJoined, visualVerdict } from './lib/visual-join.js'
+import { loadPlaybook, savePlaybook, upsertEntry, buildPlaybookHint, parseVisualReport } from './lib/join-playbook.js'
 import { findMeeting, findMeetingInEvent, AutoJoinGate, isUserAuthoredEvent } from './lib/auto-join.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
 import { deriveMeetingKey, safeName, SessionMap } from './lib/meeting-id.js'
@@ -4052,14 +4053,28 @@ export function apply(ctx, config, deps = {}) {
      * 返回 null 表示"没接过这个任务"（开关关闭/未启用），调用方按原样返回失败；
      * 返回对象则表示已尝试过，直接作为工具结果。
      */
+    function playbookLine(book, app, win) {
+      const hit = (book.entries || []).find((e) => e && e.app === app.name && (!win || !e.win || !e.win.w || (e.win.w === win.w && e.win.h === win.h)))
+      if (!hit) return '无匹配经验'
+      return '窗口 ' + (hit.win && hit.win.w ? hit.win.w + 'x' + hit.win.h : '未知') + '，成功 ' + (hit.successes || 1) + ' 次'
+    }
+
     async function tryComputerUseJoin(app, joinCode, steps) {
       if (!cfg.autoComputerUseJoin) return 'disabled'
       if (!isArmed()) return 'not-armed'
       const waitMs = Math.max(30000, Number(cfg.computerUseJoinTimeoutMs) || 120000)
       steps.push('正在派 computer-use 看屏幕入会（最多等 ' + Math.round(waitMs / 1000) + ' 秒）…')
       let prompt = ''
+      const bookFile = join(CONFIG_DIR, 'join-playbook.json')
+      let book = loadPlaybook(bookFile)
+      let winNow = null
       try {
-        prompt = buildVisualJoinPrompt({ app: app.name, code: joinCode, winHint: app.title || '' })
+        winNow = await clientRect(app.title)
+      } catch { /* 拿不到窗口尺寸就按未知尺寸 */ }
+      const hint = buildPlaybookHint(book, { app: app.name, win: winNow || undefined })
+      if (hint) steps.push('已载入上次成功的入会经验（' + playbookLine(book, app, winNow) + '）')
+      try {
+        prompt = buildVisualJoinPrompt({ app: app.name, code: joinCode, winHint: app.title || '', playbook: hint })
       } catch (e) {
         steps.push('组装 computer-use 提示词失败：' + e.message)
         return 'prompt-failed'
@@ -4078,6 +4093,22 @@ export function apply(ctx, config, deps = {}) {
       if (joined) {
         uiMap.markSuccess(app.name, 'join')
         steps.push('已由 computer-use 入会成功')
+        // 用户要求：每次 computer-use 成功入会，都把过程简要落盘，下次先用它
+        try {
+          const rep2 = parseVisualReport(text)
+          const winForBook = (winNow && winNow.w ? winNow : rep2.win) || undefined
+          book = upsertEntry(book, {
+            app: app.name,
+            win: winForBook,
+            steps: rep2.steps.length ? rep2.steps : ['（子会话未回报步骤，仅记录成功）'],
+            note: [rep2.detail, rep2.evidence].filter(Boolean).join('｜').slice(0, 180),
+          })
+          savePlaybook(bookFile, book)
+          const saved = book.entries[0]
+          steps.push('已落盘入会经验：' + bookFile + '（' + saved.key + '，第 ' + saved.successes + ' 次成功，' + (saved.steps.length) + ' 步）')
+        } catch (e) {
+          steps.push('入会成功但经验落盘失败：' + e.message)
+        }
         return { ok: true, result: steps.join('\n') + '\n已进入会议（computer-use）\n' + verdict }
       }
       steps.push('computer-use 也没入会：' + (verdict || (r && r.error) || '没有返回结论'))
