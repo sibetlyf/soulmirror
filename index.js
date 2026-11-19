@@ -3491,16 +3491,29 @@ export function apply(ctx, config, deps = {}) {
   /** 用系统默认方式打开链接（会交给会议客户端处理，不需要点界面） */
   async function openExternal(url) {
     const { spawn } = await import('node:child_process')
-    const cmd = process.platform === 'win32'
-      ? ['cmd', ['/c', 'start', '', url]]
+    // Windows 优先交给 Explorer：它常驻于用户正常令牌，派生出的会议客户端不会带沙箱受限令牌。
+    // 真实事故：在受限令牌下用 `cmd /c start` 打开入会链接，腾讯会议继承了受限令牌，
+    // 初始化写 AppData\Roaming\Tencent\WeMeet 失败，弹「程序初始化异常：无法访问，请确保写入权限」。
+    // Explorer 打不开（例如无桌面会话）再回退 cmd start。
+    const tries = process.platform === 'win32'
+      ? [['explorer.exe', [url]], ['cmd', ['/c', 'start', '', url]]]
       : process.platform === 'darwin'
-        ? ['open', [url]]
-        : ['xdg-open', [url]]
-    await new Promise((resolve, reject) => {
-      const child = spawn(cmd[0], cmd[1], { detached: true, stdio: 'ignore' })
-      child.on('error', reject)
-      child.on('spawn', () => { child.unref(); resolve() })
-    })
+        ? [['open', [url]]]
+        : [['xdg-open', [url]]]
+    let lastErr = null
+    for (const [file, args] of tries) {
+      try {
+        await new Promise((resolve, reject) => {
+          const child = spawn(file, args, { detached: true, stdio: 'ignore' })
+          child.on('error', reject)
+          child.on('spawn', () => { child.unref(); resolve() })
+        })
+        return
+      } catch (e) {
+        lastErr = e
+      }
+    }
+    if (lastErr) throw lastErr
   }
 
   // 这些工具会操作桌面、占用麦克风或对外产出，总开关关着时一律拒绝

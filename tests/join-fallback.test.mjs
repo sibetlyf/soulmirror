@@ -1,7 +1,7 @@
 import { isolatePlugin, applyIsolated } from './helpers/isolated-plugin.mjs'
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -91,3 +91,13 @@ test('标定提示词明确要求用 computer-use 找按钮', async () => {
 
 // Environment, effects and temporary files are cleaned by isolatePlugin().
 
+
+test('打开入会链接优先走 Explorer（避免沙箱受限令牌传给会议客户端）', () => {
+  const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  const at = src.indexOf('async function openExternal')
+  assert.ok(at > 0, '找不到 openExternal')
+  const seg = src.slice(at, at + 1000)
+  assert.match(seg, /explorer\.exe/, 'Windows 必须先用 explorer.exe（它带用户正常令牌）')
+  assert.match(seg, /cmd.*start/, 'explorer 打不开要回退 cmd /c start')
+  assert.match(seg, /if \(lastErr\) throw lastErr/, '两种都失败必须抛出，不许静默')
+})
