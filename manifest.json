@@ -1,6 +1,6 @@
 {
   "name": "soulmirror",
-  "version": "1.5.12",
+  "version": "1.5.13",
   "files": [
     {
       "path": "index.js",
@@ -158,6 +158,11 @@
       "bytes": 7743
     },
     {
+      "path": "lib/dictionary.js",
+      "sha256": "e4780d6584e620ec6f17ed4a15a798487b858c7d570c71d9a7940f9cf7bf0bb2",
+      "bytes": 6851
+    },
+    {
       "path": "lib/dsh-llm.js",
       "sha256": "c795ee61b8266bee4b33989337bd4aa40ff20409de2401e57d63f0b0caf7b72e",
       "bytes": 10005
@@ -206,6 +211,11 @@
       "path": "lib/journal.js",
       "sha256": "77f6bf10b8b73a2f6d77032c0696dd77fe8823654278448444f69fa8d00978ae",
       "bytes": 22548
+    },
+    {
+      "path": "lib/kb-index.js",
+      "sha256": "69541b26908ecbafb1ebc9a83fcc36edd8b0be34f267dbae04fe4c98859115e1",
+      "bytes": 5560
     },
     {
       "path": "lib/knowledge.js",
@@ -336,6 +346,11 @@
       "path": "lib/pet-dsh.js",
       "sha256": "840bad184c60183459a0c4c18ab10b51783ae6dbeb4c2eb7354e36d21f30e2a0",
       "bytes": 11769
+    },
+    {
+      "path": "lib/pipeline-layers.js",
+      "sha256": "29444f5af5eb924b1171f3fd7547e057ed439eae85fbe2494a0f0a59c656f7e9",
+      "bytes": 4310
     },
     {
       "path": "lib/postmeeting-persona.js",
@@ -499,7 +514,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "2896c3d36f27f2c4f6da76a4b24a90c9b4c7630cf74482212c73649110262f41",
+      "sha256": "c9d75d5e834f3a6bafc66c11298d6510f4cec4ae90e7bf1a421318db8e1f8578",
       "bytes": 3948
     },
     {
@@ -584,12 +599,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "a905cc132c7e7699962457e528750df3aea12db91affb1b72677c2c88c942cff",
-      "bytes": 18566
+      "sha256": "c3f1749bc20fee21871d75f28d1aa53c6973e068dc12ba6891114258d67d28bd",
+      "bytes": 18879
     },
     {
       "path": "package.json",
-      "sha256": "360cdc60e12b871dddbb162de872d1bf2693fa406f1fc8e2100af6d523f1a15b",
+      "sha256": "6518795894c80e79b2a4e22f44ba9512a43b57ce1ab9690d034d446e7bbc78cc",
       "bytes": 2241
     },
     {
