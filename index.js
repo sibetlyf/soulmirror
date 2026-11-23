@@ -10,6 +10,7 @@
  * 依赖：tools/mbridge.exe（WASAPI + SAPI）、tools/ui.ps1（UIAutomation，Windows PowerShell 5.1）
  */
 import { buildViewModel, normalizeDisplay } from './lib/view-model.js'
+import { summary as latencySummary, describe as latencyDescribe } from './lib/latency.js'
 import { resolveModelRoute, createModelRouteStore, overrideOwnedModel } from './lib/model-route.js'
 import { createJournal, findInterrupted, recoverJournal } from './lib/journal.js'
 import { createPostMeeting } from './lib/postmeeting.js'
@@ -366,6 +367,13 @@ export const Config = z.object({
   autoComputerUseJoin: z.boolean().default(true),
   /** 派 computer-use 入会的等待上限（毫秒） */
   computerUseJoinTimeoutMs: z.number().default(120000),
+  /** 实时润色：转写整句落盘后异步整理一遍（默认关，打开才有模型调用开销） */
+  polish: z.object({
+    enabled: z.boolean().default(false),
+    mode: z.string().default(''),
+    minChars: z.number().default(6),
+    cooldownMs: z.number().default(1500),
+  }).default({}),
   autoCalibrate: z.boolean().default(false),
   /** 连续失败几次就重新标定。 */
   recalibrateThreshold: z.number().default(2),
@@ -559,7 +567,13 @@ export function apply(ctx, config, deps = {}) {
   autoJoin: { enabled: false, urlOnly: false, cooldownMs: 300000, ...(config.autoJoin || {}) },
     // 程序路径失败后自动派 computer-use 看屏入会：schema 默认 true，这里必须显式映射，
     // 否则 cfg.autoComputerUseJoin 是 undefined，join 里会直接 return null（实测踩到）
-    autoComputerUseJoin: config.autoComputerUseJoin !== false,
+    polish: {
+    enabled: config.polish?.enabled === true,
+    mode: String(config.polish?.mode || ''),
+    minChars: Number(config.polish?.minChars || 6),
+    cooldownMs: Number(config.polish?.cooldownMs || 1500),
+  },
+  autoComputerUseJoin: config.autoComputerUseJoin !== false,
     computerUseJoinTimeoutMs: Number(config.computerUseJoinTimeoutMs || 120000),
     autoCalibrate: config.autoCalibrate !== false,
     recalibrateThreshold: Number(config.recalibrateThreshold || 2),
@@ -1106,6 +1120,12 @@ export function apply(ctx, config, deps = {}) {
                 host: hostState(),
                 preflight: lastPreflight,
                 capturing: !!session.capturing,
+                // 响应速度要有可测量口径：给出各段 p50/p95（没有样本时明确写"还没有样本"）
+                latency: (() => {
+                  try {
+                    return { summary: latencySummary(session.latency), text: latencyDescribe(session.latency) }
+                  } catch { return { summary: {}, text: '（延迟统计不可用）' } }
+                })(),
                 transcriptLines: (session.transcript || []).length,
                 lastLineAgeSec: lastLine ? Math.round((Date.now() - lastLine) / 1000) : null,
                 // 识别状态来自 asrState（{online,failed,lastError}），不是我编的字段
@@ -2702,7 +2722,10 @@ export function apply(ctx, config, deps = {}) {
     } catch { spkCache = { name: spkCache.name, at: now } }
     return spkCache.name
   }
-  const session = new MeetingSession(cfg, logger, { getKey: () => keyFor(cfg.asr, 'asr'), onEvent: (type,data) => journal.append(type,data) })
+  const session = new MeetingSession(cfg, logger, {
+    // 实时润色只在开启时才注入 completer（未开启则完全不产生模型调用）
+    polishComplete: cfg.polish?.enabled ? makeDshCompleter(cfg.brain || {}) : null,
+    getKey: () => keyFor(cfg.asr, 'asr'), onEvent: (type,data) => journal.append(type,data) })
 
   // ── 保存位置：会议根的唯一真源 + 导出位置 ──────────────────────────────
   // 用户要求"支持手动选择纪要和录音等保存位置"。四条硬约束：

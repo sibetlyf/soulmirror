@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.5.13",
+  "version": "1.5.14",
   "files": [
     {
       "path": "index.js",
-      "sha256": "8a7d5b897f14a674b5683b7a09dd1035ec73bceb0460c34983306589e88c2e23",
-      "bytes": 464454
+      "sha256": "ee1e270e2619eb354b318ae5c8f52dcdec276716e83176ee6bd25111fe5ac79a",
+      "bytes": 465660
     },
     {
       "path": "lib/action-items.js",
@@ -223,9 +223,19 @@
       "bytes": 21073
     },
     {
+      "path": "lib/latency.js",
+      "sha256": "f39902b62e0920201253420c8eeaad4e3b21d5d58edf702d6a07d7996a185d0c",
+      "bytes": 2611
+    },
+    {
       "path": "lib/lifecycle.js",
       "sha256": "ad0abdd54067713de6f2306c07a698c87a9a156e9b62e544d01d5880477aff90",
       "bytes": 19928
+    },
+    {
+      "path": "lib/live-polish.js",
+      "sha256": "0cbba810eee9506e4a8267aee0a6f0c7611185982f630793d3b2315a9d5e52bb",
+      "bytes": 5155
     },
     {
       "path": "lib/living.js",
@@ -429,8 +439,8 @@
     },
     {
       "path": "lib/session.js",
-      "sha256": "36c0aab7d70c4a49ef6cd7c40a56cfd352a7c4567274653e8699acae7210817f",
-      "bytes": 57334
+      "sha256": "708a8d9e1a823417d786ef432266e726455410f87b52cbd454fc244b95e461f4",
+      "bytes": 60655
     },
     {
       "path": "lib/setup-rows.js",
@@ -514,7 +524,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "c9d75d5e834f3a6bafc66c11298d6510f4cec4ae90e7bf1a421318db8e1f8578",
+      "sha256": "f293e5ebe14984025ca812b072be3b45dba0131de3e7272cc4cdaa87a6f1c5f4",
       "bytes": 3948
     },
     {
@@ -599,12 +609,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "c3f1749bc20fee21871d75f28d1aa53c6973e068dc12ba6891114258d67d28bd",
-      "bytes": 18879
+      "sha256": "5d245a51565a7ce2deb3f3c20f3ec91dfdd56e126f93c3eaf54c12a98e1cd0fd",
+      "bytes": 19338
     },
     {
       "path": "package.json",
-      "sha256": "6518795894c80e79b2a4e22f44ba9512a43b57ce1ab9690d034d446e7bbc78cc",
+      "sha256": "c0e0511cfd2c97fb65a21489182c72ee54ddc4bf806cf84d9201d2142e960228",
       "bytes": 2241
     },
     {
