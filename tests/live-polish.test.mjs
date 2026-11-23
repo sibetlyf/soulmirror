@@ -99,3 +99,21 @@ test('wiring：润色接进 session 且默认关闭、延迟进 /status', () => 
   assert.match(idx, /latency: \(\(\) => \{/, '/status 必须暴露 latency')
   assert.match(idx, /latencyDescribe\(session\.latency\)/)
 })
+
+test('partial 即时润色：门控更紧、失败保留原文、延迟独立计数', () => {
+  const sess = readFileSync(new URL('../lib/session.js', import.meta.url), 'utf8')
+  assert.match(sess, /async _polishPartial\(text\)/, '必须有 partial 润色方法')
+  assert.match(sess, /polish\.partial/, '延迟通道要独立记为 polish.partial')
+  assert.match(sess, /inflight/, '必须防重入（上一句还没回来就别再发）')
+  assert.match(sess, /partial 润色跳过（保留原始 partial）/, '失败必须保留原文')
+  // partial 更新处必须触发它
+  assert.match(sess, /this\.partial = fixed[\s\S]{0,400}_polishPartial\(fixed\)/, 'partial 更新要触发润色')
+  // 整句落盘时清空 partial 润色缓存
+  assert.match(sess, /this\.partialPolished = ''/, '整句落盘要清 partial 缓存')
+
+  // 门控参数通过配置控制
+  const idx = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  assert.match(idx, /partialCooldownMs: z\.number\(\)\.default\(800\)/, 'partial 冷却默认 800ms')
+  assert.match(idx, /partialMinChars: z\.number\(\)\.default\(4\)/, 'partial 起步默认 4 字')
+  assert.match(idx, /partialStableMs: z\.number\(\)\.default\(500\)/, 'partial 稳定阈值默认 500ms')
+})

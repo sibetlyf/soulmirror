@@ -373,6 +373,11 @@ export const Config = z.object({
     mode: z.string().default(''),
     minChars: z.number().default(6),
     cooldownMs: z.number().default(1500),
+    /** 边说边润：partial 也润（只影响显示）；partialStableMs 内没变化才发 */
+    partial: z.boolean().default(true),
+    partialCooldownMs: z.number().default(800),
+    partialMinChars: z.number().default(4),
+    partialStableMs: z.number().default(500),
   }).default({}),
   autoCalibrate: z.boolean().default(false),
   /** 连续失败几次就重新标定。 */
@@ -572,6 +577,10 @@ export function apply(ctx, config, deps = {}) {
     mode: String(config.polish?.mode || ''),
     minChars: Number(config.polish?.minChars || 6),
     cooldownMs: Number(config.polish?.cooldownMs || 1500),
+    partial: config.polish?.partial !== false,
+    partialCooldownMs: Number(config.polish?.partialCooldownMs || 800),
+    partialMinChars: Number(config.polish?.partialMinChars || 4),
+    partialStableMs: Number(config.polish?.partialStableMs || 500),
   },
   autoComputerUseJoin: config.autoComputerUseJoin !== false,
     computerUseJoinTimeoutMs: Number(config.computerUseJoinTimeoutMs || 120000),
@@ -1121,6 +1130,9 @@ export function apply(ctx, config, deps = {}) {
                 preflight: lastPreflight,
                 capturing: !!session.capturing,
                 // 响应速度要有可测量口径：给出各段 p50/p95（没有样本时明确写"还没有样本"）
+                // partial（边说边出字）润色结果：仅供显示，未润时为空
+                partial: String(session.partial || ''),
+                partialPolished: String(session.partialPolished || ''),
                 latency: (() => {
                   try {
                     return { summary: latencySummary(session.latency), text: latencyDescribe(session.latency) }

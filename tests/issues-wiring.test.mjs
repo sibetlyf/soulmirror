@@ -18,7 +18,7 @@ test('/status 返回 issues（后端汇总，不发额外网络请求）', () =>
 
 test('汇总输入覆盖关键故障源', () => {
   const at = src.indexOf('issues: (() => {')
-  const seg = src.slice(at, at + 1600)
+  const seg = src.slice(at, at + 3000)   // 字段变多，窗口放宽（断言不变）
   for (const key of ['preflight', 'capturing', 'transcriptLines', 'asr', 'keyErrors', 'postMeeting', 'captureError', 'silentSec']) {
     assert.ok(seg.includes(key), '汇总应纳入：' + key)
   }
