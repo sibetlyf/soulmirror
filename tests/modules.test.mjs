@@ -166,7 +166,9 @@ test('知识库：writeViaHostApi 用 fetch 打本地 API', async () => {
   assert.equal(r.ok, true)
   assert.equal(r.id, 'doc-1')
   assert.match(seen.url, /\/knowledge-local\/v1\/entries$/)
-  assert.equal(seen.init.headers['x-dsh-knowledge-client'], 'management-web')
+  // pooledFetch 会把 headers 归一成 Headers 对象，这里两种形状都能读
+  const h = seen.init.headers instanceof Headers ? seen.init.headers : new Headers(seen.init.headers || {})
+  assert.equal(h.get('x-dsh-knowledge-client'), 'management-web', '必须带管理端身份头')
   const body = JSON.parse(seen.init.body)
   assert.equal(body.draft.title, 'T')
 })
