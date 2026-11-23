@@ -76,7 +76,7 @@ import { renderExport, exportFileName, searchRecords } from './lib/record-export
 import { buildSnapshot } from './lib/context-snapshot.js'
 import { createDshCompleter } from './lib/dsh-llm.js'
 import { buildAdvicePrompt, parseAdvice, shouldReplaceAdvice } from './lib/advice.js'
-import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE } from './lib/advice-trigger.js'
+import { automaticReason, countCharacters, DEFAULT_ADVICE_RULE, REALTIME_ADVICE_RULE } from './lib/advice-trigger.js'
 import { buildReplyPrompt, parseReply, shouldStartTask } from './lib/reply-candidates.js'
 import { detectTrigger } from './lib/trigger-rules.js'
 import { createSessionGate, keyOf } from './lib/session-gate.js'
@@ -114,8 +114,10 @@ import { ensureConfigFile, installChecklist, formatChecklist } from './lib/boots
 import { buildSetupRows, summarizeSetup, setupHint } from './lib/setup-rows.js'
 import { MeetingLifecycle, shouldAutoStop } from './lib/lifecycle.js'
 import { runDshTask, runShell } from './lib/twin.js'
-import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES, loadProfile, saveProfile, fullPersonaBlock } from './lib/persona.js'
-import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi } from './lib/knowledge.js'
+import { loadPersona, personaBlock, readPersonaFile, writePersonaFile, appendPersonaSection, PERSONA_FILES, loadProfile, saveProfile, fullPersonaBlock, splitPersonaBlock, composeCachedMessages } from './lib/persona.js'
+import { profileHasKnowledge, pickKnowledgeProfile, isHostProfile, linkStatus, writeToKnowledge, detectKnowledge, hostHasKnowledge, writeViaHostApi, searchKnowledge, recallForContext, depositToKnowledge } from './lib/knowledge.js'
+import { loadStylePacks, saveStylePack, routeStylePack, runStyledAssistant } from './lib/style-packs.js'
+import { createSelfEvolutionStore } from './lib/self-evolution.js'
 import { MemoryStore } from './lib/memory.js'
 import { LivingWorld } from './lib/living.js'
 import { installAutoAnswer, pickRecommended } from './lib/auto-answer.js'
@@ -503,9 +505,9 @@ export function apply(ctx, config, deps = {}) {
     advice: {
       enabled: config.advice?.enabled !== false,
       auto: config.advice?.auto !== false,
-      characters: config.advice?.characters || DEFAULT_ADVICE_RULE.characters,
-      intervalMs: config.advice?.intervalMs || DEFAULT_ADVICE_RULE.intervalMs,
-      cooldownMs: config.advice?.cooldownMs || DEFAULT_ADVICE_RULE.cooldownMs,
+      characters: config.advice?.characters || REALTIME_ADVICE_RULE.characters,
+      intervalMs: config.advice?.intervalMs || REALTIME_ADVICE_RULE.intervalMs,
+      cooldownMs: config.advice?.cooldownMs || REALTIME_ADVICE_RULE.cooldownMs,
     },
     // Agent 发言：说给"会议里所有人"听的，独立开关
     reply: {
@@ -634,6 +636,20 @@ export function apply(ctx, config, deps = {}) {
   let credentialsService = null
   try { credentialsService = ctx.get?.('credentials') || null } catch { /* 没有就算了 */ }
   const keyStore = createKeyStore({ credentials: credentialsService, configDir: CONFIG_DIR, logger })
+  // ── 实时 SSE 推流广播器 + 双轨自进化存储 + 本地知识库地址解析 ─────────
+  const sseClients = new Set()
+  function emitRealtimeEvent(event, data) {
+    if (!sseClients.size) return
+    const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+    for (const res of [...sseClients]) {
+      try { res.write(payload) } catch { sseClients.delete(res) }
+    }
+  }
+  const evolutionStore = createSelfEvolutionStore(CONFIG_DIR)
+  const resolveLocalKbOpts = () => {
+    const port = Number(process.env.DSH_PORT || ctx.get?.('webServer')?.port || 0)
+    return port ? { port, origin: 'http://127.0.0.1:' + port } : {}
+  }
   /** 启动时把三个槽位读进内存缓存，供同步调用点使用 */
   const keyCache = { asr: '', tts: '', brain: '' }
   const keySourceOf = { asr: 'none', tts: 'none', brain: 'none' }
@@ -1407,6 +1423,77 @@ export function apply(ctx, config, deps = {}) {
           return json(200, { ok: true, reply: cfg.reply })
         }
         return json(400, { ok: false, error: '缺少参数' })
+      }
+
+      // 实时 SSE 事件流：partial / transcript / advice-delta / advice / evolution 毫秒级推送
+      if (req.method === 'GET' && sub === 'events') {
+        res.statusCode = 200
+        res.setHeader('content-type', 'text/event-stream; charset=utf-8')
+        res.setHeader('cache-control', 'no-cache, no-transform')
+        res.setHeader('connection', 'keep-alive')
+        res.write(`event: connected\ndata: ${JSON.stringify({ ok: true, ts: Date.now() })}\n\n`)
+        sseClients.add(res)
+        const hb = setInterval(() => {
+          try { res.write(': ping\n\n') } catch { clearInterval(hb); sseClients.delete(res) }
+        }, 15_000)
+        hb.unref?.()
+        req.on?.('close', () => { clearInterval(hb); sseClients.delete(res) })
+        return
+      }
+
+      // 风格包 × 人格底色 × 知识库实时召回 HTTP 入口（供悬浮窗 / 划词 QA 直连）
+      if (req.method === 'POST' && sub === 'style/run') {
+        const bufS = []
+        for await (const chunk of req) bufS.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufS).toString('utf8') || '{}')
+        const activeCompleter = fastCompleter || completer
+        if (!activeCompleter) return json(200, { ok: false, error: '当前没有可用的 LLM 补全器' })
+        const emotionTerrain = (() => {
+          try { return String(living?.emotions?.council?.()?.terrain || '') } catch { return '' }
+        })()
+        const r = await runStyledAssistant({
+          personaDir,
+          dataDir: CONFIG_DIR,
+          text: body.text || '',
+          selectedText: body.selectedText || '',
+          action: body.action || 'polish',
+          frontApp: body.frontApp || '',
+          emotionTerrain,
+          cursorContext: body.cursorContext || '',
+          explicitPackId: body.stylePackId || '',
+          hotwords: evolutionStore.getTopHotwords(40),
+          knowledge: resolveLocalKbOpts(),
+          completer: activeCompleter,
+          mode: body.mode === 'deep' ? 'deep' : 'fast',
+          onDelta: (delta, meta) => emitRealtimeEvent('style-delta', { delta, fullText: meta?.fullText || '' }),
+        })
+        return json(200, { ok: true, text: r.text, pack: r.pack.id, routeReason: r.routeReason, cacheKey: r.cacheKey, recalled: r.recalled.items, ms: r.ms })
+      }
+
+      // 双轨自进化 HTTP 入口（待确认术语 / 人格提案查看与审批）
+      if (sub === 'evolution') {
+        if (req.method === 'GET') {
+          return json(200, { ok: true, ...evolutionStore.listPending(), hotwords: evolutionStore.getTopHotwords(40) })
+        }
+        const bufE = []
+        for await (const chunk of req) bufE.push(chunk)
+        const body = JSON.parse(Buffer.concat(bufE).toString('utf8') || '{}')
+        if (body.action === 'observe') {
+          const out = evolutionStore.observeEdit(body)
+          if (out.newTerms.length || out.newProposals.length) emitRealtimeEvent('evolution', out)
+          return json(200, { ok: true, ...out })
+        }
+        if (body.action === 'confirm_term') {
+          return json(200, await evolutionStore.confirmTerm(body.id, { knowledge: resolveLocalKbOpts() }))
+        }
+        if (body.action === 'approve_proposal') {
+          const r = evolutionStore.approveProposal(body.id, { personaDir })
+          if (r.ok) personaCache = fullPersonaBlock(personaDir)
+          return json(200, r)
+        }
+        if (body.action === 'reject_proposal') return json(200, evolutionStore.rejectProposal(body.id))
+        if (body.action === 'dismiss_term') return json(200, evolutionStore.dismissTerm(body.id))
+        return json(400, { ok: false, error: '未知 evolution 动作' })
       }
 
       // 会中建议：GET 取缓存，POST 生成一次
@@ -3112,6 +3199,8 @@ export function apply(ctx, config, deps = {}) {
     session.partial = ''
     // 走账本统一入口：保证"只增不改 + replaces 标记"的规则只有一处实现
     if (session.dir) session._appendTranscript?.(item)
+    // 实时 SSE 推送落句
+    emitRealtimeEvent('transcript', { item })
     // 灵魂进食：记一条记忆 + 感知一次情绪（纯本地启发式，不调模型、不花钱）
     try {
       if (item.role !== 'assistant' && item.src !== 'gap') {
@@ -5325,6 +5414,7 @@ export function apply(ctx, config, deps = {}) {
         llm,
         provider: String(brainCfg.provider || ''),
         model: String(brainCfg.model || ''),
+        mode: brainCfg.mode === 'deep' ? 'deep' : 'fast',
         // 逐级回退：配置 → 宿主默认 → 第一个可用 provider 的第一个模型。
         // 以前只查 catalog.default，它为空时整条判定链路直接死掉（现场错误："DSH 没有可用的默认模型"）
         resolveModel: async () => {
@@ -5353,17 +5443,24 @@ export function apply(ctx, config, deps = {}) {
   /** 本次纪要由谁产出：background（DSH 后台任务）/ session（会议会话）/ extractive（原文节选） */
   let minutesSource = ''
   const minutesCompleter = makeMinutesCompleter()
+  // 极速直连通道：优先走 dsh-llm fast 档位（关闭 thinking + 流式 onDelta + Prompt Cache），仅不可用时退回 sessionCompleter
+  const fastCompleter = httpCompleter
+    || makeDshCompleter({ ...cfg.brain, mode: 'fast' })
+    || sessionCompleter
   const completer = httpCompleter
     || sessionCompleter
+
+  // 实时 ASR 中间结果毫秒级推送到 SSE 前端
+  session.onPartial = (text) => emitRealtimeEvent('partial', { text: String(text || '') })
 
   // 注意：必须在 completer 初始化之后再装配纠错器，否则会踩 TDZ
   //
   // 纠错只在 agent 模式下有意义（它要理解语义再决定是否接话）。
   // 只转录模式每句都等一次模型 = 纯粹增加延迟，所以直接跳过。
   // mode 可以在运行时切换，因此判断放在函数内部，而不是装配时。
-  const corrector = (cfg.asr.llmCorrect === false || !completer)
+  const corrector = (cfg.asr.llmCorrect === false || !fastCompleter)
     ? null
-    : makeCorrector({ names: fixNames, context: (cfg.asr.context || '') + (currentPersona() ? '\n' + currentPersona().slice(0, 800) : ''), completer })
+    : makeCorrector({ names: fixNames, context: (cfg.asr.context || '') + (currentPersona() ? '\n' + currentPersona().slice(0, 800) : ''), completer: fastCompleter })
 
   session.correctText = corrector
     ? async (text) => {
@@ -6151,15 +6248,52 @@ export function apply(ctx, config, deps = {}) {
 
   async function generateAdvice({ force = false, reason = 'manual' } = {}) {
     if (adviceState.busy) return { ok: false, error: '上一次生成还没结束' }
-    if (!completer) return { ok: false, error: '没有可用模型：先在设置里配置 brain.provider / brain.model' }
+    const adviceCompleter = fastCompleter || completer
+    if (!adviceCompleter) return { ok: false, error: '没有可用模型：先在设置里配置 brain.provider / brain.model' }
     const linesAll = speechLines(40)
     if (linesAll.length === 0) return { ok: false, error: '还没有转写内容' }
 
     adviceState.busy = true
     try {
       const prep = loadPreparation(session.dir || lastSessionDir)
-      const msgs = buildAdvicePrompt({ goal: prep.goal, invite: prep.invite, lines: linesAll, maxLines: 40 })
-      const raw = await completer(msgs)
+      const baseMsgs = buildAdvicePrompt({ goal: prep.goal, invite: prep.invite, lines: linesAll, maxLines: 40 })
+      // 结合最近讨论毫秒级召回知识库 FTS 片段（不阻塞太久，1.2s 上限）
+      const recentQuery = linesAll.slice(-4).map((l) => String(l?.text || '')).join(' ').slice(0, 200)
+      const kbOpts = resolveLocalKbOpts()
+      const recalled = (kbOpts.port || kbOpts.origin)
+        ? await recallForContext({ query: recentQuery, ...kbOpts, limit: 3, maxChars: 800, timeoutMs: 1200 }).catch(() => ({ snippets: [] }))
+        : { snippets: [] }
+      // 动静分层编排：静态人格底色 + 场景风格包放 system 命中 Prompt Cache，动态上下文 + 讨论放 user
+      const emotionTerrain = (() => {
+        try { return String(living?.emotions?.council?.()?.terrain || '') } catch { return '' }
+      })()
+      const routed = routeStylePack({
+        frontApp: cfg.activeApp || '腾讯会议',
+        emotionTerrain,
+        packs: loadStylePacks(CONFIG_DIR),
+      })
+      const split = splitPersonaBlock(personaDir, {
+        stylePack: routed.pack,
+        hotwords: evolutionStore.getTopHotwords(30),
+        emotionTerrain,
+        knowledgeSnippets: recalled.snippets || [],
+      })
+      const sysAdvice = baseMsgs.find((m) => m.role === 'system')?.content || ''
+      const userAdvice = baseMsgs.find((m) => m.role === 'user')?.content || ''
+      const msgs = composeCachedMessages({
+        staticPrefix: [split.staticPrefix, sysAdvice].filter(Boolean).join('\n\n'),
+        dynamicSuffix: split.dynamicSuffix,
+        userText: userAdvice,
+      })
+
+      const raw = await adviceCompleter(msgs, {
+        mode: 'fast',
+        thinkingEnabled: false,
+        cacheKey: split.cacheKey,
+        onDelta: (delta, meta) => {
+          emitRealtimeEvent('advice-delta', { delta, fullText: meta?.fullText || '' })
+        },
+      })
       const parsed = parseAdvice(raw)
       if (!shouldReplaceAdvice(parsed)) {
         const msg = '模型没有给出可用建议（可能内容太少）'
@@ -6174,6 +6308,7 @@ export function apply(ctx, config, deps = {}) {
         error: '',
         busy: false,
       }
+      emitRealtimeEvent('advice', adviceState)
       lastLlmError = null
       logger?.info?.('[soulmirror] 已生成建议：追问 ' + parsed.questions.length + ' 条，回应 ' + parsed.replies.length + ' 条')
       // 建议也送到桌宠气泡（优先级低于发言，高于转写）
@@ -8457,6 +8592,108 @@ ctx.effect?.(() => () => clearInterval(meetingWatchdog), "soulmirror: meeting wa
       return { ok: true, result: list.length ? list.join('\n') : '（还没有目标，试试 add）' }
     }),
   }))
+  // ── 风格包 × 人格底色 × 知识库直连 & 双轨自进化工具 ──────────────────
+  ctx.tools.register(defineTool({
+    name: 'soul_style',
+    description: '风格包与极速划词/润色助手：列出或保存风格包、按前台应用与情绪地形自动路由、结合人格底色与知识库 FTS 实时召回执行加工，或一键沉淀结论到知识库。',
+    parameters: {
+      action: { type: 'string', enum: ['list', 'save', 'route', 'run', 'search', 'deposit'], required: true },
+      id: { type: 'string', description: '风格包 id（save / route / run 可选）' },
+      name: { type: 'string', description: '风格包名称（save）' },
+      systemPrompt: { type: 'string', description: '风格包提示词（save）' },
+      frontApp: { type: 'string', description: '前台应用名（用于自动路由）' },
+      text: { type: 'string', description: '输入文本或提问内容' },
+      selectedText: { type: 'string', description: '划词选区内容' },
+      runAction: { type: 'string', enum: ['polish', 'qa', 'reply', 'critique'], description: 'run 时的加工动作，默认 polish' },
+      mode: { type: 'string', enum: ['fast', 'deep'], description: '推理档位，默认 fast（关闭思考）' },
+      title: { type: 'string', description: 'deposit 时的知识库标题' },
+      group: { type: 'string', description: 'deposit 时的分组' },
+    },
+    output: OUT(),
+    execute: wrap('soul_style', async (a) => {
+      const kbOpts = resolveLocalKbOpts()
+      const emotionTerrain = (() => {
+        try { return String(living?.emotions?.council?.()?.terrain || '') } catch { return '' }
+      })()
+      if (a.action === 'list') {
+        const packs = loadStylePacks(CONFIG_DIR)
+        return { ok: true, result: JSON.stringify(packs.map((p) => ({ id: p.id, name: p.name, builtin: !!p.builtin, matchApps: p.matchApps || [] }))) }
+      }
+      if (a.action === 'save') {
+        const saved = saveStylePack(CONFIG_DIR, { id: a.id, name: a.name, systemPrompt: a.systemPrompt })
+        return { ok: true, result: '已保存风格包：' + saved.id }
+      }
+      if (a.action === 'route') {
+        const routed = routeStylePack({ frontApp: a.frontApp, emotionTerrain, explicitPackId: a.id, packs: loadStylePacks(CONFIG_DIR) })
+        return { ok: true, result: JSON.stringify({ id: routed.pack.id, name: routed.pack.name, reason: routed.reason }) }
+      }
+      if (a.action === 'search') {
+        const r = await searchKnowledge({ query: a.text || a.selectedText || '', ...kbOpts })
+        return { ok: r.ok, result: JSON.stringify(r) }
+      }
+      if (a.action === 'deposit') {
+        const r = await depositToKnowledge({ title: a.title, content: a.text || a.selectedText, group: a.group || '划词沉淀', ...kbOpts })
+        return { ok: r.ok, result: JSON.stringify(r) }
+      }
+      const activeCompleter = makeDshCompleter(cfg.brain) || completer
+      if (!activeCompleter) return { ok: false, result: '当前没有可用的 LLM 补全器' }
+      const r = await runStyledAssistant({
+        personaDir,
+        dataDir: CONFIG_DIR,
+        text: a.text || '',
+        selectedText: a.selectedText || '',
+        action: a.runAction || 'polish',
+        frontApp: a.frontApp || '',
+        emotionTerrain,
+        explicitPackId: a.id || '',
+        hotwords: evolutionStore.getTopHotwords(40),
+        knowledge: kbOpts,
+        completer: activeCompleter,
+        mode: a.mode === 'deep' ? 'deep' : 'fast',
+      })
+      return { ok: true, result: JSON.stringify({ text: r.text, pack: r.pack.id, routeReason: r.routeReason, cacheKey: r.cacheKey, recalledCount: r.recalled.items.length, ms: r.ms }) }
+    }),
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'soul_evolve',
+    description: '双轨自进化：观察手改文本 Diff，管理待确认术语（入词典与知识库）及风格修改累积提案（入 SoulMirror 人格与风格包）。',
+    parameters: {
+      action: { type: 'string', enum: ['observe', 'pending', 'confirm_term', 'dismiss_term', 'approve_proposal', 'reject_proposal', 'hotwords'], required: true },
+      before: { type: 'string', description: 'AI 生成的原文（observe）' },
+      after: { type: 'string', description: '用户手改后的文本（observe）' },
+      stylePackId: { type: 'string', description: '当前风格包 id（observe）' },
+      id: { type: 'string', description: '术语或提案 id' },
+    },
+    output: OUT(),
+    execute: wrap('soul_evolve', async (a) => {
+      if (a.action === 'observe') {
+        return { ok: true, result: JSON.stringify(evolutionStore.observeEdit({ before: a.before, after: a.after, stylePackId: a.stylePackId || '' })) }
+      }
+      if (a.action === 'pending') {
+        return { ok: true, result: JSON.stringify(evolutionStore.listPending()) }
+      }
+      if (a.action === 'confirm_term') {
+        const r = await evolutionStore.confirmTerm(a.id, { knowledge: resolveLocalKbOpts() })
+        return { ok: r.ok, result: JSON.stringify(r) }
+      }
+      if (a.action === 'dismiss_term') {
+        const r = evolutionStore.dismissTerm(a.id)
+        return { ok: r.ok, result: JSON.stringify(r) }
+      }
+      if (a.action === 'approve_proposal') {
+        const r = evolutionStore.approveProposal(a.id, { personaDir })
+        if (r.ok) personaCache = fullPersonaBlock(personaDir)
+        return { ok: r.ok, result: JSON.stringify(r) }
+      }
+      if (a.action === 'reject_proposal') {
+        const r = evolutionStore.rejectProposal(a.id)
+        return { ok: r.ok, result: JSON.stringify(r) }
+      }
+      return { ok: true, result: JSON.stringify({ hotwords: evolutionStore.getTopHotwords(40) }) }
+    }),
+  }))
+
   // ── 自检 ────────────────────────────────────────────────────────────
   ctx.tools.register(defineTool({
     name: 'meeting_selftest',
