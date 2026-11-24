@@ -22,9 +22,17 @@ test('定时任务只用于"到点参会"，不得用于轮询纪要', () => {
   const svc = src.indexOf('function scheduleService()')
   assert.ok(svc > 0, '找不到 schedule 服务封装')
 
-  // 全仓库创建任务的地方只应有一处（auto-attend）
+  // 允许一次性的"入会"与"收尾"两条任务，但**绝不允许周期性任务**（那才会变成轮询）
   const creates = [...src.matchAll(/svc\.(create|add)\(/g)]
-  assert.ok(creates.length <= 1, '创建定时任务的地方超过一处，容易引入轮询：' + creates.length)
+  assert.ok(creates.length <= 3, '一次性任务最多入会+收尾，多出来的要审：' + creates.length)
+  assert.equal(/every_seconds|cron|daily|weekly/.test(src.slice(svc, svc + 20000)), false, '创建任务不许用周期选择器')
+
+  // 每条创建都必须带"一次性"的 at 参数。
+  // 注意：不能用非贪婪正则截到第一个右括号——对象字面量里到处是右括号，会把断言截断。
+  for (const m of src.matchAll(/svc\.(create|add)\(/g)) {
+    const around = src.slice(m.index, m.index + 400)
+    assert.match(around, /at:/, '一次性任务必须带 at：' + around.slice(0, 90))
+  }
 
   // 不许出现"定期取纪要"式提示词
   assert.equal(/每\s*\d+\s*分钟[^\n]{0,20}(纪要|转写)/.test(src), false, '不应存在"每 N 分钟取纪要"的定时逻辑')

@@ -12,7 +12,7 @@
 import { buildViewModel, normalizeDisplay } from './lib/view-model.js'
 import { summary as latencySummary, describe as latencyDescribe } from './lib/latency.js'
 import { loadStore as loadKbStore, saveStore as saveKbStore, buildFromDocs as buildKbFromDocs } from './lib/kb-store.js'
-import { emptyPlanner, addPlan, duePlans, markJoined, markAttempt, prune } from './lib/meeting-planner.js'
+import { emptyPlanner, addPlan, normalizePlan, duePlans, markJoined, markAttempt, prune } from './lib/meeting-planner.js'
 import { search as kbSearch, buildKnowledgeBlock as kbBlock, extractTerms as kbExtractTerms } from './lib/kb-index.js'
 import { resolveModelRoute, createModelRouteStore, overrideOwnedModel } from './lib/model-route.js'
 import { createJournal, findInterrupted, recoverJournal } from './lib/journal.js'
@@ -2808,6 +2808,7 @@ export function apply(ctx, config, deps = {}) {
     try { writeFileSync(PLAN_FILE, JSON.stringify(plannerCache, null, 2), 'utf8') } catch (e) { logger?.warn?.('[soulmirror] 会议计划写盘失败：' + e.message) }
   }
   /** 用链接开会客户端；没链接就按会议号走界面（两者都没有则记录失败） */
+  /** 计划表仅记录；入会动作由 DSH 定时任务投递的 prompt 触发 meeting_join */
   async function joinFromPlan(plan) {
     try {
       if (plan.url) {
@@ -2835,7 +2836,7 @@ export function apply(ctx, config, deps = {}) {
       return e && e.message ? e.message : String(e)
     }
   }
-  function ensurePlannerTimer() {
+  function ensurePlannerTimer() { // 保留但不再默认启动（用户要求定时交给 DSH）
     if (plannerTimer || testMode) return
     plannerTimer = setInterval(async () => {
       try {
@@ -4427,7 +4428,8 @@ export function apply(ctx, config, deps = {}) {
   ctx.tools.register(defineTool({
     name: 'meeting_plan_add',
     description:
-      '把一场会议交给插件自己处理：落盘到会议计划表，插件到点（开始前 leadMs，默认 60 秒）自己入会、开始采集；散会后自动停并出纪要。不需要建 DSH 定时任务，也不依赖对话轮次。',
+      '把一场会议排进 DSH 的定时任务：插件不自己做定时，由 DSH schedule 服务到点投递指令，' +
+      '再由这个插件入会、开始采集、散会出纪要。会创建两条任务（入会、收尾），可在 DSH 定时任务里看到与取消。',
     parameters: {
       title: { type: 'string', description: '会议主题' },
       url: { type: 'string', description: '入会链接（优先用）' },
@@ -4436,20 +4438,48 @@ export function apply(ctx, config, deps = {}) {
       durationMin: { type: 'number', description: '时长（分钟），默认 30' },
       leadMs: { type: 'number', description: '提前多少毫秒入会，默认 60000' },
     },
-    output: OUT({ added: { type: 'boolean' }, plans: { type: 'number' } }),
+    output: OUT({ added: { type: 'boolean' }, jobIds: { type: 'array' }, sessionId: { type: 'string' } }),
     execute: wrap('meeting_plan_add', async (a) => {
-      const r = addPlan(loadPlanner(), {
-        title: a.title, url: a.url, code: a.code,
-        start: a.start, durationMin: a.durationMin, leadMs: a.leadMs,
-      })
-      if (!r.added) return { ok: false, added: false, plans: loadPlanner().plans.length, result: '会议信息不完整（至少要给 start + 链接或会议号）' }
-      savePlanner(r.planner)
-      ensurePlannerTimer()
-      const p2 = r.plan
-      const when = p2 ? new Date(p2.startMs).toLocaleString('zh-CN', { hour12: false }) : ''
-      return {
-        ok: true, added: true, plans: r.planner.plans.length,
-        result: '已交给插件：' + (p2 ? p2.title : '会议') + '（' + when + ' 开始，提前 ' + Math.round((p2 ? p2.leadMs : 0) / 1000) + ' 秒入会）\n计划表：' + PLAN_FILE,
+      const svc = scheduleService()
+      if (!svc) return { ok: false, added: false, jobIds: [], sessionId: '', result: '宿主没有 schedule 服务，无法排进 DSH 定时任务' }
+      const plan = normalizePlan({ title: a.title, url: a.url, code: a.code, start: a.start, durationMin: a.durationMin, leadMs: a.leadMs })
+      if (!plan) return { ok: false, added: false, jobIds: [], sessionId: '', result: '会议信息不完整（至少要给 start + 链接或会议号）' }
+      let sid = ''
+      try {
+        sid = await ensureAutoAttendSession()
+      } catch (e) { return { ok: false, added: false, jobIds: [], sessionId: '', result: '无法准备自动参会会话：' + e.message } }
+      const joinAt = new Date(Math.max(Date.now() + 10000, plan.startMs - plan.leadMs))
+      const wrapAt = new Date(plan.endMs + 60 * 1000)
+      const job = { url: plan.url, code: plan.code, title: plan.title, durationMin: plan.durationMin }
+      const ids = []
+      try {
+        const joinRec = await svc.create(sid, {
+          title: '入会：' + plan.title,
+          prompt: buildAttendPrompt(job),
+          at: joinAt.toISOString(),
+        })
+        if (joinRec && joinRec.id) ids.push(joinRec.id)
+        const wrapRec = await svc.create(sid, {
+          title: '收尾：' + plan.title,
+          prompt: '【会议收尾】会议已结束：若仍在采集就 meeting_capture_stop 触发会后整理；' +
+            '等 60–120 秒后查 GET /api/soulmirror/status 的 postMeeting.phase 与转写行数；' +
+            '汇报会议号、时长、句数、纪要路径（失败要贴原因）。',
+          at: wrapAt.toISOString(),
+        })
+        if (wrapRec && wrapRec.id) ids.push(wrapRec.id)
+        // 计划表只做记录（插件不再自己跑定时器）
+        savePlanner(addPlan(loadPlanner(), plan).planner)
+        return {
+          ok: true, added: true, jobIds: ids, sessionId: sid,
+          result: '已排进 DSH 定时任务：' + plan.title +
+            '（入会 ' + joinAt.toLocaleString('zh-CN', { hour12: false }) +
+            '，收尾 ' + wrapAt.toLocaleString('zh-CN', { hour12: false }) + '）\n' +
+            '任务 id：' + (ids.join('、') || '(已创建)') + '\n' +
+            '投递会话：' + sid + '\n' +
+            '在 DSH 定时任务列表里可见、可取消；插件本身不跑定时器',
+        }
+      } catch (e) {
+        return { ok: false, added: false, jobIds: ids, sessionId: sid, result: '创建 DSH 定时任务失败：' + e.message }
       }
     }),
   }))
@@ -5261,6 +5291,25 @@ export function apply(ctx, config, deps = {}) {
     }
     const d = new Date(s)
     return Number.isNaN(d.getTime()) ? null : d
+  }
+
+  /**
+   * 自动参会专用会话：DSH 定时任务需要一个 sessionId 才能投递。
+   * 首次创建后把 id 落盘复用，避免每次都新建会话刷列表。
+   */
+  const AUTO_ATTEND_SESSION_FILE = join(CONFIG_DIR, 'auto-attend-session.json')
+  let autoAttendSessionId = ''
+  async function ensureAutoAttendSession() {
+    if (autoAttendSessionId) return autoAttendSessionId
+    try {
+      const data = JSON.parse(readFileSync(AUTO_ATTEND_SESSION_FILE, 'utf8'))
+      if (data && typeof data.id === 'string' && data.id.trim()) { autoAttendSessionId = data.id.trim(); return autoAttendSessionId }
+    } catch { /* 没有就新建 */ }
+    const id = await createSession(ctx, { cwd: join(CONFIG_DIR, 'workspace', 'auto-attend'), title: 'SoulMirror · 自动参会' })
+    if (!id) throw new Error('宿主创建会话失败')
+    autoAttendSessionId = String(id)
+    try { writeFileSync(AUTO_ATTEND_SESSION_FILE, JSON.stringify({ id: autoAttendSessionId, at: new Date().toISOString() }, null, 2), 'utf8') } catch (e) { logger?.warn?.('[soulmirror] 自动参会会话 id 落盘失败：' + e.message) }
+    return autoAttendSessionId
   }
 
   function scheduleService() {

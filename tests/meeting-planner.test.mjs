@@ -95,3 +95,17 @@ test('wiring：入会成功要打标 joinedByUs，自动停止才能据此否决
   const life = readFileSync(new URL('../lib/lifecycle.js', import.meta.url), 'utf8')
   assert.match(life, /joinedByUs && clientAlive/, '规则 0 要在 shouldAutoStop 里')
 })
+
+test('wiring：定时交给 DSH schedule，插件不再自己跑定时器', () => {
+  const idx = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
+  // meeting_plan_add 必须调用 DSH 的 schedule.create（不是插件自己的 setInterval）
+  const at = idx.indexOf("name: 'meeting_plan_add'")
+  const seg = idx.slice(at, at + 2400)
+  assert.match(seg, /scheduleService\(\)/, '必须用 DSH schedule 服务')
+  assert.match(seg, /svc\.create\(sid,/, '必须把任务投进 DSH 定时任务')
+  assert.match(seg, /buildAttendPrompt\(job\)/, '入会任务用现成提示词')
+  assert.match(seg, /收尾/, '必须有收尾任务（停采+整理）')
+  assert.match(seg, /ensureAutoAttendSession\(\)/, '要有专用投递会话')
+  // 插件加载时不再自动拉起自己的巡检
+  assert.equal(/巡检已启动/.test(idx), false, '插件不应自己启动定时巡检')
+})

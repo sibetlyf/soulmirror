@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.5.18",
+  "version": "1.5.19",
   "files": [
     {
       "path": "index.js",
-      "sha256": "7e8c8a758a4caace20e884e09b827cb3ead80635e3af5095ff6681cee648f7ef",
-      "bytes": 479636
+      "sha256": "a1b33936c597fce0ca2a90f0d5450f6107da0d05d412ece3d3b944dcd1a612f5",
+      "bytes": 482792
     },
     {
       "path": "lib/action-items.js",
@@ -534,7 +534,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "308b2dfc0265502904482832d7933e84c7192da9f82d3863135ec321409283dd",
+      "sha256": "402c2220cd82998070a28e743504441a0ec54efa762c9aaaa1388256ce3efcc0",
       "bytes": 3948
     },
     {
@@ -619,12 +619,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "5d04020995d890f19d7b8d5f1e947baac3e0e5b27ec862d3ebad704899d8f02e",
-      "bytes": 19790
+      "sha256": "9818fe7d28c3b6d1690915951ce8d6d21f563b05ba1afe8ce77da40d629303c1",
+      "bytes": 19947
     },
     {
       "path": "package.json",
-      "sha256": "1168dbef3f9525b0986e013460cd7fe22e1839c229f4cda47253b812b4dc037b",
+      "sha256": "2c62b2c45c3207c9f4f407c4e199bd5fb8cb0be17f83b86edd602c21ce87230b",
       "bytes": 2241
     },
     {
