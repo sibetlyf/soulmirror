@@ -64,7 +64,7 @@ test('有假 Key 的开录只运行 mock 循环、产物限于临时目录', asy
 
 test('宿主把 keyFor 注入 MeetingSession', () => {
   const src = readFileSync(new URL('../index.js', import.meta.url), 'utf8')
-  assert.match(src, /new MeetingSession\(cfg, logger, \{[\s\S]{0,400}?getKey: \(\) => keyFor\(cfg\.asr, 'asr'\)/)
+  assert.match(src, /new MeetingSession\(cfg, logger, \{[\s\S]{0,1200}?getKey: \(\) => keyFor\(cfg\.asr, 'asr'\)/)
 })
 
 test('session 的流式循环不再单独解析 Key', () => {

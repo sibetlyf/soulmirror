@@ -92,7 +92,9 @@ test('wiring：润色接进 session 且默认关闭、延迟进 /status', () => 
   // 未开启不产生模型调用
   assert.match(idx, /polish: z\.object\(/, '必须有 polish 配置')
   assert.match(idx, /enabled: z\.boolean\(\)\.default\(false\)/, '润色默认关闭')
-  assert.match(idx, /polishComplete: cfg\.polish\?\.enabled \? makeDshCompleter/, '未开启不注入 completer')
+  assert.match(idx, /polishComplete: cfg\.polish\?\.enabled/, '未开启不注入 completer')
+  assert.match(idx, /\}\s*\n\s*: null/, '关闭时必须返回 null（完全不产生模型调用）')
+  assert.match(idx, /knowledgeBlockFor\(text\)/, '润色要带上知识片段')
   // 润色失败不能盖掉原文
   assert.match(sess, /润色失败（保留原文）/, '失败必须保留原文并可见')
   // /status 暴露延迟

@@ -11,6 +11,8 @@
  */
 import { buildViewModel, normalizeDisplay } from './lib/view-model.js'
 import { summary as latencySummary, describe as latencyDescribe } from './lib/latency.js'
+import { loadStore as loadKbStore, saveStore as saveKbStore, buildFromDocs as buildKbFromDocs } from './lib/kb-store.js'
+import { search as kbSearch, buildKnowledgeBlock as kbBlock, extractTerms as kbExtractTerms } from './lib/kb-index.js'
 import { resolveModelRoute, createModelRouteStore, overrideOwnedModel } from './lib/model-route.js'
 import { createJournal, findInterrupted, recoverJournal } from './lib/journal.js'
 import { createPostMeeting } from './lib/postmeeting.js'
@@ -1948,7 +1950,8 @@ export function apply(ctx, config, deps = {}) {
       if (req.method === 'POST' && sub === 'auto') {
         const bufA = []
         for await (const chunk of req) bufA.push(chunk)
-        const action = JSON.parse(Buffer.concat(bufA).toString('utf8') || '{}').action
+        const payload = JSON.parse(Buffer.concat(bufA).toString('utf8') || '{}')
+        const action = payload.action
         if (action === 'record') {
           // 用户点「开始录音」：不仅允许自动操作，还要**立刻**开始采集。
           // 以前 start 只做 arm，没有会议窗口时什么都不会发生 —— 看起来像按钮没反应。
@@ -1982,6 +1985,20 @@ export function apply(ctx, config, deps = {}) {
           if (!on.ok) return json(200, { ok: false, enabled: cfg.enabled === true, armed: isArmed(), error: '开关没能保存：' + on.error })
           if (!testMode && !lifecycle.timer) lifecycle.start()
           logger?.info?.('[soulmirror] 已开启会议功能（armed），允许自动操作')
+        } else if (action === 'kb') {
+          // 知识库索引：rebuild / search / terms（词典候选来源）
+          const sub = String((payload && payload.kbAction) || '')
+          if (sub === 'search') {
+            const q = String((payload && payload.query) || '')
+            const hits = kbSearch(kbStore.docs, q, { limit: Number((payload && payload.limit) || 3) })
+            return json(200, { ok: true, query: q, docs: kbStore.docs.length, hits })
+          }
+          if (sub === 'terms') {
+            const terms = kbExtractTerms(kbStore.docs, { limit: Number((payload && payload.limit) || 40) })
+            return json(200, { ok: true, docs: kbStore.docs.length, terms })
+          }
+          const rebuilt = rebuildKbIndex({ force: true })
+          return json(200, { ok: true, rebuilt, updatedAt: kbStore.updatedAt, file: KB_INDEX_FILE })
         } else if (action === 'off') {
           // 真正关闭会议功能（设置里的开关）：先落盘关闭，再停监听
           const off = setEnabled(false, { autoWatch: false })
@@ -2734,9 +2751,26 @@ export function apply(ctx, config, deps = {}) {
     } catch { spkCache = { name: spkCache.name, at: now } }
     return spkCache.name
   }
+  // 插件加载即重建一次知识库索引（增量；内容没变就不写盘）
+  try { rebuildKbIndex({ force: true }) } catch (e) { logger?.warn?.('[soulmirror] 启动构建知识库索引失败：' + e.message) }
+
   const session = new MeetingSession(cfg, logger, {
     // 实时润色只在开启时才注入 completer（未开启则完全不产生模型调用）
-    polishComplete: cfg.polish?.enabled ? makeDshCompleter(cfg.brain || {}) : null,
+    // 每次调用前按当前文本检索知识片段，塞进动态层（不预生成，避免过期）
+    polishComplete: cfg.polish?.enabled
+      ? (async (messages) => {
+        const msgs = Array.isArray(messages) ? messages : []
+        const sys = msgs.filter((m) => m.role === 'system').map((m) => String(m.content || '')).join('\n')
+        const text = msgs.filter((m) => m.role !== 'system').map((m) => String(m.content || '')).join('\n')
+        const kb = knowledgeBlockFor(text)
+        const complete = makeDshCompleter(cfg.brain || {})
+        if (!complete) return ''
+        return complete([
+          { role: 'system', content: [sys, kb].filter(Boolean).join('\n\n') },
+          { role: 'user', content: text },
+        ])
+      })
+      : null,
     getKey: () => keyFor(cfg.asr, 'asr'), onEvent: (type,data) => journal.append(type,data) })
 
   // ── 保存位置：会议根的唯一真源 + 导出位置 ──────────────────────────────
@@ -2748,6 +2782,48 @@ export function apply(ctx, config, deps = {}) {
   const BASE_DATA_DIR = String(cfg.dataDir || '').trim()
   // 校验带缓存：/status 每秒轮询，不能每秒写一次探针。目录被删/被移走时会立刻重算（见 storageState）。
   // 权限被中途改掉最多 5 分钟后才在状态里体现；但真写入仍会当场失败并可见（不靠缓存兜底）。
+  /**
+   * 知识库索引：从「会议纪要」增量构建，落盘在数据目录。
+   * 只索引纪要文本（title + 正文），不索引音频；内容哈希去重，重启不重算。
+   */
+  const KB_INDEX_FILE = join(CONFIG_DIR, 'kb-index.json')
+  let kbStore = loadKbStore(KB_INDEX_FILE)
+  let kbBuiltAt = 0
+  function rebuildKbIndex({ force = false } = {}) {
+    const nowMs = Date.now()
+    if (!force && nowMs - kbBuiltAt < 1000) return { skipped: 'just-built', docs: kbStore.docs.length }
+    const docs = []
+    try {
+      for (const row of listRecordsMerged(200)) {
+        const dir = String((row && row.dir) || '')
+        if (!dir) continue
+        const mp = join(dir, 'minutes.md')
+        if (!existsSync(mp)) continue
+        try {
+          const text = readFileSync(mp, 'utf8')
+          if (!text.trim()) continue
+          const name = basename(dir)
+          docs.push({ id: name, title: name, text: text.slice(0, 20000), tags: ['会议纪要'] })
+        } catch { /* 单篇读不到不影响其它 */ }
+      }
+    } catch { /* 目录不可读时返回空增量 */ }
+    const r = buildKbFromDocs(kbStore, docs)
+    if (r.added || r.updated || r.removed) {
+      kbStore = r.store
+      try { saveKbStore(KB_INDEX_FILE, kbStore) } catch (e) { logger?.warn?.('[soulmirror] 知识库索引写盘失败：' + e.message) }
+    }
+    kbBuiltAt = nowMs
+    if (r.added || r.updated) logger?.info?.('[soulmirror] 知识库索引更新：新增 ' + r.added + ' / 更新 ' + r.updated + ' / 不变 ' + r.unchanged)
+    return { added: r.added, updated: r.updated, unchanged: r.unchanged, docs: kbStore.docs.length }
+  }
+  /** 给润色/纪要用的知识片段（按给定文本检索，取命中句） */
+  function knowledgeBlockFor(text) {
+    try {
+      if (!kbStore.docs.length) return ''
+      const hits = kbSearch(kbStore.docs, String(text || '').slice(0, 400), { limit: 2 })
+      return kbBlock(hits)
+    } catch { return '' }
+  }
   const STORAGE_CACHE_MS = 300000
   /** DSH / 插件自己的安装目录：升级或重装会覆盖、锁住这些文件，不能当保存位置 */
   const PROTECTED_APP_DIRS = (() => {
