@@ -12,6 +12,7 @@
 import { buildViewModel, normalizeDisplay } from './lib/view-model.js'
 import { summary as latencySummary, describe as latencyDescribe } from './lib/latency.js'
 import { loadStore as loadKbStore, saveStore as saveKbStore, buildFromDocs as buildKbFromDocs } from './lib/kb-store.js'
+import { emptyPlanner, addPlan, duePlans, markJoined, markAttempt, prune } from './lib/meeting-planner.js'
 import { search as kbSearch, buildKnowledgeBlock as kbBlock, extractTerms as kbExtractTerms } from './lib/kb-index.js'
 import { resolveModelRoute, createModelRouteStore, overrideOwnedModel } from './lib/model-route.js'
 import { createJournal, findInterrupted, recoverJournal } from './lib/journal.js'
@@ -2787,6 +2788,81 @@ export function apply(ctx, config, deps = {}) {
    * 知识库索引：从「会议纪要」增量构建，落盘在数据目录。
    * 只索引纪要文本（title + 正文），不索引音频；内容哈希去重，重启不重算。
    */
+  /**
+   * 插件自己的会议计划表：用户把会议信息交给插件后，**插件自己**到点入会、开始采集，
+   * 不依赖任何对话轮次。文件在数据目录，可手工编辑。
+   */
+  const PLAN_FILE = join(CONFIG_DIR, 'meetings.json')
+  let plannerCache = null
+  let plannerTimer = null
+  function loadPlanner() {
+    if (plannerCache) return plannerCache
+    try {
+      const data = JSON.parse(readFileSync(PLAN_FILE, 'utf8'))
+      plannerCache = data && Array.isArray(data.plans) ? data : emptyPlanner()
+    } catch { plannerCache = emptyPlanner() }
+    return plannerCache
+  }
+  function savePlanner(next) {
+    plannerCache = prune(next)
+    try { writeFileSync(PLAN_FILE, JSON.stringify(plannerCache, null, 2), 'utf8') } catch (e) { logger?.warn?.('[soulmirror] 会议计划写盘失败：' + e.message) }
+  }
+  /** 用链接开会客户端；没链接就按会议号走界面（两者都没有则记录失败） */
+  async function joinFromPlan(plan) {
+    try {
+      if (plan.url) {
+        await openExternal(plan.url)
+      } else {
+        const app = await detectMeetingApp()
+        await ensureApp(resolveAppPath(app.path), app.title, app.proc)
+        await focus(app.title, meetingOpts(app))
+        for (const cand of ['加入会议', '加入', 'Join']) { try { await click(app.title, cand, meetingOpts(app)); break } catch { /* next */ } }
+        await new Promise((r) => setTimeout(r, 700))
+        for (const cand of ['请输入会议号', 'meeting_code', '会议号', 'lineEditLeft']) {
+          try { await setText('加入会议', cand, plan.code, meetingOpts(app)); break } catch { /* next */ }
+        }
+        for (const cand of ['加入会议', '加入', 'Join']) { try { await click('加入会议', cand, meetingOpts(app)); break } catch { /* next */ } }
+      }
+      await new Promise((r) => setTimeout(r, 2500))
+      const app2 = await detectMeetingApp().catch(() => null)
+      const wins = await listWindows()
+      const joined = app2 ? await meetingActive(app2, wins) : false
+      if (joined && !session.capturing && cfg.enabled) {
+        await session.startCapture('plan').catch((e) => logger?.warn?.('[soulmirror] 计划入会后开始采集失败：' + e.message))
+      }
+      return joined
+    } catch (e) {
+      return e && e.message ? e.message : String(e)
+    }
+  }
+  function ensurePlannerTimer() {
+    if (plannerTimer || testMode) return
+    plannerTimer = setInterval(async () => {
+      try {
+        if (!cfg.enabled) return
+        const plans = duePlans(loadPlanner(), Date.now())
+        for (const plan of plans) {
+          logger?.info?.('[soulmirror] 计划到点入会：' + plan.title + '（' + (plan.code || plan.url) + '）')
+          const r = await joinFromPlan(plan)
+          if (r === true) {
+            savePlanner(markJoined(loadPlanner(), plan.id, { result: 'joined' }))
+            journal.append('plan.join', { id: plan.id, ok: true })
+          } else {
+            const tries = Number(plan.joinTries) || 0
+            savePlanner(markAttempt(loadPlanner(), plan.id, { result: String(r).slice(0, 100) }))
+            // 连续 3 次失败就不再重复点（避免一直刷客户端）
+            if (tries + 1 >= 3) logger?.warn?.('[soulmirror] 计划入会连续失败 3 次，暂停：' + plan.title + '：' + r)
+            journal.append('plan.join', { id: plan.id, ok: false, error: String(r).slice(0, 120) })
+          }
+        }
+      } catch (e) { logger?.warn?.('[soulmirror] 计划巡检失败：' + e.message) }
+    }, 15000)
+    plannerTimer.unref?.()
+  }
+  // 计划巡检定时器可重复清理（插件卸载/重载都不留残余 timer）
+  ctx.effect(() => () => {
+    try { if (plannerTimer) { clearInterval(plannerTimer); plannerTimer = null } } catch { /* ignore */ }
+  })
   const KB_INDEX_FILE = join(CONFIG_DIR, 'kb-index.json')
   /** 词典仓：越用越准的专有名词（独立文件，便于手工编辑/备份） */
   const DICT_FILE = join(CONFIG_DIR, 'dictionary.json')
@@ -3076,6 +3152,8 @@ export function apply(ctx, config, deps = {}) {
    */
   /** 最近一次采集体检结果（界面与 /status 可读） */
   let lastPreflight = null
+  /** 我们自己（链接/计划/工具）入会的时间；0 = 不是我们入的 */
+  let joinedByUsAt = 0
 
   async function collectPreflightEnv({ probeNet = false } = {}) {
     const env = {
@@ -4346,6 +4424,36 @@ export function apply(ctx, config, deps = {}) {
       }
     }
 
+  ctx.tools.register(defineTool({
+    name: 'meeting_plan_add',
+    description:
+      '把一场会议交给插件自己处理：落盘到会议计划表，插件到点（开始前 leadMs，默认 60 秒）自己入会、开始采集；散会后自动停并出纪要。不需要建 DSH 定时任务，也不依赖对话轮次。',
+    parameters: {
+      title: { type: 'string', description: '会议主题' },
+      url: { type: 'string', description: '入会链接（优先用）' },
+      code: { type: 'string', description: '会议号（没有链接时用）' },
+      start: { type: 'string', description: '开始时间，ISO 8601 带时区，例如 2026-11-24T16:00:00+08:00' },
+      durationMin: { type: 'number', description: '时长（分钟），默认 30' },
+      leadMs: { type: 'number', description: '提前多少毫秒入会，默认 60000' },
+    },
+    output: OUT({ added: { type: 'boolean' }, plans: { type: 'number' } }),
+    execute: wrap('meeting_plan_add', async (a) => {
+      const r = addPlan(loadPlanner(), {
+        title: a.title, url: a.url, code: a.code,
+        start: a.start, durationMin: a.durationMin, leadMs: a.leadMs,
+      })
+      if (!r.added) return { ok: false, added: false, plans: loadPlanner().plans.length, result: '会议信息不完整（至少要给 start + 链接或会议号）' }
+      savePlanner(r.planner)
+      ensurePlannerTimer()
+      const p2 = r.plan
+      const when = p2 ? new Date(p2.startMs).toLocaleString('zh-CN', { hour12: false }) : ''
+      return {
+        ok: true, added: true, plans: r.planner.plans.length,
+        result: '已交给插件：' + (p2 ? p2.title : '会议') + '（' + when + ' 开始，提前 ' + Math.round((p2 ? p2.leadMs : 0) / 1000) + ' 秒入会）\n计划表：' + PLAN_FILE,
+      }
+    }),
+  }))
+
   const joinTool = defineTool({
     name: 'meeting_join',
     description:
@@ -4378,7 +4486,7 @@ export function apply(ctx, config, deps = {}) {
       for (let i = 0; i < 15; i++) {
         await new Promise((r) => setTimeout(r, 1000))
         const wins0 = await listWindows().catch(() => [])
-        if (joinedAfterOpening(wins0, urlApp)) return { ok: true, result: '已通过链接入会：' + rawUrl }
+        if (joinedAfterOpening(wins0, urlApp)) { joinedByUsAt = Date.now(); return { ok: true, result: '已通过链接入会：' + rawUrl } }
       }
       return { ok: false, needsComputerUse: true, attemptCount: 1, result: '已打开链接但没检测到入会：' + rawUrl + '\n（可能需要在客户端里确认一下，或链接已过期）\n程序路径已试过 1 次：接下来请用 computer-use 看屏幕点一次' }
     }
@@ -4452,6 +4560,7 @@ export function apply(ctx, config, deps = {}) {
           await click(app.title, 'Close', opts).catch(() => undefined)
           return { ok: false, needsComputerUse: true, attemptCount: 1, result: steps.join('\n') + '\n移动会议返回：' + err + '\n程序路径已试过 1 次：接下来请用 computer-use 看屏幕点一次' }
         }
+        if (joined) joinedByUsAt = Date.now()
         return { ok: true, result: steps.join('\n') + '\n' + (joined ? '已进入会议' : '尚未确认进入会议，可用 meeting_status 复查') }
       }
 
@@ -7415,8 +7524,19 @@ export function apply(ctx, config, deps = {}) {
     } catch { mic = '' }
     const lines = Array.isArray(session.transcript) ? session.transcript : []
     const lastT = lines.length ? Date.parse((lines[lines.length - 1] || {}).t || '') || 0 : 0
+    // 客户端窗口还在吗？（进程名命中即可：窗口还在 ≠ 已散会）
+    let clientAlive = false
+    try {
+      const winsNow = await listWindows()
+      clientAlive = (winsNow || []).some((w) => {
+        const proc = String(w.proc || '').toLowerCase()
+        return proc.includes('wemeet') || proc.includes('cloudmeeting') || proc.includes('ydmeet')
+      })
+    } catch { clientAlive = false }
     return {
       ...base,
+      joinedByUs: joinedByUsAt > 0,
+      clientAlive,
       micHeld: !!mic,
       micLabel: typeof mic === 'string' ? mic : '',
       peak,
@@ -7430,6 +7550,8 @@ export function apply(ctx, config, deps = {}) {
     return shouldAutoStop({
       capturing: ev.capturing,
       meetingSeen: ev.meetingSeen,
+      joinedByUs: !!ev.joinedByUs,
+      clientAlive: !!ev.clientAlive,
       micHeld: ev.micHeld,
       peak: ev.peak,
       silentSec: ev.silentSec,

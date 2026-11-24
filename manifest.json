@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.5.17",
+  "version": "1.5.18",
   "files": [
     {
       "path": "index.js",
-      "sha256": "b52d03620712bafe9e46b05132fe6ecc6f950e5bc3d2b55b35116bd049a38b90",
-      "bytes": 473179
+      "sha256": "7e8c8a758a4caace20e884e09b827cb3ead80635e3af5095ff6681cee648f7ef",
+      "bytes": 479636
     },
     {
       "path": "lib/action-items.js",
@@ -204,8 +204,8 @@
     },
     {
       "path": "lib/join-url.js",
-      "sha256": "beb676bab3a061a724366b3ad08c764308717312d65f958953fbf5abc51534e3",
-      "bytes": 2469
+      "sha256": "f74b0de6e94d7c5b30780d827bbf5fe5d51d6088eb69d04564dfaf31c0b7b900",
+      "bytes": 3336
     },
     {
       "path": "lib/journal.js",
@@ -234,8 +234,8 @@
     },
     {
       "path": "lib/lifecycle.js",
-      "sha256": "ad0abdd54067713de6f2306c07a698c87a9a156e9b62e544d01d5880477aff90",
-      "bytes": 19928
+      "sha256": "7488c739b0a4d244c556c3b6fbf58b9eb3df075c9fedea48c2be9faa2978dfde",
+      "bytes": 20737
     },
     {
       "path": "lib/live-polish.js",
@@ -261,6 +261,11 @@
       "path": "lib/meeting-name.js",
       "sha256": "ad284d48b53124645456ad856c838f5d2877538f59ca920e1ff10dd2866a1035",
       "bytes": 3471
+    },
+    {
+      "path": "lib/meeting-planner.js",
+      "sha256": "3e4310b525f553b4d2eb52a88a9c69c810bc07c28d214661385cd53c082db8a8",
+      "bytes": 5807
     },
     {
       "path": "lib/meeting-record.js",
@@ -529,7 +534,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "77627c86441d72f7b58d70d8fedb0141258da112d485795ecaf907c40341c788",
+      "sha256": "308b2dfc0265502904482832d7933e84c7192da9f82d3863135ec321409283dd",
       "bytes": 3948
     },
     {
@@ -614,12 +619,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "4486761d808bf8627261f857aeb0264b66c5c361b1cc9656254a7aac85490694",
+      "sha256": "5d04020995d890f19d7b8d5f1e947baac3e0e5b27ec862d3ebad704899d8f02e",
       "bytes": 19790
     },
     {
       "path": "package.json",
-      "sha256": "ffa6e4001dc6cbe27f50c11e2c537b018f38136bbd32962497c5a31edfc57f1a",
+      "sha256": "1168dbef3f9525b0986e013460cd7fe22e1839c229f4cda47253b812b4dc037b",
       "bytes": 2241
     },
     {

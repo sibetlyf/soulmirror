@@ -45,3 +45,17 @@ test('joinedAfterOpening：多进程变体也能识别', () => {
   const app2 = { name: '腾讯会议', proc: 'WeMeet' }
   assert.equal(joinedAfterOpening([{ proc: 'wemeetapp', title: '周会' }], app2), false)
 })
+
+test('首页与内部窗口不能判成已入会（真实事故：链接"成功"但没进会）', () => {
+  const app = { name: '腾讯会议', title: '腾讯会议', proc: 'wemeetapp' }
+  const home = [
+    { proc: 'wemeetapp', title: '腾讯会议', cls: 'BaseDialog' },
+    { proc: 'wemeetapp', title: 'wemeetapp', cls: 'BaseDialog' },
+  ]
+  assert.equal(joinedAfterOpening(home, app), false, '首页 + wemeetapp 内部窗不是会中')
+  assert.equal(joinedAfterOpening([{ proc: 'wemeetapp', title: '加入会议', cls: 'join_meeting::JoinMeetingDialog' }], app), false, '入会对话框不是会中')
+  assert.equal(joinedAfterOpening([{ proc: 'wemeetapp', title: '预定会议', cls: 'BaseDialog' }], app), false, '预定会议不是会中')
+  // 真正的会中信号要认
+  assert.equal(joinedAfterOpening([{ proc: 'wemeetapp', title: '临时会议', cls: 'BaseDialog' }], app), true, '标题变成会议主题 = 会中')
+  assert.equal(joinedAfterOpening([{ proc: 'wemeetapp', title: '', cls: 'VideoMainWindow' }], app), true, '强证据类名 = 会中')
+})
