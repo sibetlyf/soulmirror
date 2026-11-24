@@ -1,6 +1,6 @@
 # SoulMirror · 会议助手
 
-当前版本 **1.0.0**（存储格式 v1）· 变更见 [CHANGELOG.md](CHANGELOG.md) · 策略见 [docs/versioning.md](docs/versioning.md)
+当前版本 **1.5.17**（存储格式 v1）· 变更见 [CHANGELOG.md](CHANGELOG.md) · 策略见 [docs/versioning.md](docs/versioning.md)
 
 > 一个会**听**、会**记**、偶尔**说话**的会议伙伴。
 > 它是 DSH 的插件，不是独立应用。
@@ -34,8 +34,6 @@
 | 环回采集 | 映，不是搜 | 只采声音，不录屏不录人 |
 | 实时转写 | 影随形，不先于形 | 半句与整句只留一行（`replaces`） |
 | 账本 | 改也要留痕 | `transcript.jsonl` 只增不改 |
-| 去重与回声 | 镜不照镜 | 回声防护，避免无限反射 |
-| 断线缺口 | 缺而不掩 | `〔断线约 3 秒〕`，不假装没发生 |
 | 演练模式 | 镜中花 | 不连真实会议也能跑全链路 |
 | 未整理恢复 | 续影 | 账本还在，就能补出纪要 |
 
@@ -44,9 +42,7 @@
 | 功能 | 禅意 | 落到代码 |
 |---|---|---|
 | 四层人格 | 魂有层 | `SOUL / IDENTITY / USER / STATE`，变化速率不同 |
-| 记忆 | 会忘 | 半衰期 3 天，`0.5^(dt/3d)` |
 | 信念 | 能生也能死 | `seed 0.3 → tree 0.85`，反驳 −0.25，弱到 0.02 枯死 |
-| 情绪 | 成地貌 | 六情绪 → 光原/湖/火山/雾/山谷/峰 |
 | 沉默 | 間 | 只在被叫、值得追问、明确要求时开口 |
 | 一场会一条记录 | 一期一会 | 同键 + 未结束 + 45 分钟内复用目录 |
 | 判定会话轮换 | 初心 | 每 200 轮或 45 分钟换新，避免被历史锚住 |
@@ -85,6 +81,19 @@
 
 能力细节：[docs/features.md](docs/features.md) · 工具清单：[docs/tools.md](docs/tools.md)
 
+### 🆕 1.5.x 里新增的（2026-11）
+
+| 能力 | 版本 | 一句话 |
+|---|---|---|
+| 双路采集 | 1.5.0 | 环回 + 麦克风混音，别人和你自己的声音都进转写 |
+| 自动停止 | 1.4.x | 散会 30–135 秒内自动停（窗口/麦克风/音量三重证据） |
+| 分段转写 | 1.5.3 | 超长录音按 80MB 分段识别，不再因"文件过大"整场失败 |
+| 纪要带摘要 | 1.5.2 | 开头 ≤300 字总结，并剥掉模型的思考过程 |
+| 实时润色 | 1.5.14 | 整句落盘后异步整理；`/status` 给 p50/p95 |
+| 边说边润 | 1.5.15 | partial 也润（只影响显示），4 字起步 / 800ms 冷却 |
+| 词典 + 知识库 | 1.5.13–1.5.17 | 知识库索引落盘增量；纪要联动历史，词典命中回写 |
+| 入会经验库 | 1.5.11 | computer-use 成功入会即落盘步骤，下次先照做 |
+
 ---
 
 ## 📦 运行所需
@@ -98,6 +107,7 @@
 | **DashScope Key** | 语音识别与合成（阿里百炼），也可填兼容服务 |
 | **一个模型** | 除语音外**默认跟随 DSH 会话模型**，不用单独配；想固定来源可填 `brain.sourceSessionId` |
 | **虚拟声卡** | 只有"发言"需要（如 VB-CABLE）；只开会不发言可以不装 |
+| **Node 22+** | 与 package.json 的 engines 一致；零原生依赖（mbridge.exe 随包分发） |
 
 ### 可选插件
 
@@ -109,14 +119,6 @@
 
 **可选插件没装时，对应功能会明确拒绝并提示安装，不会静默降级**；面板「安装体检」可一键安装。
 
-### 环境要求
-
-- Node.js **22+**（与 `package.json` 的 `engines` 一致；低于 22 会直接报错）
-- 零第三方原生依赖：`mbridge.exe` 随包分发（也可用系统 `csc` 重编）
-
-完整清单：[docs/requirements.md](docs/requirements.md)
-
----
 
 ## 🚀 上手
 
@@ -187,13 +189,11 @@ dsh plugin --profile web add link:~/.dsh/plugins/soulmirror
 ## ⚠️ 两条必须知道的限制
 
 1. **电脑休眠 / DSH 退出时，到点自动参会不会触发**——固有限制，不是 bug。
-2. **会议软件改版可能让自动化失效**：入会、静音依赖控件定位，失效时快速报错而不是卡死，可用 `meeting_ui` 手动兜底。其余限制见 [docs/troubleshooting.md](docs/troubleshooting.md)，不粉饰。
-
----
+2. **会议软件改版可能让自动化失效**：入会/静音依赖控件定位，失效时快速报错不卡死，可用 `meeting_ui` 兜底。
+   其余限制见 [docs/troubleshooting.md](docs/troubleshooting.md)，不粉饰。
 
 ## 🙏 致谢
 
-dsh-pet（桌面宠物协议）、dsh-knowledge（知识库）、
-DashScope / paraformer / cosyvoice。
+dsh-pet（桌宠协议）、dsh-knowledge（知识库）、DashScope / paraformer / cosyvoice。
 
 第三方许可见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。

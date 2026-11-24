@@ -614,7 +614,7 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "bbbe8881bc1bacb640759501240bd19d2568bc910d491c3f0e878c056420e652",
+      "sha256": "4486761d808bf8627261f857aeb0264b66c5c361b1cc9656254a7aac85490694",
       "bytes": 19790
     },
     {
@@ -624,8 +624,8 @@
     },
     {
       "path": "README.md",
-      "sha256": "44f156f70c613bf2a61c3729ca6ef8d25ec90d50b85bc4945e86691c52020589",
-      "bytes": 8522
+      "sha256": "f0b7ed1d5bbedec1ce9869dd7223928dea3b4aa01d388fda898a42d6023d3213",
+      "bytes": 8908
     },
     {
       "path": "tools/hold.ps1",
