@@ -129,6 +129,7 @@ import { isJoinUrl, isBareCode, extractJoinUrl, joinedAfterOpening } from './lib
 import { resolveApiKey, resolveDashScopeKey, keyInfo } from './lib/env.js'
 import { CalibrationRunner, buildCalibrationPrompt } from './lib/calibrate-agent.js'
 import { buildVisualJoinPrompt, visualJoined, visualVerdict } from './lib/visual-join.js'
+import { emptyDictionary, loadDictionary, saveDictionary, buildDictionaryBlock, upsertTerm, allocateHotwords, countHits, importFromKnowledge } from './lib/dictionary.js'
 import { loadPlaybook, savePlaybook, upsertEntry, buildPlaybookHint, parseVisualReport } from './lib/join-playbook.js'
 import { findMeeting, findMeetingInEvent, AutoJoinGate, isUserAuthoredEvent } from './lib/auto-join.js'
 import { normalizeApps, detectRunningApps, pickAutoApp, inferProc, listPresets, scoreWindow } from './lib/apps.js'
@@ -2787,6 +2788,19 @@ export function apply(ctx, config, deps = {}) {
    * 只索引纪要文本（title + 正文），不索引音频；内容哈希去重，重启不重算。
    */
   const KB_INDEX_FILE = join(CONFIG_DIR, 'kb-index.json')
+  /** 词典仓：越用越准的专有名词（独立文件，便于手工编辑/备份） */
+  const DICT_FILE = join(CONFIG_DIR, 'dictionary.json')
+  let dictCache = null
+  function dictStore() {
+    if (!dictCache) {
+      try { dictCache = loadDictionary(DICT_FILE) } catch { dictCache = emptyDictionary() }
+    }
+    return dictCache
+  }
+  function saveDictStore(next) {
+    dictCache = next
+    try { saveDictionary(DICT_FILE, next) } catch (e) { logger?.warn?.('[soulmirror] 词典写盘失败：' + e.message) }
+  }
   let kbStore = loadKbStore(KB_INDEX_FILE)
   let kbBuiltAt = 0
   function rebuildKbIndex({ force = false } = {}) {
@@ -2813,6 +2827,20 @@ export function apply(ctx, config, deps = {}) {
       try { saveKbStore(KB_INDEX_FILE, kbStore) } catch (e) { logger?.warn?.('[soulmirror] 知识库索引写盘失败：' + e.message) }
     }
     kbBuiltAt = nowMs
+    // 越用越聪明：从索引里抽专名候选，进词典"待确认"队列（**不自动入库**，等用户确认）
+    try {
+      if (kbStore.docs.length) {
+        const terms = kbExtractTerms(kbStore.docs, { limit: 20 })
+        const before = dictStore().pending.length
+        const nextDict = importFromKnowledge(dictStore(), terms, 'knowledge')
+        if (nextDict.pending.length !== before) {
+          saveDictStore(nextDict)
+          logger?.info?.('[soulmirror] 词典候选 +' + (nextDict.pending.length - before) + '（待确认，共 ' + nextDict.pending.length + ' 条）')
+        }
+      }
+    } catch (e) {
+      logger?.warn?.('[soulmirror] 词典候选生成失败：' + e.message)
+    }
     if (r.added || r.updated) logger?.info?.('[soulmirror] 知识库索引更新：新增 ' + r.added + ' / 更新 ' + r.updated + ' / 不变 ' + r.unchanged)
     return { added: r.added, updated: r.updated, unchanged: r.unchanged, docs: kbStore.docs.length }
   }
@@ -7254,15 +7282,40 @@ export function apply(ctx, config, deps = {}) {
         historyMissed = true
         logger?.warn?.('[soulmirror] 历史纪要读取失败，本次按无历史生成：' + e.message)
       }
+      // 知识库联动：按本次转写检索以往纪要/文档，给纪要"了解之前提到的事情"
+      // 也把词典（统一写法）带上，让同音词/简称写得一致；两段都独立 fail-open。
+      let kbBlock = ''
+      try {
+        kbBlock = knowledgeBlockFor(transcript)
+        if (kbBlock) logger?.info?.('[soulmirror] 纪要知识库参考：' + kbBlock.length + ' 字（' + kbStore.docs.length + ' 篇在库）')
+      } catch (e) {
+        logger?.warn?.('[soulmirror] 知识库检索失败，按无知识库生成：' + e.message)
+      }
+      let dictBlock = ''
+      try {
+        dictBlock = buildDictionaryBlock(dictStore())
+      } catch (e) {
+        logger?.warn?.('[soulmirror] 词典读取失败：' + e.message)
+      }
       const raw = await minutesCompleter([
         { role: 'system', content: buildMinutesSystemPrompt({ history: historyBlock }) },
-        { role: 'user', content: buildMinutesUserPrompt({ transcript, meta: known, historyBlock }) },
+        { role: 'user', content: buildMinutesUserPrompt({ transcript, meta: known, historyBlock, knowledgeBlock: kbBlock, dictionaryBlock: dictBlock }) },
       ], { dir: task.dir })
       task.assertActive()
       if (!raw || !String(raw).trim()) throw new Error('DSH 会话模型返回空纪要')
       // 后处理：剥掉"说话人1："这类标签，补上"四、纪要人"的真实作者与时间
       const md = finalizeMinutes(raw, { author: known.author, at: known.endedAt || localStamp('') })
       if (!md.trim()) throw new Error('纪要清洗后为空，未保存')
+      // 越用越准：把本次转写里真正出现的词条命中 +1（只影响排序，不新增词条）
+      try {
+        const { store: nextDict, hits } = countHits(dictStore(), transcript)
+        if (hits.length) {
+          saveDictStore(nextDict)
+          logger?.info?.('[soulmirror] 词典命中回写：' + hits.length + ' 个（' + hits.slice(0, 5).join('、') + '）')
+        }
+      } catch (e) {
+        logger?.warn?.('[soulmirror] 词典命中回写失败：' + e.message)
+      }
       const saved = await persistMinutesFile(join(task.dir,'minutes.md'),md)
       task.assertActive()
       saveMeta(task.dir,{minutesAt:new Date().toISOString(),minutesSource:'dsh-session',minutesPath:saved.path})

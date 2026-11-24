@@ -7,7 +7,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  emptyDictionary, upsertTerm, noteHit, allocateHotwords, buildDictionaryBlock,
+  emptyDictionary, upsertTerm, noteHit, allocateHotwords, buildDictionaryBlock, loadDictionary, saveDictionary, countHits,
   suggestTerm, confirmSuggestion, importFromKnowledge, HOTWORD_BUDGET_CHARS,
 } from '../lib/dictionary.js'
 import {
@@ -122,4 +122,37 @@ test('知识库：抽专有名词候选（供词典确认，不自动入库）',
   assert.ok(terms.length > 0)
   assert.ok(terms.some((w) => /openless|tencent|腾讯会议/i.test(w) || w.length >= 2))
   assert.ok(terms.length <= 40)
+})
+
+test('词典：命中回写只加计数、不新增词条；排序跟着变', () => {
+  let s = emptyDictionary()
+  s = upsertTerm(s, { word: '腾讯会议', kind: 'product' })
+  s = upsertTerm(s, { word: '飞书', kind: 'product' })
+  const before = s.terms.length
+  const r = countHits(s, '今天用腾讯会议开会，顺带提了腾讯会议的录制')
+  assert.equal(r.store.terms.length, before, '回写不许新增词条')
+  assert.include ? null : null
+  assert.ok(r.hits.includes('腾讯会议'), '出现的词要记命中')
+  assert.equal(r.hits.includes('飞书'), false, '没出现的不记')
+  // 命中高的排前面（热词分配会用到）
+  const words = allocateHotwords(r.store)
+  assert.equal(words[0], '腾讯会议')
+})
+
+test('词典仓：写读往返 + 坏文件退回空库', async () => {
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs')
+  const { tmpdir } = await import('node:os')
+  const { join } = await import('node:path')
+  const dir = mkdtempSync(join(tmpdir(), 'sm-dict-'))
+  const file = join(dir, 'dictionary.json')
+  try {
+    let s = upsertTerm(emptyDictionary(), { word: 'SoulMirror', kind: 'product', note: '会议助手' })
+    s = upsertTerm(s, { word: '腾讯会议', manual: true })
+    saveDictionary(file, s)
+    const back = loadDictionary(file)
+    assert.equal(back.terms.length, 2)
+    assert.ok(back.terms.some((t) => t.word === 'SoulMirror' && t.note === '会议助手'))
+    writeFileSync(file, '{ 坏 JSON')
+    assert.equal(loadDictionary(file).terms.length, 0, '坏文件退回空库')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

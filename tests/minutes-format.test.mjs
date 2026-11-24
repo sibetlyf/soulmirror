@@ -143,3 +143,21 @@ test('混进正文的思考/英文推理段会被剥掉（真实事故回归）'
   assert.match(out, /决定把生图改成效果优先/, '正文不能被误删')
   assert.match(out, /## 摘要/, '剥完后仍要有摘要')
 })
+
+test('纪要提示词：带上知识库参考与词典，且明确"只用于理解、不照抄成结论"', () => {
+  const out = buildMinutesUserPrompt({
+    transcript: '说话人1：那个继续做上周的方案',
+    meta: { title: '周会' },
+    historyBlock: '【历史】上周定了三件事',
+    knowledgeBlock: '【知识库参考】站会纪要：周五交付',
+    dictionaryBlock: '【词典】飞书：不是飞轮',
+  })
+  assert.match(out, /知识库参考/, '必须带知识库片段')
+  assert.match(out, /不要照抄成结论/, '必须防止模型把参考当结论')
+  assert.match(out, /本机词典/, '必须带词典统一写法')
+  assert.match(out, /历史/, '历史连续性不能丢')
+  assert.match(out, /会议转写/, '转写仍然在最后')
+  // 顺序：知识/词典/历史 在转写之前
+  assert.ok(out.indexOf('知识库参考') < out.indexOf('会议转写'))
+  assert.ok(out.indexOf('本机词典') < out.indexOf('会议转写'))
+})

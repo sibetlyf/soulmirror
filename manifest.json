@@ -1,11 +1,11 @@
 {
   "name": "soulmirror",
-  "version": "1.5.16",
+  "version": "1.5.17",
   "files": [
     {
       "path": "index.js",
-      "sha256": "49621cc34cbbaa2ae53a2e81a1782a4c96c26f89ed5db33c49b7f2c5518cc2b0",
-      "bytes": 470435
+      "sha256": "b52d03620712bafe9e46b05132fe6ecc6f950e5bc3d2b55b35116bd049a38b90",
+      "bytes": 473179
     },
     {
       "path": "lib/action-items.js",
@@ -159,8 +159,8 @@
     },
     {
       "path": "lib/dictionary.js",
-      "sha256": "e4780d6584e620ec6f17ed4a15a798487b858c7d570c71d9a7940f9cf7bf0bb2",
-      "bytes": 6851
+      "sha256": "2b091c305f373607b0f19a752b4f438203dc6e50040d052badb21aabc0755796",
+      "bytes": 8538
     },
     {
       "path": "lib/dsh-llm.js",
@@ -284,8 +284,8 @@
     },
     {
       "path": "lib/minutes-format.js",
-      "sha256": "2e94a38d0464097498c2721c16e1ac4db1a218b1d56a4ea019c74998de65c1c8",
-      "bytes": 14404
+      "sha256": "6e4c29ecbd5995713912bc0aba90e6688044ab9355577ef940f854be8c7d4608",
+      "bytes": 15031
     },
     {
       "path": "lib/minutes-history.js",
@@ -529,7 +529,7 @@
     },
     {
       "path": "lib/version.js",
-      "sha256": "bfedc2c2441f0f8f51cb21e66612cb7d759d1ddbe668313533ea07612f4e7941",
+      "sha256": "77627c86441d72f7b58d70d8fedb0141258da112d485795ecaf907c40341c788",
       "bytes": 3948
     },
     {
@@ -614,12 +614,12 @@
     },
     {
       "path": "manifest.json",
-      "sha256": "14b8fcae449dc222433996a135132d911acc3a035396e9571b4d1b6e3f2712d0",
-      "bytes": 19640
+      "sha256": "40596ae630918f3830dc4fc840908ef808ed05a0d9002a976db047562e7697f2",
+      "bytes": 19790
     },
     {
       "path": "package.json",
-      "sha256": "72cd25339071a8cac9fc26b0e9876e4672ed49ad4f3b6aaea9208fbd4a603443",
+      "sha256": "ffa6e4001dc6cbe27f50c11e2c537b018f38136bbd32962497c5a31edfc57f1a",
       "bytes": 2241
     },
     {
