@@ -161,3 +161,20 @@ test('纪要提示词：带上知识库参考与词典，且明确"只用于理�
   assert.ok(out.indexOf('知识库参考') < out.indexOf('会议转写'))
   assert.ok(out.indexOf('本机词典') < out.indexOf('会议转写'))
 })
+
+test('重复摘要只留第一段；纯英文脚手架行（Count/Section）必须剥掉', () => {
+  const dirty = [
+    '# 会议纪要', '', '## 摘要', '本次为任务状态跟进会。', '',
+    'Count ~ 250ish. Fine.', '',
+    'Section 1: 围绕主题说了什么，问题…', '',
+    '## 摘要', '本次会议跟进任务状态与客户端显示问题。', '',
+    '## 一、会议基本信息', '- 时间：2026-11-24', '',
+    '## 四、纪要人', '- 整理：李亚峰',
+  ].join('\n')
+  const out = finalizeMinutes(dirty, { author: '李亚峰', at: '2026-11-24 16:31' })
+  assert.equal((out.match(/## 摘要/g) || []).length, 1, '摘要只能有一段')
+  assert.match(out, /本次为任务状态跟进会/, '保留第一段摘要')
+  assert.equal(/Count ~/.test(out), false, '英文脚手架不能进纪要')
+  assert.equal(/Section 1:/.test(out), false, 'Section 脚手架不能进纪要')
+  assert.match(out, /## 一、会议基本信息/, '正文不能被误删')
+})
